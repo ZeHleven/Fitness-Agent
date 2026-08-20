@@ -1,0 +1,229 @@
+.workouts-page {
+  padding-bottom: 60px;
+}
+
+.page-heading,
+.section-row,
+.plan-heading,
+.training-day,
+.active-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.agent-entry {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  border-color: #d5e5d7;
+  background: linear-gradient(135deg, #ffffff 0%, #eef7e9 100%);
+}
+
+.agent-entry-mark {
+  display: flex;
+  width: 76px;
+  height: 76px;
+  flex: 0 0 76px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 24px;
+  background: #163d2b;
+  color: #d5f06e;
+  font-size: 38px;
+  font-weight: 900;
+}
+
+.agent-entry-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.agent-entry-title,
+.agent-entry-subtitle {
+  display: block;
+}
+
+.agent-entry-title {
+  font-size: 29px;
+  font-weight: 800;
+}
+
+.agent-entry-subtitle {
+  margin-top: 5px;
+  color: #718178;
+  font-size: 22px;
+}
+
+.agent-entry-action {
+  color: #1d6b49;
+  font-size: 24px;
+  font-weight: 750;
+}
+
+.page-heading {
+  padding: 18px 4px 30px;
+}
+
+.eyebrow {
+  display: block;
+  color: #718178;
+  font-size: 24px;
+}
+
+.page-title {
+  display: block;
+  margin-top: 4px;
+  font-size: 48px;
+  font-weight: 850;
+}
+
+.logout,
+.history-link {
+  color: #1d6b49;
+  font-size: 26px;
+  font-weight: 650;
+}
+
+.active-card {
+  border: none;
+  background: #163d2b;
+  color: #ffffff;
+}
+
+.active-tag,
+.ai-tag,
+.archived-tag {
+  display: inline-block;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: #d5f06e;
+  color: #163d2b;
+  font-size: 22px;
+  font-weight: 800;
+}
+
+.archived-tag {
+  background: #edf0ed;
+  color: #718178;
+}
+
+.active-title,
+.plan-name {
+  display: block;
+  margin-top: 14px;
+  font-size: 32px;
+  font-weight: 800;
+}
+
+.active-meta,
+.plan-meta {
+  display: block;
+  margin-top: 8px;
+  color: #c3d4c9;
+  font-size: 24px;
+}
+
+.active-action {
+  font-size: 28px;
+  font-weight: 750;
+}
+
+.section-title,
+.section-heading {
+  font-size: 30px;
+  font-weight: 800;
+}
+
+.section-heading {
+  display: block;
+  margin: 38px 4px 20px;
+}
+
+.metric-grid {
+  display: grid;
+  margin-top: 28px;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+.metric {
+  text-align: center;
+}
+
+.metric-value,
+.metric-label {
+  display: block;
+}
+
+.metric-value {
+  font-size: 36px;
+  font-weight: 850;
+}
+
+.metric-label {
+  margin-top: 6px;
+  color: #718178;
+  font-size: 22px;
+}
+
+.plan-heading {
+  align-items: flex-start;
+  margin-bottom: 18px;
+}
+
+.plan-name {
+  margin-top: 0;
+}
+
+.plan-meta {
+  color: #718178;
+}
+
+.training-day {
+  gap: 18px;
+  padding: 22px 0;
+  border-top: 1px solid #edf1ed;
+}
+
+.day-summary {
+  min-width: 0;
+  flex: 1;
+}
+
+.day-title,
+.day-exercises {
+  display: block;
+}
+
+.day-title {
+  font-size: 27px;
+  font-weight: 750;
+}
+
+.day-exercises {
+  overflow: hidden;
+  margin-top: 7px;
+  color: #718178;
+  font-size: 23px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.start-button {
+  margin: 0;
+  padding: 0 24px;
+  border-radius: 18px;
+  background: #e6f1e9;
+  color: #1d6b49;
+  font-size: 25px;
+  font-weight: 750;
+}
+
+.plan-empty text {
+  display: block;
+}
+
+.generate-button {
+  margin-top: 26px;
+}

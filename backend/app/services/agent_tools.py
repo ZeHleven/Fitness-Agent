@@ -1,0 +1,264 @@
+from __future__ import annotations
+
+from datetime import date
+from typing import Any, Callable
+
+from langchain_core.tools import BaseTool
+from langchain.tools import tool
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.profile import UserProfile
+from app.models.workout import WorkoutPlan
+from app.services.workout_queries import (
+    build_plan_detail,
+    build_session_detail,
+    get_active_user_session,
+    get_workout_progress_summary,
+    list_user_workout_sessions,
+)
+
+
+class NoArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class WorkoutHistoryArguments(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={"examples": [{"limit": 5}]},
+    )
+
+    limit: int = Field(default=5, ge=1, le=20)
+
+
+class WorkoutProgressArguments(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={"examples": [{"weeks": 8}]},
+    )
+
+    weeks: int = Field(default=8, ge=1, le=52)
+
+
+READ_TOOL_IDS: tuple[str, ...] = (
+    "profile.get_summary",
+    "health.get_screening_summary",
+    "plan.get_active",
+    "workout.get_next",
+    "workout.get_active_session",
+    "workout.list_history",
+    "workout.get_progress",
+)
+
+LANGCHAIN_TOOL_NAMES: dict[str, str] = {
+    "profile.get_summary": "profile_get_summary",
+    "health.get_screening_summary": "health_get_screening_summary",
+    "plan.get_active": "plan_get_active",
+    "workout.get_next": "workout_get_next",
+    "workout.get_active_session": "workout_get_active_session",
+    "workout.list_history": "workout_list_history",
+    "workout.get_progress": "workout_get_progress",
+}
+TOOL_ID_BY_LANGCHAIN_NAME = {
+    tool_name: tool_id for tool_id, tool_name in LANGCHAIN_TOOL_NAMES.items()
+}
+
+
+def _profile_summary(profile: UserProfile) -> dict[str, Any]:
+    return {
+        "found": True,
+        "age": profile.age,
+        "gender": profile.gender,
+        "height_cm": profile.height_cm,
+        "weight_kg": profile.weight_kg,
+        "bmi": profile.bmi,
+        "bmi_category": profile.bmi_category,
+        "experience_level": profile.experience_level,
+        "primary_goal": profile.primary_goal,
+        "training_days_per_week": profile.training_days_per_week,
+        "session_duration_min": profile.session_duration_min,
+        "training_location": profile.training_location,
+        "diet_restriction": profile.diet_restriction,
+        "onboarding_completed": profile.onboarding_completed,
+        "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
+    }
+
+
+def _health_summary(profile: UserProfile) -> dict[str, Any]:
+    return {
+        "found": True,
+        "injuries": profile.injuries or [],
+        "chronic_conditions": profile.chronic_conditions or [],
+        "screening_completed": profile.onboarding_completed,
+        "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
+        "medical_boundary": "该信息仅用于训练安全筛查，不构成医疗诊断。",
+    }
+
+
+async def _active_plan(db: AsyncSession, user_id: str) -> WorkoutPlan | None:
+    return await db.scalar(
+        select(WorkoutPlan)
+        .where(
+            WorkoutPlan.user_id == user_id,
+            WorkoutPlan.is_active.is_(True),
+        )
+        .order_by(WorkoutPlan.created_at.desc())
+        .limit(1)
+    )
+
+
+def build_read_tools(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    allowlist: list[str],
+) -> list[BaseTool]:
+    """Build only the routed tools; user identity is closed over, never model input."""
+    unknown = set(allowlist) - set(READ_TOOL_IDS)
+    if unknown:
+        raise ValueError(f"Unknown or non-read Agent tools: {sorted(unknown)}")
+
+    @tool(
+        LANGCHAIN_TOOL_NAMES["profile.get_summary"],
+        args_schema=NoArguments,
+        description=(
+            "读取当前登录用户的基础资料和训练偏好摘要。仅用于回答年龄、身高体重、"
+            "训练目标、经验、频率、时长、地点或饮食偏好；不要用它查询伤病、慢性病、"
+            "训练计划或训练记录。示例：‘我的训练目标是什么？’"
+        ),
+    )
+    async def profile_get_summary() -> dict[str, Any]:
+        profile = await db.scalar(
+            select(UserProfile).where(UserProfile.user_id == user_id)
+        )
+        return _profile_summary(profile) if profile else {"found": False}
+
+    @tool(
+        LANGCHAIN_TOOL_NAMES["health.get_screening_summary"],
+        args_schema=NoArguments,
+        description=(
+            "读取当前登录用户已保存的健康筛查摘要，只包含伤病、慢性疾病和筛查状态。"
+            "仅在用户询问训练限制、伤病或健康风险时使用；不要查询一般资料、计划或进度。"
+            "示例：‘我的膝盖情况会限制哪些训练？’"
+        ),
+    )
+    async def health_get_screening_summary() -> dict[str, Any]:
+        profile = await db.scalar(
+            select(UserProfile).where(UserProfile.user_id == user_id)
+        )
+        return _health_summary(profile) if profile else {"found": False}
+
+    @tool(
+        LANGCHAIN_TOOL_NAMES["plan.get_active"],
+        args_schema=NoArguments,
+        description=(
+            "读取当前登录用户完整的活动训练计划及各训练日动作。仅用于查看整个当前计划；"
+            "如果只问下一次练什么，应使用 workout_get_next。不要查询已经完成的训练记录。"
+            "示例：‘把我现在的一周训练计划列出来。’"
+        ),
+    )
+    async def plan_get_active() -> dict[str, Any]:
+        plan = await _active_plan(db, user_id)
+        if plan is None:
+            return {"found": False}
+        detail = await build_plan_detail(db, plan)
+        return {"found": True, "plan": detail.model_dump(mode="json")}
+
+    @tool(
+        LANGCHAIN_TOOL_NAMES["workout.get_next"],
+        args_schema=NoArguments,
+        description=(
+            "根据当前活动计划和今天的星期，读取下一次计划训练日及动作。仅用于‘下一练’或"
+            "‘今天练什么’；不要用它展示整份计划、历史或正在执行的训练。"
+            "示例：‘我下一练要做哪些动作？’"
+        ),
+    )
+    async def workout_get_next() -> dict[str, Any]:
+        plan = await _active_plan(db, user_id)
+        if plan is None:
+            return {"found": False, "reason": "no_active_plan"}
+        detail = await build_plan_detail(db, plan)
+        scheduled_days = sorted({item.day_of_week for item in detail.exercises})
+        if not scheduled_days:
+            return {"found": False, "reason": "active_plan_has_no_exercises"}
+        today_weekday = date.today().isoweekday()
+        candidates = [day for day in scheduled_days if day >= today_weekday]
+        next_day = candidates[0] if candidates else scheduled_days[0]
+        days_until = (next_day - today_weekday) % 7
+        return {
+            "found": True,
+            "plan_id": detail.id,
+            "plan_name": detail.name,
+            "day_of_week": next_day,
+            "days_until": days_until,
+            "exercises": [
+                item.model_dump(mode="json")
+                for item in detail.exercises
+                if item.day_of_week == next_day
+            ],
+        }
+
+    @tool(
+        LANGCHAIN_TOOL_NAMES["workout.get_active_session"],
+        args_schema=NoArguments,
+        description=(
+            "读取当前登录用户正在进行的训练、目标和已记录训练组。仅用于继续训练或查看"
+            "当前练到哪里；不要查询历史训练或计划安排。示例：‘我刚才记录到第几组？’"
+        ),
+    )
+    async def workout_get_active_session() -> dict[str, Any]:
+        session = await get_active_user_session(db, user_id=user_id)
+        if session is None:
+            return {"found": False}
+        detail = await build_session_detail(db, session)
+        return {"found": True, "session": detail.model_dump(mode="json")}
+
+    @tool(
+        LANGCHAIN_TOOL_NAMES["workout.list_history"],
+        args_schema=WorkoutHistoryArguments,
+        description=(
+            "按时间倒序读取当前登录用户近期训练场次详情，limit 为 1 到 20。仅用于具体历史"
+            "记录；趋势汇总应使用 workout_get_progress。示例：‘列出最近 5 次训练。’"
+        ),
+    )
+    async def workout_list_history(limit: int = 5) -> dict[str, Any]:
+        sessions = await list_user_workout_sessions(
+            db,
+            user_id=user_id,
+            limit=limit,
+        )
+        details = [await build_session_detail(db, item) for item in sessions]
+        return {
+            "count": len(details),
+            "sessions": [item.model_dump(mode="json") for item in details],
+        }
+
+    @tool(
+        LANGCHAIN_TOOL_NAMES["workout.get_progress"],
+        args_schema=WorkoutProgressArguments,
+        description=(
+            "汇总当前登录用户最近若干周的训练次数、组数、次数和负重容量，weeks 为 1 到 52。"
+            "仅用于进度或趋势；具体某次训练应使用 workout_list_history。"
+            "示例：‘总结我最近 8 周的训练进度。’"
+        ),
+    )
+    async def workout_get_progress(weeks: int = 8) -> dict[str, Any]:
+        progress = await get_workout_progress_summary(
+            db,
+            user_id=user_id,
+            weeks=weeks,
+        )
+        return progress.model_dump(mode="json")
+
+    factories: dict[str, Callable[[], BaseTool]] = {
+        "profile.get_summary": lambda: profile_get_summary,
+        "health.get_screening_summary": lambda: health_get_screening_summary,
+        "plan.get_active": lambda: plan_get_active,
+        "workout.get_next": lambda: workout_get_next,
+        "workout.get_active_session": lambda: workout_get_active_session,
+        "workout.list_history": lambda: workout_list_history,
+        "workout.get_progress": lambda: workout_get_progress,
+    }
+    return [factories[tool_id]() for tool_id in allowlist]

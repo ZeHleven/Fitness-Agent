@@ -1,0 +1,201 @@
+import Taro from '@tarojs/taro'
+
+import {
+  clearTokens,
+  getAccessToken,
+  getRefreshToken,
+  saveTokens
+} from './storage'
+import type { TokenResponse } from '../types/api'
+
+const API_BASE_URL = (
+  process.env.TARO_APP_API_BASE_URL || 'http://127.0.0.1:8000/api/v1'
+).replace(/\/$/, '')
+const CLOUD_ENV = process.env.TARO_APP_CLOUD_ENV || ''
+const CLOUD_SERVICE = process.env.TARO_APP_CLOUD_SERVICE || ''
+const USE_CLOUD_TRANSPORT = Boolean(CLOUD_ENV && CLOUD_SERVICE)
+const CLOUD_API_PREFIX = '/api/v1'
+const REQUEST_TIMEOUT_MS = 15000
+
+type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE'
+
+interface RequestOptions {
+  method?: HttpMethod
+  data?: unknown
+  query?: Record<string, string | number | boolean | undefined>
+  authenticated?: boolean
+  timeout?: number
+}
+
+interface ErrorPayload {
+  detail?: string
+}
+
+interface TransportResponse<T> {
+  data: T
+  statusCode: number
+  header?: Record<string, string>
+  errMsg?: string
+}
+
+interface CloudContainerOptions {
+  config: { env: string }
+  path: string
+  method: HttpMethod
+  data?: unknown
+  header: Record<string, string>
+  timeout: number
+}
+
+interface CloudContainerClient {
+  init(config: { env: string; traceUser?: boolean }): void
+  callContainer<T>(options: CloudContainerOptions): Promise<TransportResponse<T>>
+}
+
+let refreshPromise: Promise<string> | null = null
+let cloudInitialized = false
+
+function withQuery(path: string, query?: RequestOptions['query']): string {
+  if (!query) return path
+  const values = Object.entries(query)
+    .filter(([, value]) => value !== undefined)
+    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`)
+  return values.length ? `${path}?${values.join('&')}` : path
+}
+
+function cloudClient(): CloudContainerClient {
+  return Taro.cloud as unknown as CloudContainerClient
+}
+
+export function initializeCloudTransport(): void {
+  if (!USE_CLOUD_TRANSPORT || cloudInitialized) return
+
+  const client = cloudClient()
+  if (!client || typeof client.callContainer !== 'function') {
+    throw new Error('当前微信基础库不支持云托管，请升级微信后重试')
+  }
+  client.init({ env: CLOUD_ENV, traceUser: true })
+  cloudInitialized = true
+}
+
+async function transportRequest<T>(
+  path: string,
+  method: HttpMethod,
+  data: unknown,
+  header: Record<string, string>,
+  timeout = REQUEST_TIMEOUT_MS
+): Promise<TransportResponse<T>> {
+  if (USE_CLOUD_TRANSPORT) {
+    initializeCloudTransport()
+    return cloudClient().callContainer<T>({
+      config: { env: CLOUD_ENV },
+      path: `${CLOUD_API_PREFIX}${path}`,
+      method,
+      data,
+      header: {
+        ...header,
+        'X-WX-SERVICE': CLOUD_SERVICE
+      },
+      timeout
+    })
+  }
+
+  return Taro.request<T>({
+    url: `${API_BASE_URL}${path}`,
+    method,
+    data,
+    header,
+    timeout
+  })
+}
+
+async function refreshAccessToken(): Promise<string> {
+  const refreshToken = getRefreshToken()
+  if (!refreshToken) throw new Error('登录状态已失效，请重新登录')
+
+  const response = await transportRequest<TokenResponse | ErrorPayload>(
+    '/auth/refresh',
+    'POST',
+    { refresh_token: refreshToken },
+    { 'Content-Type': 'application/json' }
+  )
+
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    throw new Error((response.data as ErrorPayload).detail || '登录状态已失效，请重新登录')
+  }
+
+  const tokens = response.data as TokenResponse
+  saveTokens(tokens.access_token, tokens.refresh_token)
+  return tokens.access_token
+}
+
+async function getFreshAccessToken(): Promise<string> {
+  if (!refreshPromise) {
+    refreshPromise = refreshAccessToken().finally(() => {
+      refreshPromise = null
+    })
+  }
+  return refreshPromise
+}
+
+export async function apiRequest<T>(
+  path: string,
+  options: RequestOptions = {},
+  allowRefresh = true
+): Promise<T> {
+  const authenticated = options.authenticated !== false
+  const accessToken = authenticated ? getAccessToken() : ''
+  const response = await transportRequest<T | ErrorPayload>(
+    withQuery(path, options.query),
+    options.method || 'GET',
+    options.data,
+    {
+      'Content-Type': 'application/json',
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {})
+    },
+    options.timeout
+  )
+
+  if (
+    response.statusCode === 401 &&
+    authenticated &&
+    allowRefresh &&
+    getRefreshToken()
+  ) {
+    try {
+      await getFreshAccessToken()
+      return apiRequest<T>(path, options, false)
+    } catch (error) {
+      clearTokens()
+      await Taro.reLaunch({ url: '/pages/login/index' })
+      throw error
+    }
+  }
+
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    const payload = response.data as ErrorPayload
+    throw new Error((payload && payload.detail) || `请求失败（${response.statusCode}）`)
+  }
+
+  return response.data as T
+}
+
+export function errorMessage(error: unknown, fallback: string): string {
+  const friendly = (message: string): string => {
+    if (/callContainer:fail.*timeout|code:\s*102002/i.test(message)) {
+      return `${fallback}（网络连接超时）`
+    }
+    if (message.includes('[object Object]') || /callContainer:fail system error/i.test(message)) {
+      return fallback
+    }
+    return message
+  }
+
+  if (error instanceof Error && error.message) return friendly(error.message)
+  if (error && typeof error === 'object') {
+    const candidate = error as { errMsg?: unknown; message?: unknown }
+    if (typeof candidate.errMsg === 'string' && candidate.errMsg) return friendly(candidate.errMsg)
+    if (typeof candidate.message === 'string' && candidate.message) return friendly(candidate.message)
+  }
+  return fallback
+}

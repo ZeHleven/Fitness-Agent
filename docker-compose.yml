@@ -1,0 +1,70 @@
+services:
+  postgres:
+    build: ./postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fitness}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fitness_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-fitness_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fitness} -d ${POSTGRES_DB:-fitness_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: docker.m.daocloud.io/library/redis:7-alpine
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  bootstrap:
+    build: ./backend
+    env_file: .env
+    command:
+      - sh
+      - -c
+      - alembic upgrade head && python scripts/seed_exercises.py && python scripts/seed_foods.py
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: "no"
+
+  fastapi:
+    build: ./backend
+    env_file: .env
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      RUN_DB_MIGRATIONS_ON_STARTUP: "false"
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  caddy:
+    image: docker.m.daocloud.io/library/caddy:2-alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./Caddyfile.dev:/etc/caddy/Caddyfile
+      - caddy_data:/data
+    depends_on:
+      - fastapi
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  caddy_data:
