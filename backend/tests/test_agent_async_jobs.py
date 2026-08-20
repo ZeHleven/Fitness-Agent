@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
@@ -7,8 +8,14 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from sqlalchemy import func, select
 
 from app.config import settings
-from app.models.agent import AgentMessage, AgentRun
+from app.models.agent import (
+    AgentConversation,
+    AgentMessage,
+    AgentRun,
+    AgentToolCall,
+)
 from app.services.agent_jobs import claim_next_agent_run, process_agent_run
+from app.services.agent_runtime import AgentRunOwnershipLost, execute_agent_run
 
 
 async def _token(client, email: str) -> str:
@@ -107,6 +114,49 @@ async def test_async_agent_submission_is_idempotent_and_pollable(
 
 
 @pytest.mark.asyncio
+async def test_concurrent_idempotent_submissions_share_one_run_and_conversation(
+    client,
+    db_session,
+):
+    token = await _token(client, "agent-concurrent-idempotency@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    payload = {
+        "message": "并发提交也只创建一次",
+        "client_request_id": "concurrent-idempotency-request",
+    }
+
+    first, second = await asyncio.gather(
+        client.post("/api/v1/agent/runs", json=payload, headers=headers),
+        client.post("/api/v1/agent/runs", json=payload, headers=headers),
+    )
+
+    assert first.status_code == 202
+    assert second.status_code == 202
+    assert first.json()["run_id"] == second.json()["run_id"]
+    assert first.json()["conversation_id"] == second.json()["conversation_id"]
+    run_count = await db_session.scalar(
+        select(func.count(AgentRun.id)).where(
+            AgentRun.idempotency_key == payload["client_request_id"]
+        )
+    )
+    conversation_count = await db_session.scalar(
+        select(func.count(AgentConversation.id)).where(
+            AgentConversation.id == first.json()["conversation_id"]
+        )
+    )
+    assert run_count == 1
+    assert conversation_count == 1
+    run_id = first.json()["run_id"]
+    assert await claim_next_agent_run(db_session) == run_id
+    run = await db_session.get(AgentRun, run_id)
+    assert run is not None
+    run.status = "completed"
+    run.completed_at = datetime.now(timezone.utc)
+    run.lease_expires_at = None
+    await db_session.commit()
+
+
+@pytest.mark.asyncio
 async def test_stale_running_agent_job_is_reclaimed(client, db_session):
     token = await _token(client, "agent-reclaim@example.com")
     headers = {"Authorization": f"Bearer {token}"}
@@ -171,6 +221,217 @@ async def test_agent_runs_are_serialized_within_a_conversation(client, db_sessio
     await db_session.commit()
 
     assert await claim_next_agent_run(db_session) == second.json()["run_id"]
+
+
+@pytest.mark.asyncio
+async def test_later_queued_message_does_not_pollute_earlier_run_history(
+    client,
+    db_session,
+    session_factory,
+):
+    token = await _token(client, "agent-history-order@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    first = await client.post(
+        "/api/v1/agent/runs",
+        json={
+            "message": "先回答第一个问题",
+            "client_request_id": "history-order-1",
+        },
+        headers=headers,
+    )
+    second = await client.post(
+        "/api/v1/agent/runs",
+        json={
+            "message": "这是稍后排队的第二个问题",
+            "conversation_id": first.json()["conversation_id"],
+            "client_request_id": "history-order-2",
+        },
+        headers=headers,
+    )
+    invoke_agent = AsyncMock(side_effect=[
+        {"messages": [AIMessage(content="第一个问题的回答")]},
+        {"messages": [AIMessage(content="第二个问题的回答")]},
+    ])
+
+    with (
+        patch.object(settings, "AGENT_INTENT_MODEL_ENABLED", False),
+        patch(
+            "app.services.agent_runtime.invoke_langchain_agent",
+            new=invoke_agent,
+        ),
+    ):
+        assert await claim_next_agent_run(db_session) == first.json()["run_id"]
+        await process_agent_run(session_factory, first.json()["run_id"])
+
+        first_history = invoke_agent.await_args_list[0].kwargs["history"]
+        assert all(
+            item["content"] != "这是稍后排队的第二个问题"
+            for item in first_history
+        )
+
+        assert await claim_next_agent_run(db_session) == second.json()["run_id"]
+        await process_agent_run(session_factory, second.json()["run_id"])
+
+    second_history = invoke_agent.await_args_list[1].kwargs["history"]
+    assert [item["content"] for item in second_history] == [
+        "先回答第一个问题",
+        "第一个问题的回答",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_worker_renews_lease_while_agent_execution_is_running(
+    client,
+    db_session,
+    session_factory,
+):
+    token = await _token(client, "agent-heartbeat@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    response = await client.post(
+        "/api/v1/agent/runs",
+        json={
+            "message": "慢一点回答这个问题",
+            "client_request_id": "heartbeat-request",
+        },
+        headers=headers,
+    )
+    run_id = response.json()["run_id"]
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_agent(*_args, **_kwargs):
+        started.set()
+        await release.wait()
+        return {"messages": [AIMessage(content="慢请求已完成")]}
+
+    with (
+        patch.object(settings, "AGENT_RUN_LEASE_SECONDS", 1),
+        patch.object(settings, "AGENT_INTENT_MODEL_ENABLED", False),
+        patch(
+            "app.services.agent_runtime.invoke_langchain_agent",
+            new=slow_agent,
+        ),
+    ):
+        assert await claim_next_agent_run(db_session) == run_id
+        run = await db_session.get(AgentRun, run_id)
+        assert run is not None
+        first_expiry = run.lease_expires_at
+        task = asyncio.create_task(process_agent_run(session_factory, run_id))
+        try:
+            await asyncio.wait_for(started.wait(), timeout=2)
+            await asyncio.sleep(1.1)
+            await db_session.refresh(run)
+            assert run.lease_expires_at > first_expiry
+            assert run.lease_expires_at > datetime.now(timezone.utc)
+            assert await claim_next_agent_run(db_session) is None
+        finally:
+            release.set()
+            await task
+
+    await db_session.refresh(run)
+    assert run.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_stale_attempt_cannot_write_duplicate_messages_or_tool_audits(
+    client,
+    db_session,
+    session_factory,
+):
+    token = await _token(client, "agent-stale-owner@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    response = await client.post(
+        "/api/v1/agent/runs",
+        json={
+            "message": "我的训练目标是什么？",
+            "client_request_id": "stale-owner-request",
+        },
+        headers=headers,
+    )
+    run_id = response.json()["run_id"]
+    assert await claim_next_agent_run(db_session) == run_id
+    run = await db_session.get(AgentRun, run_id)
+    assert run is not None
+    stale_attempt_count = run.attempt_count
+    run.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    await db_session.commit()
+    assert await claim_next_agent_run(db_session) == run_id
+    await db_session.refresh(run)
+    assert run.attempt_count == stale_attempt_count + 1
+
+    conversation = await db_session.get(AgentConversation, run.conversation_id)
+    user_message = await db_session.scalar(
+        select(AgentMessage).where(
+            AgentMessage.run_id == run_id,
+            AgentMessage.role == "user",
+        )
+    )
+    assert conversation is not None
+    assert user_message is not None
+
+    stale_invoke = AsyncMock(return_value={
+        "messages": [AIMessage(content="过期 worker 的回答")],
+    })
+    with (
+        patch.object(settings, "AGENT_INTENT_MODEL_ENABLED", False),
+        patch(
+            "app.services.agent_runtime.invoke_langchain_agent",
+            new=stale_invoke,
+        ),
+        pytest.raises(AgentRunOwnershipLost),
+    ):
+        await execute_agent_run(
+            db_session,
+            run=run,
+            conversation=conversation,
+            user_message=user_message.content,
+            expected_attempt_count=stale_attempt_count,
+        )
+    stale_invoke.assert_not_awaited()
+
+    recovered_result = {
+        "messages": [
+            HumanMessage(content="我的训练目标是什么？"),
+            AIMessage(
+                content="",
+                tool_calls=[{
+                    "name": "profile_get_summary",
+                    "args": {},
+                    "id": "recovered-profile-call",
+                    "type": "tool_call",
+                }],
+            ),
+            ToolMessage(
+                content=json.dumps({"found": True, "primary_goal": "增肌"}),
+                tool_call_id="recovered-profile-call",
+                name="profile_get_summary",
+            ),
+            AIMessage(content="恢复后的唯一回答"),
+        ]
+    }
+    with (
+        patch.object(settings, "AGENT_INTENT_MODEL_ENABLED", False),
+        patch(
+            "app.services.agent_runtime.invoke_langchain_agent",
+            new=AsyncMock(return_value=recovered_result),
+        ),
+    ):
+        await process_agent_run(session_factory, run_id)
+        await process_agent_run(session_factory, run_id)
+
+    assistant_count = await db_session.scalar(
+        select(func.count(AgentMessage.id)).where(
+            AgentMessage.run_id == run_id,
+            AgentMessage.role == "assistant",
+        )
+    )
+    tool_call_count = await db_session.scalar(
+        select(func.count(AgentToolCall.id)).where(
+            AgentToolCall.run_id == run_id
+        )
+    )
+    assert assistant_count == 1
+    assert tool_call_count == 1
 
 
 @pytest.mark.asyncio

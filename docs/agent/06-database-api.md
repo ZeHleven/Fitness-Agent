@@ -29,3 +29,5 @@
 `agent_runs` 同时承担持久化任务队列：用户与幂等键联合唯一，worker 使用数据库行锁和带期限租约领取任务。容器中断后，租约过期的任务可被其他实例接管；达到最大尝试次数后进入稳定失败状态。
 
 Alembic `0015` 为会话增加 `pending_clarification`，并为 run 增加 `resolved_query`、`references`、`clarification_question` 和 `understanding_version`，使指代、扩展、拆解与澄清决策可以回放和评测。
+
+Alembic `0016` 为每个 run 的助手消息增加部分唯一索引。worker 在最终结果事务中同时写入助手消息和工具审计；即使旧执行 attempt 在租约接管后返回，也不能产生第二份回答或重复审计。

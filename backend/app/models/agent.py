@@ -138,6 +138,16 @@ class AgentRun(Base):
 
 class AgentMessage(Base):
     __tablename__ = "agent_messages"
+    __table_args__ = (
+        Index(
+            "uq_agent_messages_one_assistant_per_run",
+            "run_id",
+            unique=True,
+            postgresql_where=text(
+                "role = 'assistant' AND run_id IS NOT NULL"
+            ),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
     conversation_id: Mapped[str] = mapped_column(

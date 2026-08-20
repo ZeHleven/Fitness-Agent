@@ -13,7 +13,7 @@ from sqlalchemy.orm import aliased
 from app.config import settings
 from app.database import AsyncSessionLocal
 from app.models.agent import AgentConversation, AgentMessage, AgentRun
-from app.services.agent_runtime import execute_agent_run
+from app.services.agent_runtime import AgentRunOwnershipLost, execute_agent_run
 from app.services.ai_client import AIServiceError
 
 
@@ -62,6 +62,7 @@ async def enqueue_agent_run(
     client_request_id: str,
     conversation: AgentConversation | None,
 ) -> EnqueuedAgentRun:
+    requested_conversation = conversation
     existing = await db.scalar(
         select(AgentRun).where(
             AgentRun.user_id == user_id,
@@ -73,7 +74,7 @@ async def enqueue_agent_run(
             db,
             run=existing,
             user_message=user_message,
-            conversation=conversation,
+            conversation=requested_conversation,
         )
         existing_conversation = await db.get(
             AgentConversation,
@@ -104,17 +105,17 @@ async def enqueue_agent_run(
         model_name=settings.AGENT_MODEL,
     )
     db.add(run)
-    await db.flush()
-    db.add(AgentMessage(
-        conversation_id=conversation.id,
-        run_id=run.id,
-        role="user",
-        content=user_message,
-        content_data={"client_request_id": client_request_id},
-    ))
-    conversation.updated_at = datetime.now(timezone.utc)
 
     try:
+        await db.flush()
+        db.add(AgentMessage(
+            conversation_id=conversation.id,
+            run_id=run.id,
+            role="user",
+            content=user_message,
+            content_data={"client_request_id": client_request_id},
+        ))
+        conversation.updated_at = datetime.now(timezone.utc)
         await db.commit()
     except IntegrityError:
         await db.rollback()
@@ -130,7 +131,7 @@ async def enqueue_agent_run(
             db,
             run=existing,
             user_message=user_message,
-            conversation=conversation,
+            conversation=requested_conversation,
         )
         existing_conversation = await db.get(
             AgentConversation,
@@ -205,7 +206,7 @@ async def claim_next_agent_run(db: AsyncSession) -> str | None:
                 )
             ),
         )
-        .order_by(AgentRun.queued_at.asc())
+        .order_by(AgentRun.queued_at.asc(), AgentRun.id.asc())
         .with_for_update(skip_locked=True)
         .limit(1)
     )
@@ -235,6 +236,73 @@ async def claim_next_agent_run(db: AsyncSession) -> str | None:
     return run_id
 
 
+async def renew_agent_run_lease(
+    db: AsyncSession,
+    *,
+    run_id: str,
+    expected_attempt_count: int,
+) -> bool:
+    """Extend a lease only while the same execution attempt still owns the run."""
+    now = datetime.now(timezone.utc)
+    result = await db.execute(
+        update(AgentRun)
+        .where(
+            AgentRun.id == run_id,
+            AgentRun.status == "running",
+            AgentRun.attempt_count == expected_attempt_count,
+        )
+        .values(
+            lease_expires_at=now + timedelta(
+                seconds=settings.AGENT_RUN_LEASE_SECONDS
+            )
+        )
+    )
+    await db.commit()
+    return result.rowcount == 1
+
+
+async def _agent_run_lease_heartbeat(
+    stop_event: asyncio.Event,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    run_id: str,
+    expected_attempt_count: int,
+) -> None:
+    interval = max(
+        0.1,
+        min(30.0, settings.AGENT_RUN_LEASE_SECONDS / 3),
+    )
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval)
+            return
+        except TimeoutError:
+            pass
+
+        try:
+            async with session_factory() as db:
+                renewed = await renew_agent_run_lease(
+                    db,
+                    run_id=run_id,
+                    expected_attempt_count=expected_attempt_count,
+                )
+            if not renewed:
+                logger.warning(
+                    "Agent run lease ownership lost: run_id=%s attempt=%s",
+                    run_id,
+                    expected_attempt_count,
+                )
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Agent run lease renewal failed: run_id=%s attempt=%s",
+                run_id,
+                expected_attempt_count,
+            )
+
+
 async def process_agent_run(
     session_factory: async_sessionmaker[AsyncSession],
     run_id: str,
@@ -243,6 +311,7 @@ async def process_agent_run(
         run = await db.get(AgentRun, run_id)
         if run is None or run.status != "running":
             return
+        expected_attempt_count = run.attempt_count
         conversation = await db.get(AgentConversation, run.conversation_id)
         user_message = await db.scalar(
             select(AgentMessage).where(
@@ -251,37 +320,75 @@ async def process_agent_run(
             )
         )
         if conversation is None or user_message is None:
-            run.status = "failed"
-            run.error_code = "invalid_queued_run"
-            run.completed_at = datetime.now(timezone.utc)
-            run.lease_expires_at = None
+            await db.execute(
+                update(AgentRun)
+                .where(
+                    AgentRun.id == run_id,
+                    AgentRun.status == "running",
+                    AgentRun.attempt_count == expected_attempt_count,
+                )
+                .values(
+                    status="failed",
+                    error_code="invalid_queued_run",
+                    completed_at=datetime.now(timezone.utc),
+                    lease_expires_at=None,
+                )
+            )
             await db.commit()
             return
 
+        heartbeat_stop = asyncio.Event()
+        heartbeat_task = asyncio.create_task(
+            _agent_run_lease_heartbeat(
+                heartbeat_stop,
+                session_factory,
+                run_id=run.id,
+                expected_attempt_count=expected_attempt_count,
+            ),
+            name=f"agent-run-heartbeat-{run.id}",
+        )
         try:
             result = await execute_agent_run(
                 db,
                 run=run,
                 conversation=conversation,
                 user_message=user_message.content,
+                expected_attempt_count=expected_attempt_count,
             )
             logger.info(
                 "Agent async run completed: run_id=%s reply_chars=%s",
                 run_id,
                 len(result.reply),
             )
+        except AgentRunOwnershipLost:
+            logger.warning(
+                "Stale Agent execution discarded: run_id=%s attempt=%s",
+                run_id,
+                expected_attempt_count,
+            )
         except AIServiceError:
             logger.warning("Agent async run failed: run_id=%s", run_id)
         except Exception:
             logger.exception("Unexpected async Agent worker failure: run_id=%s", run_id)
             await db.rollback()
-            failed = await db.get(AgentRun, run_id)
-            if failed is not None and failed.status == "running":
-                failed.status = "failed"
-                failed.error_code = "worker_runtime_error"
-                failed.completed_at = datetime.now(timezone.utc)
-                failed.lease_expires_at = None
-                await db.commit()
+            await db.execute(
+                update(AgentRun)
+                .where(
+                    AgentRun.id == run_id,
+                    AgentRun.status == "running",
+                    AgentRun.attempt_count == expected_attempt_count,
+                )
+                .values(
+                    status="failed",
+                    error_code="worker_runtime_error",
+                    completed_at=datetime.now(timezone.utc),
+                    lease_expires_at=None,
+                )
+            )
+            await db.commit()
+        finally:
+            heartbeat_stop.set()
+            await heartbeat_task
 
 
 async def agent_worker_loop(

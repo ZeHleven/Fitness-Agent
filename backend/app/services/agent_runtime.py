@@ -9,8 +9,9 @@ from typing import Any
 
 from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.config import settings
 from app.models.agent import (
@@ -48,6 +49,70 @@ class AgentRuntimeResult:
     reply: str
     run_id: str
     cards: list[dict[str, Any]] = field(default_factory=list)
+
+
+class AgentRunOwnershipLost(RuntimeError):
+    """Raised when a stale worker attempt tries to persist a run result."""
+
+
+async def _lock_run_ownership(
+    db: AsyncSession,
+    *,
+    run_id: str,
+    expected_attempt_count: int | None,
+) -> None:
+    if expected_attempt_count is None:
+        return
+    with db.no_autoflush:
+        owned_run_id = await db.scalar(
+            select(AgentRun.id)
+            .where(
+                AgentRun.id == run_id,
+                AgentRun.status == "running",
+                AgentRun.attempt_count == expected_attempt_count,
+            )
+            .with_for_update()
+        )
+    if owned_run_id is None:
+        raise AgentRunOwnershipLost(
+            f"Agent run ownership lost: run_id={run_id} "
+            f"attempt={expected_attempt_count}"
+        )
+
+
+async def _mark_owned_run_failed(
+    db: AsyncSession,
+    *,
+    run_id: str,
+    expected_attempt_count: int | None,
+    error_code: str,
+    duration_ms: int,
+) -> None:
+    await db.rollback()
+    filters = [
+        AgentRun.id == run_id,
+        AgentRun.status == "running",
+    ]
+    if expected_attempt_count is not None:
+        filters.append(AgentRun.attempt_count == expected_attempt_count)
+    result = await db.execute(
+        update(AgentRun)
+        .where(*filters)
+        .values(
+            status="failed",
+            error_code=error_code,
+            completed_at=datetime.now(timezone.utc),
+            duration_ms=duration_ms,
+            lease_expires_at=None,
+        )
+    )
+    if result.rowcount != 1 and expected_attempt_count is not None:
+        await db.rollback()
+        raise AgentRunOwnershipLost(
+            f"Agent run ownership lost while failing: run_id={run_id} "
+            f"attempt={expected_attempt_count}"
+        )
+    await db.commit()
 
 
 def _build_model() -> ChatOpenAI:
@@ -261,19 +326,27 @@ async def _load_history(
     db: AsyncSession,
     *,
     conversation_id: str,
-    exclude_run_id: str | None = None,
+    before_run: AgentRun,
 ) -> list[dict[str, str]]:
+    history_run = aliased(AgentRun)
     filters = [
         AgentMessage.conversation_id == conversation_id,
         AgentMessage.role.in_(("user", "assistant")),
+        or_(
+            and_(
+                AgentMessage.run_id.is_(None),
+                AgentMessage.created_at <= before_run.queued_at,
+            ),
+            history_run.queued_at < before_run.queued_at,
+            and_(
+                history_run.queued_at == before_run.queued_at,
+                history_run.id < before_run.id,
+            ),
+        ),
     ]
-    if exclude_run_id:
-        filters.append(or_(
-            AgentMessage.run_id.is_(None),
-            AgentMessage.run_id != exclude_run_id,
-        ))
     rows = list((await db.execute(
         select(AgentMessage)
+        .outerjoin(history_run, AgentMessage.run_id == history_run.id)
         .where(*filters)
         .order_by(AgentMessage.created_at.desc())
         .limit(settings.AGENT_MAX_HISTORY_MESSAGES)
@@ -332,6 +405,7 @@ async def execute_agent_run(
     run: AgentRun,
     conversation: AgentConversation,
     user_message: str,
+    expected_attempt_count: int | None = None,
 ) -> AgentRuntimeResult:
     started = time.perf_counter()
     try:
@@ -343,6 +417,11 @@ async def execute_agent_run(
         )
         if existing is not None:
             cards = existing.content_data.get("cards", [])
+            await _lock_run_ownership(
+                db,
+                run_id=run.id,
+                expected_attempt_count=expected_attempt_count,
+            )
             run.status = "completed"
             run.completed_at = run.completed_at or datetime.now(timezone.utc)
             run.lease_expires_at = None
@@ -356,7 +435,7 @@ async def execute_agent_run(
         history = await _load_history(
             db,
             conversation_id=conversation.id,
-            exclude_run_id=run.id,
+            before_run=run,
         )
         intent_outcome = await resolve_intent_with_fallback(
             user_message,
@@ -404,6 +483,11 @@ async def execute_agent_run(
             }
         else:
             conversation.pending_clarification = {}
+        await _lock_run_ownership(
+            db,
+            run_id=run.id,
+            expected_attempt_count=expected_attempt_count,
+        )
         await db.commit()
 
         if resolution.risk_level == "high" or resolution.clarification_required:
@@ -411,6 +495,11 @@ async def execute_agent_run(
                 HIGH_RISK_REPLY
                 if resolution.risk_level == "high"
                 else _clarification_reply(resolution)
+            )
+            await _lock_run_ownership(
+                db,
+                run_id=run.id,
+                expected_attempt_count=expected_attempt_count,
             )
             db.add(AgentMessage(
                 conversation_id=conversation.id,
@@ -445,6 +534,11 @@ async def execute_agent_run(
             subtasks=resolution.subtasks,
         )
         reply, cards = _extract_agent_output(result)
+        await _lock_run_ownership(
+            db,
+            run_id=run.id,
+            expected_attempt_count=expected_attempt_count,
+        )
         db.add(AgentMessage(
             conversation_id=conversation.id,
             run_id=run.id,
@@ -463,22 +557,27 @@ async def execute_agent_run(
         conversation.updated_at = now
         await db.commit()
         return AgentRuntimeResult(reply=reply, run_id=run.id, cards=cards)
+    except AgentRunOwnershipLost:
+        await db.rollback()
+        raise
     except AIServiceError as exc:
-        run.status = "failed"
-        run.error_code = "ai_service_error"
-        run.completed_at = datetime.now(timezone.utc)
-        run.duration_ms = round((time.perf_counter() - started) * 1000)
-        run.lease_expires_at = None
-        await db.commit()
+        await _mark_owned_run_failed(
+            db,
+            run_id=run.id,
+            expected_attempt_count=expected_attempt_count,
+            error_code="ai_service_error",
+            duration_ms=round((time.perf_counter() - started) * 1000),
+        )
         raise
     except Exception as exc:
         logger.exception("Agent run failed: run_id=%s", run.id)
-        run.status = "failed"
-        run.error_code = "agent_runtime_error"
-        run.completed_at = datetime.now(timezone.utc)
-        run.duration_ms = round((time.perf_counter() - started) * 1000)
-        run.lease_expires_at = None
-        await db.commit()
+        await _mark_owned_run_failed(
+            db,
+            run_id=run.id,
+            expected_attempt_count=expected_attempt_count,
+            error_code="agent_runtime_error",
+            duration_ms=round((time.perf_counter() - started) * 1000),
+        )
         raise AIServiceError("Agent 暂时无法完成请求，请稍后重试") from exc
 
 
