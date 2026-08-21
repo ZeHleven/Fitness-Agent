@@ -69,6 +69,8 @@ Finalizer 根据真实观察选择语义结果；Controller 唯一映射：`adju
 
 `after_all_observations` 只允许用于 `parallel_read`。Controller 在启动前一次性校验只读并行安全集合、全局白名单、参数 schema、动作唯一性、条件替代关系和剩余预算。全部工具成功时步骤自动完成，Executor 调用数为 0；任一工具失败时保留整个批次的 observation，只允许一次 Executor 在“基于部分证据完成”与“请求一次重规划”之间决策，不能在原批次后追加工具调用。
 
+若一个成功的 `parallel_read` 批次本身已经覆盖本轮动态工具白名单的全部工具来源，Controller 会把尚未执行的后续步骤标为 `skipped`，直接进入 Finalizer，并记录 `termination_reason=agent_completed_evidence_covered`。这是只识别“全部路由工具已由同一成功批次覆盖”的保守停止条件；白名单中仍有未读工具、批次存在错误或需要替代证据时不会触发。
+
 ## Action 与 Observation
 
 `direct` 模式仍遍历 LangChain 返回的真实消息；`planned` 模式由 Controller 在每次工具调用前后实时追加：

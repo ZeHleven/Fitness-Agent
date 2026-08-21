@@ -56,6 +56,8 @@ Executor 每次只看到当前步骤、已有真实 observation、当前步骤�
 
 `parallel_read` 不先调用 Executor。Controller 同时发出 Planner 已确定的动作；生产运行时为每个动作创建独立短生命周期数据库会话。全部成功后直接完成步骤，因此这一成功路径只有 Planner 与 Finalizer 两次运行时模型调用。任一失败时仍保存全部 action、observation 和逐工具审计，再且仅再调用一次 Executor；该次只能基于部分证据完成或请求重规划，不能向失败批次追加调用。
 
+成功批次还采用保守的冗余停止规则：只有当前 `parallel_read` 批次本身成功覆盖本轮动态工具白名单中的全部工具来源，并且计划仍有后续步骤时，Controller 才把后续步骤标为 `skipped` 并直接进入 Finalizer，记录 `termination_reason=agent_completed_evidence_covered`。`found=false` 等成功反事实观察同样属于已覆盖证据；任一工具失败、白名单仍有未读工具或存在故障替代来源时均不触发提前停止。该判断只使用运行时白名单与真实观察，不注入评测 fact ID，也不尝试做通用语义证据推断。
+
 Planner 可以为 direct 步骤选择 `after_successful_observation`。工具成功返回后由 Controller 自动完成步骤，不再额外询问 Executor 是否完成；工具错误仍保持步骤运行并允许 Executor 决定降级或重规划。bounded ReAct 必须使用 `executor_decides`，避免条件分支被过早关闭。
 
 成功返回的 `found=false`、`count=0` 或空列表是有效反事实证据，不视为工具故障。当前步骤已有候选替代工具时，首选工具超时后应先使用替代工具；只有候选集已不足以完成目标时才请求重规划。
@@ -117,6 +119,7 @@ Finalizer 模型实际输出的是证据语义 outcome，而不是任意 termina
 - 相同请求在相反 observation 下选择不同工具路径；
 - bounded ReAct 在主工具失败后使用相关替代工具；
 - Planner 显式 `parallel_read` 的三工具批次确实并发，全部成功时 Executor 调用数为 0、运行时模型调用数为 2；
+- 成功并行批次覆盖全部动态白名单时跳过后续冗余步骤；存在未读工具或失败观察时继续原执行与恢复路径；
 - Planner deadline 降级对三项独立主证据仍生成一个三动作 `parallel_read`，不会退化为三个串行 Executor 步骤；
 - 并行批次部分失败时保留全部 observation，只唤醒一次 Executor，且剩余步骤工具预算为 0；
 - API 闭环使用独立数据库会话完成并行读取，并逐调用持久化唯一 action、observation 和工具审计；

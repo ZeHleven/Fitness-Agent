@@ -565,6 +565,19 @@ async def _invoke_tool(
     )
 
 
+def _parallel_batch_covers_all_routed_tools(
+    results: list[_ToolInvocationResult],
+    *,
+    global_allowlist: set[str],
+) -> bool:
+    """Stop only when one successful batch covers every routed tool source."""
+    return (
+        bool(global_allowlist)
+        and all(item.status == "success" for item in results)
+        and {item.tool_id for item in results} == global_allowlist
+    )
+
+
 def _guard_tool_decision(
     decision: ExecutorDecision,
     *,
@@ -727,6 +740,7 @@ async def execute_planned_agent(
     step_index = 0
     executor_deadline_hit = False
     replanner_deadline_hit = False
+    routed_evidence_covered = False
 
     while step_index < len(trace.plan.steps):
         step = trace.plan.steps[step_index]
@@ -891,6 +905,26 @@ async def execute_planned_agent(
                     "parallel_read 步骤自动完成"
                 )
                 trace = _set_step_status(trace, step_index, "completed")
+                if (
+                    step_index + 1 < len(trace.plan.steps)
+                    and _parallel_batch_covers_all_routed_tools(
+                        results,
+                        global_allowlist=global_allowlist,
+                    )
+                ):
+                    for remaining_step in trace.plan.steps[step_index + 1:]:
+                        step_summaries[remaining_step.id] = (
+                            "前序 parallel_read 已成功覆盖本轮全部允许证据源，"
+                            "跳过不再提供新证据的冗余步骤"
+                        )
+                    trace = _finish_remaining_steps(
+                        trace,
+                        current_index=step_index,
+                        current_status="completed",
+                    )
+                    routed_evidence_covered = True
+                    await sink(trace, None)
+                    break
                 await sink(trace, None)
                 step_index += 1
                 continue
@@ -1407,9 +1441,13 @@ async def execute_planned_agent(
                 "executor_deadline_exceeded"
                 if executor_deadline_hit
                 else (
-                    "agent_completed_with_partial_evidence"
-                    if partial
-                    else "agent_completed"
+                    "agent_completed_evidence_covered"
+                    if routed_evidence_covered
+                    else (
+                        "agent_completed_with_partial_evidence"
+                        if partial
+                        else "agent_completed"
+                    )
                 )
             )
         ),

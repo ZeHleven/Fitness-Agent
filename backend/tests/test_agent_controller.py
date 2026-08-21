@@ -174,7 +174,10 @@ async def test_parallel_read_success_runs_concurrently_with_zero_executor():
         if len(started) == 3:
             all_started.set()
         await asyncio.wait_for(all_started.wait(), timeout=0.5)
-        return {"found": True, "source": tool_id}
+        return {
+            "found": tool_id != "profile.get_summary",
+            "source": tool_id,
+        }
 
     @tool(
         "profile_get_summary",
@@ -208,17 +211,25 @@ async def test_parallel_read_success_runs_concurrently_with_zero_executor():
     policy = ScriptedPolicy(
         plan=MicroPlan(
             goal="结合资料、计划和进度判断适配度",
-            steps=[MicroPlanStep(
-                objective="并行取得三项相互独立的必要证据",
-                candidate_tools=allowlist,
-                execution_strategy="parallel_read",
-                completion_policy="after_all_observations",
-                planned_actions=[
-                    PlannedToolAction(tool_id=item, arguments={})
-                    for item in allowlist
-                ],
-                success_signal="三项只读证据均已返回",
-            )],
+            steps=[
+                MicroPlanStep(
+                    objective="并行取得三项相互独立的必要证据",
+                    candidate_tools=allowlist,
+                    execution_strategy="parallel_read",
+                    completion_policy="after_all_observations",
+                    planned_actions=[
+                        PlannedToolAction(tool_id=item, arguments={})
+                        for item in allowlist
+                    ],
+                    success_signal="三项只读证据均已返回",
+                ),
+                MicroPlanStep(
+                    objective="重复检查已经取得的训练进度",
+                    candidate_tools=["workout.get_progress"],
+                    execution_strategy="direct",
+                    success_signal="确认已有进度证据",
+                ),
+            ],
         ),
         decisions=[],
     )
@@ -246,9 +257,20 @@ async def test_parallel_read_success_runs_concurrently_with_zero_executor():
     trace = result.execution_trace
     assert set(started) == set(allowlist)
     assert policy.decision_inputs == []
-    assert trace.plan.steps[0].status == "completed"
+    assert [item.status for item in trace.plan.steps] == [
+        "completed",
+        "skipped",
+    ]
     assert trace.plan.steps[0].execution_strategy == "parallel_read"
+    assert trace.termination_reason == "agent_completed_evidence_covered"
     assert len(trace.actions) == len(trace.observations) == 3
+    profile_observation = next(
+        item
+        for item in trace.observations
+        if item.tool_id == "profile.get_summary"
+    )
+    assert profile_observation.status == "success"
+    assert profile_observation.summary["found"] is False
     assert len({item.batch_id for item in trace.actions}) == 1
     assert {item.batch_id for item in trace.observations} == {
         trace.actions[0].batch_id
@@ -265,6 +287,100 @@ async def test_parallel_read_success_runs_concurrently_with_zero_executor():
         "tool_batch",
         "finalizer",
     ]
+    assert policy.finalize_inputs[0]["steps"][1]["status"] == "skipped"
+    assert "全部允许证据源" in (
+        policy.finalize_inputs[0]["steps"][1]["summary"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_parallel_read_does_not_stop_before_unread_allowlisted_tool():
+    calls: list[str] = []
+
+    @tool(
+        "profile_get_summary",
+        args_schema=NoArguments,
+        description="读取用户资料",
+    )
+    async def profile():
+        calls.append("profile.get_summary")
+        return {"found": True}
+
+    @tool(
+        "plan_get_active",
+        args_schema=NoArguments,
+        description="读取活动计划",
+    )
+    async def plan():
+        calls.append("plan.get_active")
+        return {"found": True, "plan": {"name": "当前计划"}}
+
+    @tool(
+        "workout_get_progress",
+        args_schema=NoArguments,
+        description="读取训练进度",
+    )
+    async def progress():
+        calls.append("workout.get_progress")
+        return {"weeks": 4, "total_sessions": 3}
+
+    parallel_tools = ["profile.get_summary", "plan.get_active"]
+    allowlist = [*parallel_tools, "workout.get_progress"]
+    policy = ScriptedPolicy(
+        plan=MicroPlan(
+            goal="结合资料、计划和进度判断适配度",
+            steps=[
+                MicroPlanStep(
+                    objective="先并行取得资料和计划",
+                    candidate_tools=parallel_tools,
+                    execution_strategy="parallel_read",
+                    completion_policy="after_all_observations",
+                    planned_actions=[
+                        PlannedToolAction(tool_id=item, arguments={})
+                        for item in parallel_tools
+                    ],
+                    success_signal="资料和计划均已返回",
+                ),
+                MicroPlanStep(
+                    objective="补充尚未查询的训练进度",
+                    candidate_tools=["workout.get_progress"],
+                    execution_strategy="direct",
+                    completion_policy="after_successful_observation",
+                    success_signal="训练进度已返回",
+                ),
+            ],
+        ),
+        decisions=[_decision(
+            "call_tool",
+            tool_id="workout.get_progress",
+            arguments={},
+        )],
+    )
+
+    result = await execute_planned_agent(
+        db=None,
+        user_id="user-1",
+        run_id="parallel-incomplete-coverage",
+        model=None,
+        goal="结合资料、计划和进度判断适配度",
+        subtasks=["读取资料", "读取计划", "读取进度"],
+        tool_allowlist=allowlist,
+        initial_trace=_planned_trace(allowlist),
+        summarize_observation=_audit_result_summary,
+        policy=policy,
+        tools=[profile, plan, progress],
+    )
+
+    trace = result.execution_trace
+    assert set(calls) == set(allowlist)
+    assert len(policy.decision_inputs) == 1
+    assert [item.status for item in trace.plan.steps] == [
+        "completed",
+        "completed",
+    ]
+    assert trace.termination_reason == "agent_completed"
+    assert len(trace.actions) == len(trace.observations) == 3
+    assert trace.budget_usage.model_calls == 3
 
 
 @pytest.mark.asyncio
