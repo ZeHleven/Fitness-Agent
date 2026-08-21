@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 from langchain.tools import tool
 
-from app.config import settings
+from app.config import Settings, settings
 from app.schemas.agent_planning import (
     ExecutorDecision,
     FinalResponse,
@@ -162,6 +162,17 @@ def _decision(decision: str, **updates: Any) -> ExecutorDecision:
         **updates,
     }
     return ExecutorDecision.model_validate(payload)
+
+
+def test_planning_deadline_defaults_are_role_specific():
+    assert (
+        Settings.model_fields["AGENT_PLANNER_TIMEOUT_SECONDS"].default
+        == 15.0
+    )
+    assert (
+        Settings.model_fields["AGENT_REPLANNER_TIMEOUT_SECONDS"].default
+        == 30.0
+    )
 
 
 @pytest.mark.asyncio
@@ -1748,7 +1759,7 @@ async def test_replanner_deadline_finalizes_with_partial_evidence(monkeypatch):
         ),
     )
     allowlist = ["workout.get_progress", "workout.list_history"]
-    monkeypatch.setattr(settings, "AGENT_PLANNER_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(settings, "AGENT_REPLANNER_TIMEOUT_SECONDS", 0.01)
 
     result = await execute_planned_agent(
         db=None,
@@ -1820,7 +1831,7 @@ async def test_replanner_deadline_uses_safe_reply_when_finalizer_fails(
         ],
     )
     allowlist = ["workout.get_progress"]
-    monkeypatch.setattr(settings, "AGENT_PLANNER_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(settings, "AGENT_REPLANNER_TIMEOUT_SECONDS", 0.01)
 
     result = await execute_planned_agent(
         db=None,

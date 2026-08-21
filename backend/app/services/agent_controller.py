@@ -1293,7 +1293,9 @@ async def execute_planned_agent(
                             max_steps=remaining_plan_steps,
                         ),
                         stage="replanner",
-                        timeout_seconds=settings.AGENT_PLANNER_TIMEOUT_SECONDS,
+                        timeout_seconds=(
+                            settings.AGENT_REPLANNER_TIMEOUT_SECONDS
+                        ),
                     )
                     _validate_plan_boundary(
                         revised,

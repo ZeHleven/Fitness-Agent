@@ -20,7 +20,7 @@
 - `AGENT_RULES_FIRST_ENABLED=true` 时，高置信、无需上下文消解的单意图和已审计复合语义直接使用规则结果；含指代、置信度不足或未覆盖的表达仍进入意图模型。rules-first 是理解层短路，不决定具体工具执行路径。
 - 结构化解析失败只允许一次受控修复；再次失败进入确定性降级。
 - 意图模型 provider 超时允许一次有限重试，总尝试数硬限制为 2；其他 provider 错误不做无意义重试。两次尝试共享 `AGENT_INTENT_TOTAL_TIMEOUT_SECONDS` 总预算，首轮按 `AGENT_INTENT_TIMEOUT_SECONDS` 执行并为第二轮保留 `AGENT_INTENT_RETRY_MIN_REMAINING_SECONDS`；剩余预算不足时不重试。默认是单次 6 秒、总计 10 秒、最小重试窗口 2 秒。
-- 规划运行时不只依赖模型客户端超时：Controller 对 Planner/Replanner 使用 `AGENT_PLANNER_TIMEOUT_SECONDS`（默认 30 秒），对每次 Executor 决策使用 `AGENT_EXECUTOR_TIMEOUT_SECONDS`（默认 20 秒）。Planner/Replanner 结构化输出还受 `AGENT_PLANNING_MAX_TOKENS`（默认 1200）约束。初始 Planner 超时启用 `deadline_fallback_v1`：本轮白名单中参数已知、彼此独立且安全的 2 至 3 个主证据会合并为一个 `parallel_read`；聚合进度失败时的训练历史只保留为条件替代，不预取。其他 Planner 错误和 Replanner 超时仍失败收口。Executor 超时不重试、不继续后续步骤，保留已有观察并交给 Finalizer 透明降级。
+- 规划运行时不只依赖模型客户端超时：Controller 对初始 Planner 使用 `AGENT_PLANNER_TIMEOUT_SECONDS`（默认 15 秒），对 Replanner 使用独立的 `AGENT_REPLANNER_TIMEOUT_SECONDS`（默认 30 秒），每次 Executor 决策使用 `AGENT_EXECUTOR_TIMEOUT_SECONDS`（默认 20 秒）。Planner/Replanner 结构化输出还受 `AGENT_PLANNING_MAX_TOKENS`（默认 1200）约束。初始 Planner 超时启用 `deadline_fallback_v1`：本轮白名单中参数已知、彼此独立且安全的 2 至 3 个主证据会合并为一个 `parallel_read`；聚合进度失败时的训练历史只保留为条件替代，不预取。其他 Planner 错误和 Replanner 超时仍失败收口。Executor 超时不重试、不继续后续步骤，保留已有观察并交给 Finalizer 透明降级。
 - 结构化错误只暴露异常类型、校验类型和字段路径，例如 `literal_error@references.0.source`；不记录模型原始值、完整响应或用户私有内容。Planner、Executor、Replanner 和 Finalizer 还会附带安全的失败阶段。
 - 模型不可用时，一般问答返回明确说明；关键训练数据仍可由只读服务和模板响应提供。
 - 工具超时不自动转成写操作，也不宣称数据已更新。

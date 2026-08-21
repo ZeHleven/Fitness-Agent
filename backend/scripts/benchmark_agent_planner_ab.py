@@ -292,7 +292,7 @@ def parse_args() -> argparse.Namespace:
         description="Measure minimal JSON vs real Planner with SDK retries 0/1.",
     )
     parser.add_argument("--repeat", type=int, default=3, choices=range(1, 11))
-    parser.add_argument("--deadline-seconds", type=float, default=30.0)
+    parser.add_argument("--deadline-seconds", type=float, default=15.0)
     parser.add_argument("--seed", type=int, default=20260821)
     parser.add_argument("--output", type=Path)
     return parser.parse_args()

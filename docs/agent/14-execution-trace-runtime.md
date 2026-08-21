@@ -33,7 +33,7 @@ finalization_contract
 
 Finalizer 在调用模型前会构造最小证据包：步骤只保留 `id/objective/status/summary`，观察移除 `call_id` 等执行标识并合并完全相同的重复项。工具结果原样保留，结构化调用原有的整体输入安全上限不变。本阶段不新增证据截断，也不降低模型输出上限，回答详细度与终止动作契约保持不变。
 
-Planner/Replanner 与 Executor 的 deadline 由 Controller 包裹实际策略调用，因此模型客户端的内部重试不能越过角色级墙钟预算。Planner/Replanner 默认 30 秒且结构化输出最多 1200 tokens，Executor 每次决策默认 20 秒。初始 Planner deadline 会记录失败 timing、`planner_deadline_fallback` 原因和受限降级计划；参数已知、彼此独立的 2 至 3 个主证据合并为一个显式 `parallel_read`，聚合进度的历史替代证据只在失败后使用。Replanner deadline 不生成通用替代计划：Controller 冻结已有 action/observation，当前步骤失败、后续步骤跳过，本次尝试计入模型和重规划预算，并记录 `termination_reason=replanner_deadline_exceeded` 后交由 Finalizer 基于部分证据收口；若 Finalizer 同时失败则返回固定的只读安全说明。Executor deadline 同样把当前步骤标为失败、剩余步骤标为跳过，并记录 `termination_reason=executor_deadline_exceeded`；Finalizer 只能基于 deadline 前已经持久化的观察透明收口。
+Planner、Replanner 与 Executor 的 deadline 由 Controller 包裹实际策略调用，因此模型客户端的内部重试不能越过角色级墙钟预算。初始 Planner 默认 15 秒，Replanner 通过独立配置保持 30 秒，两者结构化输出最多 1200 tokens；Executor 每次决策默认 20 秒。初始 Planner deadline 会记录失败 timing、`planner_deadline_fallback` 原因和受限降级计划；参数已知、彼此独立的 2 至 3 个主证据合并为一个显式 `parallel_read`，聚合进度的历史替代证据只在失败后使用。Replanner deadline 不生成通用替代计划：Controller 冻结已有 action/observation，当前步骤失败、后续步骤跳过，本次尝试计入模型和重规划预算，并记录 `termination_reason=replanner_deadline_exceeded` 后交由 Finalizer 基于部分证据收口；若 Finalizer 同时失败则返回固定的只读安全说明。Executor deadline 同样把当前步骤标为失败、剩余步骤标为跳过，并记录 `termination_reason=executor_deadline_exceeded`；Finalizer 只能基于 deadline 前已经持久化的观察透明收口。
 
 ## Finalization Contract
 
@@ -130,7 +130,7 @@ python backend/scripts/score_agent_multistep_trace.py `
 - 条件替代只能来自服务端固定证据组，必须同时满足全局白名单、触发条件、工具可用、剩余预算和动作去重；它不进入主并行批次，也不扩大模型权限。
 - direct 的自动收口必须由 Planner 通过 `completion_policy` 显式授权；bounded ReAct 禁止使用自动完成策略。
 - 全局最多 4 次工具调用、1 次重规划、12 次模型调用，每步最多 4 次决策尝试。
-- Planner/Replanner 默认 30 秒独立 deadline、结构化输出默认最多 1200 tokens；每次 Executor 决策默认 20 秒 deadline。deadline 和 token 配置不扩大模型、工具或写权限。
+- 初始 Planner 默认 15 秒、Replanner 默认 30 秒独立 deadline，结构化输出默认最多 1200 tokens；每次 Executor 决策默认 20 秒 deadline。deadline 和 token 配置不扩大模型、工具或写权限。
 - Executor 不能自行改变步骤策略或扩大候选工具；改变策略必须请求 Planner 修订。
 - 相同工具与规范化参数不能重复调用。
 - 重规划只替换尚未完成的步骤，`plan.version` 递增；action 记录其发生时的 `plan_version`。
