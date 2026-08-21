@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +9,7 @@ from app.schemas.agent_planning import (
     MicroPlan,
     MicroPlanDraft,
     MicroPlanStep,
+    ModelInvocationMetrics,
     PlannedToolAction,
 )
 from app.services.agent_planner import (
@@ -24,12 +26,20 @@ class FakeStructuredRunnable:
 
     async def ainvoke(self, _messages):
         self.messages = _messages
+        output = (
+            self.parsed.model_dump(mode="json")
+            if hasattr(self.parsed, "model_dump") else self.parsed
+        )
         return {
             "parsed": self.parsed,
-            "raw": SimpleNamespace(usage_metadata={
-                "input_tokens": 120,
-                "output_tokens": 40,
-            }),
+            "raw": SimpleNamespace(
+                content=json.dumps(output, ensure_ascii=False),
+                response_metadata={"finish_reason": "stop"},
+                usage_metadata={
+                    "input_tokens": 120,
+                    "output_tokens": 40,
+                },
+            ),
         }
 
 
@@ -252,6 +262,101 @@ async def test_finalizer_maps_semantic_outcome_to_terminal_action():
     assert model.schema is FinalizationDecision
     assert response.outcome == "adjustment_proposal"
     assert response.terminal_action == "proposal"
+    assert response.invocation_metrics == ModelInvocationMetrics(
+        input_chars=response.invocation_metrics.input_chars,
+        output_chars=response.invocation_metrics.output_chars,
+        input_tokens=120,
+        output_tokens=40,
+        finish_reason="stop",
+    )
+
+
+@pytest.mark.asyncio
+async def test_finalizer_compacts_duplicate_orchestration_input():
+    model = FakeStructuredModel(FinalizationDecision(
+        outcome="informational_answer",
+        reply="已综合证据回答。",
+    ))
+    policy = ModelPlanningPolicy(model)
+    duplicate_observation = {
+        "step_id": "step_1",
+        "call_id": "private-invocation-id",
+        "tool_id": "profile.get_summary",
+        "status": "success",
+        "result": {"training_days_per_week": 3},
+    }
+
+    await policy.finalize(
+        goal="结合资料回答",
+        steps=[{
+            "id": "step_1",
+            "objective": "取得资料",
+            "candidate_tools": ["profile.get_summary"],
+            "execution_strategy": "direct",
+            "completion_policy": "after_successful_observation",
+            "planned_actions": [],
+            "success_signal": "资料已返回",
+            "status": "completed",
+            "summary": "资料读取成功",
+        }],
+        observations=[duplicate_observation, duplicate_observation],
+        allowed_outcomes=["informational_answer", "insufficient_evidence"],
+    )
+
+    content = model.runnable.messages[1]["content"]
+    payload = json.loads(
+        content.removeprefix("输入：").removesuffix("\n请输出 JSON。")
+    )
+    assert payload["step_results"] == [{
+        "id": "step_1",
+        "objective": "取得资料",
+        "status": "completed",
+        "summary": "资料读取成功",
+    }]
+    assert payload["tool_observations"] == [{
+        "step_id": "step_1",
+        "tool_id": "profile.get_summary",
+        "status": "success",
+        "result": {"training_days_per_week": 3},
+    }]
+    assert "private-invocation-id" not in content
+    assert "candidate_tools" not in content
+
+
+@pytest.mark.asyncio
+async def test_finalizer_preserves_large_observation_without_field_loss():
+    model = FakeStructuredModel(FinalizationDecision(
+        outcome="informational_answer",
+        reply="已综合证据回答。",
+    ))
+    policy = ModelPlanningPolicy(model)
+
+    await policy.finalize(
+        goal="总结长历史",
+        steps=[],
+        observations=[{
+            "step_id": "step_1",
+            "call_id": "long-result-call",
+            "tool_id": "workout.list_history",
+            "status": "success",
+            "result": {
+                "first_marker": "START",
+                "records": "x" * 3000,
+                "z_last_marker": "END",
+            },
+        }],
+        allowed_outcomes=["informational_answer", "insufficient_evidence"],
+    )
+
+    content = model.runnable.messages[1]["content"]
+    payload = json.loads(
+        content.removeprefix("输入：").removesuffix("\n请输出 JSON。")
+    )
+    result = payload["tool_observations"][0]["result"]
+    assert result["first_marker"] == "START"
+    assert result["z_last_marker"] == "END"
+    assert len(result["records"]) == 3000
+    assert "truncated" not in result
 
 
 @pytest.mark.asyncio

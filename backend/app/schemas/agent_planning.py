@@ -17,6 +17,13 @@ FinalizationOutcome = Literal[
     "insufficient_evidence",
     "adjustment_proposal",
 ]
+ModelFinishReason = Literal[
+    "stop",
+    "length",
+    "tool_calls",
+    "content_filter",
+    "other",
+]
 
 
 class PlannedToolAction(BaseModel):
@@ -133,12 +140,28 @@ class ExecutorDecision(BaseModel):
         return self
 
 
+class ModelInvocationMetrics(BaseModel):
+    """Content-size and provider usage counters without prompt contents."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    input_chars: int = Field(ge=0)
+    output_chars: int = Field(ge=0)
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    finish_reason: ModelFinishReason | None = None
+
+
 class FinalResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     terminal_action: Literal["answer", "proposal"]
     reply: str = Field(min_length=1, max_length=8000)
     outcome: FinalizationOutcome | None = None
+    invocation_metrics: ModelInvocationMetrics | None = Field(
+        default=None,
+        exclude=True,
+    )
 
 
 class FinalizationDecision(BaseModel):

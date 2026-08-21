@@ -13,6 +13,7 @@ from app.schemas.agent_planning import (
     FinalResponse,
     MicroPlan,
     MicroPlanDraft,
+    ModelInvocationMetrics,
 )
 from app.services.agent_tools import TOOL_ID_BY_LANGCHAIN_NAME
 from app.services.ai_client import AIServiceError
@@ -119,8 +120,11 @@ def _json_for_prompt(value: Any, *, max_chars: int = 18000) -> str:
 @dataclass(frozen=True)
 class StructuredInvocation:
     parsed: Any
+    input_chars: int
+    output_chars: int
     input_tokens: int | None = None
     output_tokens: int | None = None
+    finish_reason: str | None = None
 
 
 class PlanningModelError(AIServiceError):
@@ -224,6 +228,82 @@ def _compact_observations(
     return compact
 
 
+def _compact_finalizer_steps(
+    steps: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep conclusions while dropping planning fields duplicated in trace."""
+    compact: list[dict[str, Any]] = []
+    for item in steps[-3:]:
+        value = {
+            "id": item.get("id"),
+            "objective": item.get("objective"),
+            "status": item.get("status"),
+            "summary": item.get("summary"),
+        }
+        compact.append({
+            key: field_value
+            for key, field_value in value.items()
+            if field_value is not None
+        })
+    return compact
+
+
+def _compact_finalizer_observations(
+    observations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Remove invocation IDs and exact duplicates without dropping facts."""
+    compact: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in observations[-8:]:
+        value = {
+            "step_id": item.get("step_id"),
+            "tool_id": item.get("tool_id"),
+            "status": item.get("status"),
+            "result": item.get("result"),
+        }
+        fingerprint = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        compact.append(value)
+    return compact
+
+
+def _message_content_chars(raw: Any, parsed: Any) -> int:
+    content = getattr(raw, "content", None)
+    if isinstance(content, str):
+        return len(content)
+    if isinstance(content, list):
+        return len(json.dumps(content, ensure_ascii=False, default=str))
+    if hasattr(parsed, "model_dump"):
+        parsed = parsed.model_dump(mode="json")
+    return len(json.dumps(parsed, ensure_ascii=False, default=str))
+
+
+def _finish_reason(raw: Any) -> str | None:
+    metadata = getattr(raw, "response_metadata", None)
+    if not isinstance(metadata, dict):
+        return None
+    reason = metadata.get("finish_reason")
+    if not isinstance(reason, str) or not reason.strip():
+        return None
+    normalized = reason.strip().lower()
+    if normalized in {
+        "stop",
+        "length",
+        "tool_calls",
+        "content_filter",
+    }:
+        return normalized
+    return "other"
+
+
 async def _invoke_structured(
     model: Any,
     schema: type[Any],
@@ -233,6 +313,11 @@ async def _invoke_structured(
     stage: str,
     max_payload_chars: int = 18000,
 ) -> StructuredInvocation:
+    user_content = (
+        "输入："
+        f"{_json_for_prompt(payload, max_chars=max_payload_chars)}\n"
+        "请输出 JSON。"
+    )
     structured = model.with_structured_output(
         schema,
         method="json_mode",
@@ -241,14 +326,7 @@ async def _invoke_structured(
     try:
         result = await structured.ainvoke([
             {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": (
-                    "输入："
-                    f"{_json_for_prompt(payload, max_chars=max_payload_chars)}\n"
-                    "请输出 JSON。"
-                ),
-            },
+            {"role": "user", "content": user_content},
         ])
     except Exception as exc:
         raise PlanningModelError(
@@ -266,13 +344,19 @@ async def _invoke_structured(
     if isinstance(parsed, schema):
         raw = result.get("raw")
         usage = getattr(raw, "usage_metadata", None)
+        metrics = {
+            "input_chars": len(system_prompt) + len(user_content),
+            "output_chars": _message_content_chars(raw, parsed),
+            "finish_reason": _finish_reason(raw),
+        }
         if isinstance(usage, dict):
             return StructuredInvocation(
                 parsed=parsed,
                 input_tokens=int(usage.get("input_tokens") or 0),
                 output_tokens=int(usage.get("output_tokens") or 0),
+                **metrics,
             )
-        return StructuredInvocation(parsed=parsed)
+        return StructuredInvocation(parsed=parsed, **metrics)
     parsing_error = result.get("parsing_error")
     raise PlanningModelError(
         "Agent 规划模型返回结果未通过结构校验",
@@ -436,8 +520,10 @@ class ModelPlanningPolicy:
             system_prompt=FINALIZER_SYSTEM_PROMPT,
             payload={
                 "goal": goal,
-                "step_results": steps,
-                "tool_observations": observations,
+                "step_results": _compact_finalizer_steps(steps),
+                "tool_observations": _compact_finalizer_observations(
+                    observations
+                ),
                 "allowed_outcomes": allowed_outcomes,
             },
             stage="finalizer",
@@ -458,4 +544,11 @@ class ModelPlanningPolicy:
             ),
             reply=decision.reply,
             outcome=decision.outcome,
+            invocation_metrics=ModelInvocationMetrics(
+                input_chars=invocation.input_chars,
+                output_chars=invocation.output_chars,
+                input_tokens=invocation.input_tokens,
+                output_tokens=invocation.output_tokens,
+                finish_reason=invocation.finish_reason,
+            ),
         )

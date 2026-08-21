@@ -9,6 +9,7 @@ from app.services.agent_intent import (
 )
 from app.services.agent_runtime import _audit_result_summary
 from app.services.agent_trace import (
+    add_stage_timing,
     build_initial_execution_trace,
     complete_execution_trace,
     select_execution_mode,
@@ -82,6 +83,39 @@ def test_initial_trace_records_intent_attempts_and_rules_fallback():
     assert trace.stage_timings[0].error_category == "TimeoutError"
     assert trace.stage_timings[1].attempt == 0
     assert trace.stage_timings[1].latency_ms == 0
+
+
+def test_stage_timing_accepts_privacy_safe_model_size_metrics():
+    resolution = IntentResolution(
+        primary_intent="profile_query",
+        resolved_query="查询训练资料",
+        subtasks=["读取训练资料"],
+        confidence=0.9,
+    )
+    trace = build_initial_execution_trace(
+        resolution,
+        ["profile.get_summary"],
+    )
+
+    trace = add_stage_timing(
+        trace,
+        stage="finalizer",
+        source="model",
+        status="success",
+        latency_ms=2500,
+        input_chars=1800,
+        output_chars=120,
+        input_tokens=600,
+        output_tokens=80,
+        finish_reason="stop",
+    )
+
+    timing = trace.stage_timings[-1]
+    assert timing.input_chars == 1800
+    assert timing.output_chars == 120
+    assert timing.input_tokens == 600
+    assert timing.output_tokens == 80
+    assert timing.finish_reason == "stop"
 
 
 def test_completed_trace_records_real_tool_actions_and_sanitized_observations():

@@ -127,7 +127,7 @@ class AgentBudgetUsageTrace(BaseModel):
 
 
 class AgentStageTimingTrace(BaseModel):
-    """Privacy-safe wall-clock timing for one runtime stage invocation."""
+    """Privacy-safe timing and size metrics for one stage invocation."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -137,6 +137,17 @@ class AgentStageTimingTrace(BaseModel):
     status: Literal["success", "error"]
     latency_ms: int = Field(ge=0)
     error_category: str | None = Field(default=None, max_length=160)
+    input_chars: int | None = Field(default=None, ge=0)
+    output_chars: int | None = Field(default=None, ge=0)
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    finish_reason: Literal[
+        "stop",
+        "length",
+        "tool_calls",
+        "content_filter",
+        "other",
+    ] | None = None
 
 
 class AgentFinalizationContractTrace(BaseModel):

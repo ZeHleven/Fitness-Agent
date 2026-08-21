@@ -12,6 +12,7 @@ from app.schemas.agent_planning import (
     FinalResponse,
     MicroPlan,
     MicroPlanStep,
+    ModelInvocationMetrics,
     PlannedToolAction,
 )
 from app.services.agent_controller import (
@@ -680,6 +681,13 @@ async def test_finalizer_contract_maps_adjustment_outcome_to_proposal():
             terminal_action="proposal",
             reply="建议降低频率；这是待确认提案，尚未执行。",
             outcome="adjustment_proposal",
+            invocation_metrics=ModelInvocationMetrics(
+                input_chars=2200,
+                output_chars=96,
+                input_tokens=800,
+                output_tokens=120,
+                finish_reason="stop",
+            ),
         ),
     )
 
@@ -709,6 +717,13 @@ async def test_finalizer_contract_maps_adjustment_outcome_to_proposal():
     assert policy.finalize_inputs[0]["allowed_outcomes"] == (
         contract.allowed_outcomes
     )
+    timing = result.execution_trace.stage_timings[-1]
+    assert timing.stage == "finalizer"
+    assert timing.input_chars == 2200
+    assert timing.output_chars == 96
+    assert timing.input_tokens == 800
+    assert timing.output_tokens == 120
+    assert timing.finish_reason == "stop"
 
 
 @pytest.mark.asyncio

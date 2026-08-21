@@ -33,6 +33,11 @@ def add_stage_timing(
     latency_ms: int,
     error_category: str | None = None,
     attempt: int | None = None,
+    input_chars: int | None = None,
+    output_chars: int | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    finish_reason: str | None = None,
 ) -> AgentExecutionTrace:
     """Append one bounded, privacy-safe timing event to an execution trace."""
     if attempt is None:
@@ -51,6 +56,11 @@ def add_stage_timing(
         status=status,
         latency_ms=max(0, latency_ms),
         error_category=(error_category[:160] if error_category else None),
+        input_chars=input_chars,
+        output_chars=output_chars,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        finish_reason=finish_reason,
     )
     return trace.model_copy(update={
         "stage_timings": [*trace.stage_timings, timing],

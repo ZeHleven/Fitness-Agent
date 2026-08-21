@@ -1261,6 +1261,7 @@ async def execute_planned_agent(
         )
     else:
         finalizer_started = time.perf_counter()
+        finalizer_metrics = None
         try:
             response = await planning_policy.finalize(
                 goal=goal,
@@ -1275,6 +1276,7 @@ async def execute_planned_agent(
                 observations=raw_observations,
                 allowed_outcomes=allowed_outcomes,
             )
+            finalizer_metrics = response.invocation_metrics
             _validate_final_response_contract(
                 response,
                 allowed_outcomes=allowed_outcomes,
@@ -1289,6 +1291,26 @@ async def execute_planned_agent(
                     (time.perf_counter() - finalizer_started) * 1000
                 ),
                 error_category=_planning_error_category(exc),
+                input_chars=(
+                    finalizer_metrics.input_chars
+                    if finalizer_metrics is not None else None
+                ),
+                output_chars=(
+                    finalizer_metrics.output_chars
+                    if finalizer_metrics is not None else None
+                ),
+                input_tokens=(
+                    finalizer_metrics.input_tokens
+                    if finalizer_metrics is not None else None
+                ),
+                output_tokens=(
+                    finalizer_metrics.output_tokens
+                    if finalizer_metrics is not None else None
+                ),
+                finish_reason=(
+                    finalizer_metrics.finish_reason
+                    if finalizer_metrics is not None else None
+                ),
             )
             await sink(trace, None)
             raise
@@ -1299,6 +1321,26 @@ async def execute_planned_agent(
             status="success",
             latency_ms=round(
                 (time.perf_counter() - finalizer_started) * 1000
+            ),
+            input_chars=(
+                finalizer_metrics.input_chars
+                if finalizer_metrics is not None else None
+            ),
+            output_chars=(
+                finalizer_metrics.output_chars
+                if finalizer_metrics is not None else None
+            ),
+            input_tokens=(
+                finalizer_metrics.input_tokens
+                if finalizer_metrics is not None else None
+            ),
+            output_tokens=(
+                finalizer_metrics.output_tokens
+                if finalizer_metrics is not None else None
+            ),
+            finish_reason=(
+                finalizer_metrics.finish_reason
+                if finalizer_metrics is not None else None
             ),
         )
         trace = trace.model_copy(update={
