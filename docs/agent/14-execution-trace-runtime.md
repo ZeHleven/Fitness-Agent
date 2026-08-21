@@ -26,7 +26,7 @@ finalization_contract
 
 - `intent`：rules-first、上下文规则或每次意图模型尝试；模型失败后回退规则会额外记录一个零成本 rules 成功事件，避免重复计算已经发生的模型等待时间。
 - `planner`、`executor`、`replanner`、`finalizer`：轻量 Plan-and-Execute 中每次独立模型调用。
-- `tool_batch`：Controller 执行一次 `parallel_read` 批次的墙钟耗时；来源为 `controller`，不计作模型调用。
+- `tool_batch`：Controller 执行一次 `parallel_read` 主批次或条件替代批次的墙钟耗时；来源为 `controller`，不计作模型调用。替代失败使用 `conditional_fallback_failure` 错误类别。
 - `direct_agent`：direct 模式下整个 LangChain 模型/工具循环的总耗时。
 
 每条事件包含 `stage`、`attempt`、`source=model|rules|controller`、`status`、`latency_ms` 和安全的 `error_category`，不保存 Prompt、模型原始输出或用户业务值。Finalizer 成功返回时还记录可选的 `input_chars`、`output_chars`、`input_tokens`、`output_tokens` 与归一化 `finish_reason`，用于区分输入规模、生成规模和供应商尾延迟；这些都只是计数或枚举，不包含实际训练资料。阶段事件是观测字段，不改变 `budget_usage.model_calls` 的原有计数语义。Planner/Executor 等异常也会先通过 run 所有权校验持久化失败 timing，再进入统一失败收口。
@@ -67,9 +67,11 @@ Finalizer 根据真实观察选择语义结果；Controller 唯一映射：`adju
 
 `after_successful_observation` 只允许用于 `direct`。工具成功返回后，Controller 直接把步骤标为完成，省去一次只输出 `complete_step` 的 Executor 调用；`found=false` 等仍属于成功 observation。工具异常不会自动完成，仍交由 Executor 基于错误观察收口或请求重规划。旧 trace 缺少该字段时按 `executor_decides` 解析。
 
-`after_all_observations` 只允许用于 `parallel_read`。Controller 在启动前一次性校验只读并行安全集合、全局白名单、参数 schema、动作唯一性、条件替代关系和剩余预算。全部工具成功时步骤自动完成，Executor 调用数为 0；任一工具失败时保留整个批次的 observation，只允许一次 Executor 在“基于部分证据完成”与“请求一次重规划”之间决策，不能在原批次后追加工具调用。
+`after_all_observations` 只允许用于 `parallel_read`。Controller 在启动前一次性校验只读并行安全集合、全局白名单、参数 schema、动作唯一性、条件替代关系和剩余预算。主动作全部成功时步骤自动完成，Executor 调用数为 0。主证据命中服务端条件替代契约时，Controller 可以在原批次后发起一次受限替代批次；除此之外，任一工具失败只允许一次 Executor 在“基于部分证据完成”与“请求一次重规划”之间决策，模型不能自行向失败批次追加调用。
 
-若一个成功的 `parallel_read` 批次本身已经覆盖本轮动态工具白名单的全部工具来源，Controller 会把尚未执行的后续步骤标为 `skipped`，直接进入 Finalizer，并记录 `termination_reason=agent_completed_evidence_covered`。这是只识别“全部路由工具已由同一成功批次覆盖”的保守停止条件；白名单中仍有未读工具、批次存在错误或需要替代证据时不会触发。
+条件替代关系由服务端定义方向与触发条件，当前包含：`workout.get_progress --on_error--> workout.list_history`，以及 `workout.get_active_session --on_not_found--> workout.get_next`。只有主工具和替代工具都已进入本轮全局动态白名单、主观察满足固定触发条件、替代工具可用且仍有全局预算时，Controller 才能用默认参数调用替代工具。模型不能创建证据组或借此扩展权限。特别地，活动训练读取错误不等于 `found=false`，因此不会误触发“下一练”。
+
+覆盖判定以证据组而不是原始工具 ID 数量为单位：主证据成功且未触发替代时，未调用的替代工具被视为“不再需要”；主证据触发替代且替代成功时，整组也视为覆盖。其余白名单工具仍必须成功观察。全部路由证据已覆盖且计划仍有后续步骤时，Controller 将后续步骤标为 `skipped`，进入 Finalizer，并记录 `termination_reason=agent_completed_evidence_covered`。替代失败、预算不足或仍有独立未读工具时不会提前停止。
 
 ## Action 与 Observation
 
@@ -78,7 +80,7 @@ Finalizer 根据真实观察选择语义结果；Controller 唯一映射：`adju
 - 每个模型 `tool_call` 生成 `AgentActionTrace`。
 - 每个对应 `ToolMessage` 生成 `AgentObservationTrace`。
 - action 和 observation 共用全局递增 `sequence`，并通过 `call_id`、`action_sequence` 配对。
-- `parallel_read` 批次的 action/observation 还共享 `batch_id`；每个动作仍保留独立 `call_id`，因此工具审计继续逐调用幂等持久化。
+- `parallel_read` 主批次和 Controller 条件替代批次各自共享独立 `batch_id`；每个动作仍保留独立 `call_id`，因此工具审计继续逐调用幂等持久化。
 - 工具 ID 转回服务端规范 ID，模型不能借 trace 新增工具权限。
 - 参数记录规范化结构；用户身份仍由服务端闭包注入，不进入参数。
 - Observation 只保存现有工具审计摘要和字段级 `fact_keys`，不复制健康敏感值或完整业务记录。
@@ -125,6 +127,7 @@ python backend/scripts/score_agent_multistep_trace.py `
 - Planner 只在 `planned` 模式调用，生成 1 至 3 个线性步骤，不生成 DAG 或子计划。
 - `direct` 步骤最多 1 次工具调用；`bounded_react` 步骤最多 2 次。
 - `parallel_read` 只允许 2 至 3 个 Planner 已确定的只读动作；真实数据库调用各自使用独立短生命周期 `AsyncSession`，避免在同一 SQLAlchemy 会话上并发查询。
+- 条件替代只能来自服务端固定证据组，必须同时满足全局白名单、触发条件、工具可用、剩余预算和动作去重；它不进入主并行批次，也不扩大模型权限。
 - direct 的自动收口必须由 Planner 通过 `completion_policy` 显式授权；bounded ReAct 禁止使用自动完成策略。
 - 全局最多 4 次工具调用、1 次重规划、12 次模型调用，每步最多 4 次决策尝试。
 - Planner/Replanner 默认 30 秒独立 deadline、结构化输出默认最多 1200 tokens；每次 Executor 决策默认 20 秒 deadline。deadline 和 token 配置不扩大模型、工具或写权限。

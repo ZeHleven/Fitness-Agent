@@ -14,7 +14,8 @@ Execution Mode Gate
        → Micro Planner
        → Step Executor
             ├─ direct
-            ├─ parallel_read → 2–3 independent reads → auto complete
+            ├─ parallel_read → 2–3 independent primary reads
+            │                    └─ optional server-owned fallback batch
             └─ bounded_react
        → observation
        → complete / replan / clarify / safe_stop
@@ -38,7 +39,7 @@ success_signal
 
 一般步骤不包含固定工具参数，不要求把全部候选工具都调用，也不生成综合回答步骤。唯一例外是 `parallel_read`：Planner 必须显式列出 2 至 3 个参数完整、相互独立的只读动作；其 `candidate_tools` 与动作工具按顺序完全一致。Controller 会再次校验步骤数量、全局白名单、并行安全集合、参数 schema、条件替代关系与预算，不能只依赖 Prompt 自律。
 
-`parallel_read` 只用于“用户资料、当前计划、实际进度”等被同一语义目标同时要求、且彼此不依赖观察结果的证据。`workout.get_active_session → 必要时 workout.get_next`、`workout.get_progress → 失败或不足时 workout.list_history` 仍是条件路径，硬性禁止放入同一并行批次，保留给 bounded ReAct。
+`parallel_read` 只用于“用户资料、当前计划、实际进度”等被同一语义目标同时要求、且彼此不依赖观察结果的主证据。主工具与条件替代工具硬性禁止放入同一 Planner 并行批次；但主工具可以与其他独立主证据并行，观察返回后由 Controller 按服务端证据组决定是否调用替代工具。单独的条件步骤仍可使用 bounded ReAct。
 
 Planner few-shot 明确展示：当用户资料、当前计划和四周训练进度三项独立且全部必需时，应生成一个包含三个 `planned_actions` 的 `parallel_read`，不能把第三项拆成后续步骤。工具目录不再携带展示标题、examples 等非决策字段，旧 observation 也只保留最近事件和受限结果预览，以控制输入体积和结构化尾延迟。
 
@@ -54,13 +55,13 @@ Executor 每次只看到当前步骤、已有真实 observation、当前步骤�
 
 `direct` 最多执行一次工具调用。`bounded_react` 可以在首次 observation 后再选择一次工具。Executor 无权从 `direct` 自行升级策略，也无权选择步骤候选集或全局白名单之外的工具。
 
-`parallel_read` 不先调用 Executor。Controller 同时发出 Planner 已确定的动作；生产运行时为每个动作创建独立短生命周期数据库会话。全部成功后直接完成步骤，因此这一成功路径只有 Planner 与 Finalizer 两次运行时模型调用。任一失败时仍保存全部 action、observation 和逐工具审计，再且仅再调用一次 Executor；该次只能基于部分证据完成或请求重规划，不能向失败批次追加调用。
+`parallel_read` 不先调用 Executor。Controller 同时发出 Planner 已确定的动作；生产运行时为每个动作创建独立短生命周期数据库会话。全部成功后直接完成步骤，因此这一成功路径只有 Planner 与 Finalizer 两次运行时模型调用。主证据命中固定条件替代契约时，Controller 在预算内直接发起替代批次并完整记录 action、observation、`tool_batch` timing 与逐工具审计；替代成功仍保持零 Executor。其他失败或替代失败再且仅再调用一次 Executor，该次只能基于已有证据完成或请求重规划，不能自行追加工具调用。
 
-成功批次还采用保守的冗余停止规则：只有当前 `parallel_read` 批次本身成功覆盖本轮动态工具白名单中的全部工具来源，并且计划仍有后续步骤时，Controller 才把后续步骤标为 `skipped` 并直接进入 Finalizer，记录 `termination_reason=agent_completed_evidence_covered`。`found=false` 等成功反事实观察同样属于已覆盖证据；任一工具失败、白名单仍有未读工具或存在故障替代来源时均不触发提前停止。该判断只使用运行时白名单与真实观察，不注入评测 fact ID，也不尝试做通用语义证据推断。
+当前服务端证据组为：`workout.get_progress --on_error--> workout.list_history` 和 `workout.get_active_session --on_not_found--> workout.get_next`。两端都必须已在动态白名单中；触发条件、方向和默认参数都不是模型输出。主证据成功且未触发条件时，替代工具被逻辑关闭；主证据触发条件且替代成功时，整组视为覆盖。若这些证据组与其他成功观察已覆盖全部动态白名单，Controller 才把后续步骤标为 `skipped`，记录 `termination_reason=agent_completed_evidence_covered`。替代失败、预算不足或仍有独立未读工具时不会提前停止。该判断不注入评测 fact ID，也不做开放式语义推断。
 
 Planner 可以为 direct 步骤选择 `after_successful_observation`。工具成功返回后由 Controller 自动完成步骤，不再额外询问 Executor 是否完成；工具错误仍保持步骤运行并允许 Executor 决定降级或重规划。bounded ReAct 必须使用 `executor_decides`，避免条件分支被过早关闭。
 
-成功返回的 `found=false`、`count=0` 或空列表是有效反事实证据，不视为工具故障。当前步骤已有候选替代工具时，首选工具超时后应先使用替代工具；只有候选集已不足以完成目标时才请求重规划。
+成功返回的 `found=false`、`count=0` 或空列表是有效反事实证据，不视为工具故障。证据组会区分业务反事实与工具错误：活动训练只有 `found=false` 才查询下一练，读取错误不会触发；聚合进度只有工具错误才读取历史。固定证据组之外的替代判断仍由 bounded ReAct 处理。
 
 ## 动态重规划
 
@@ -95,7 +96,7 @@ Replanner 与初始 Planner 共用独立 deadline，但超时后的处理不同�
 
 相同工具与规范化参数重复、越过步骤候选集、越过全局意图白名单或超过预算的动作都会被 Controller 拒绝，并把拒绝原因反馈给 Executor 在剩余决策预算内收口。
 
-并行批次还拒绝非只读工具、重复工具、参数 schema 不合法，以及语义上具有先后条件的替代工具对。批次中的每个工具调用独立计入全局工具预算；并行只降低墙钟等待与 Executor 调用数，不放宽调用数量。
+并行主批次还拒绝非只读工具、重复工具、参数 schema 不合法，以及语义上具有先后条件的替代工具对。Controller 条件替代同样受全局白名单、工具可用性、剩余预算和相同工具参数去重约束。每个主调用和替代调用都独立计入全局工具预算；并行只降低墙钟等待与 Executor 调用数，不放宽调用数量。
 
 ## 持久化与发布控制
 
@@ -110,7 +111,7 @@ Replanner 与初始 Planner 共用独立 deadline，但超时后的处理不同�
 
 Finalizer 模型实际输出的是证据语义 outcome，而不是任意 terminal action。普通问答不能产生未经请求的 proposal；需要评估调整的请求仍由模型根据观察在“建议调整、无需调整、证据不足”之间动态判断，Controller 只负责把语义 outcome 确定映射到 `answer|proposal`。因此该契约约束业务类型一致性，不把反事实结论硬编码成工作流。
 
-初始 Planner 超过 30 秒 deadline 时，不再无限等待或直接切换成通用工作流。Controller 只生成一次 `deadline_fallback_v1` 微计划：白名单内参数已知、相互独立的 2 至 3 个主证据直接合并为一个显式 `parallel_read`；聚合进度与训练历史这类替代关系不并行预取，历史仅在主证据失败后由 bounded ReAct 使用。该路径是超时降级，不参与正常 Planner 决策，也不能扩展工具权限。
+初始 Planner 超过 30 秒 deadline 时，不再无限等待或直接切换成通用工作流。Controller 只生成一次 `deadline_fallback_v1` 微计划：白名单内参数已知、相互独立的 2 至 3 个主证据直接合并为一个显式 `parallel_read`；聚合进度与训练历史这类替代关系不并行预取。主进度位于并行批次时由 Controller 在失败后调用历史；单独条件步骤仍可由 bounded ReAct 处理。该路径是超时降级，不参与正常 Planner 决策，也不能扩展工具权限。
 
 ## 验证
 
@@ -119,7 +120,9 @@ Finalizer 模型实际输出的是证据语义 outcome，而不是任意 termina
 - 相同请求在相反 observation 下选择不同工具路径；
 - bounded ReAct 在主工具失败后使用相关替代工具；
 - Planner 显式 `parallel_read` 的三工具批次确实并发，全部成功时 Executor 调用数为 0、运行时模型调用数为 2；
-- 成功并行批次覆盖全部动态白名单时跳过后续冗余步骤；存在未读工具或失败观察时继续原执行与恢复路径；
+- 主证据成功时关闭不再需要的替代工具并跳过冗余步骤；主进度失败后由 Controller 直调历史且成功路径保持零 Executor；
+- 活动训练仅在 `found=false` 时直调下一练，读取错误不会误触发替代；替代失败时仍唤醒一次 Executor；
+- 证据组与其他成功观察覆盖全部动态白名单时跳过后续冗余步骤；存在独立未读工具时继续原执行路径；
 - Planner deadline 降级对三项独立主证据仍生成一个三动作 `parallel_read`，不会退化为三个串行 Executor 步骤；
 - 并行批次部分失败时保留全部 observation，只唤醒一次 Executor，且剩余步骤工具预算为 0；
 - API 闭环使用独立数据库会话完成并行读取，并逐调用持久化唯一 action、observation 和工具审计；

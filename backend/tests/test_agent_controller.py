@@ -168,6 +168,7 @@ def _decision(decision: str, **updates: Any) -> ExecutorDecision:
 async def test_parallel_read_success_runs_concurrently_with_zero_executor():
     all_started = asyncio.Event()
     started: list[str] = []
+    history_calls: list[int] = []
 
     async def wait_for_batch(tool_id: str) -> dict[str, Any]:
         started.append(tool_id)
@@ -203,31 +204,41 @@ async def test_parallel_read_success_runs_concurrently_with_zero_executor():
     async def progress():
         return await wait_for_batch("workout.get_progress")
 
-    allowlist = [
+    @tool(
+        "workout_list_history",
+        args_schema=WorkoutHistoryArguments,
+        description="读取训练历史",
+    )
+    async def history(limit: int = 5):
+        history_calls.append(limit)
+        return {"count": 1, "sessions": []}
+
+    parallel_tools = [
         "profile.get_summary",
         "plan.get_active",
         "workout.get_progress",
     ]
+    allowlist = [*parallel_tools, "workout.list_history"]
     policy = ScriptedPolicy(
         plan=MicroPlan(
             goal="结合资料、计划和进度判断适配度",
             steps=[
                 MicroPlanStep(
                     objective="并行取得三项相互独立的必要证据",
-                    candidate_tools=allowlist,
+                    candidate_tools=parallel_tools,
                     execution_strategy="parallel_read",
                     completion_policy="after_all_observations",
                     planned_actions=[
                         PlannedToolAction(tool_id=item, arguments={})
-                        for item in allowlist
+                        for item in parallel_tools
                     ],
                     success_signal="三项只读证据均已返回",
                 ),
                 MicroPlanStep(
-                    objective="重复检查已经取得的训练进度",
-                    candidate_tools=["workout.get_progress"],
+                    objective="主进度失败时读取训练历史替代证据",
+                    candidate_tools=["workout.list_history"],
                     execution_strategy="direct",
-                    success_signal="确认已有进度证据",
+                    success_signal="取得历史替代证据",
                 ),
             ],
         ),
@@ -251,11 +262,12 @@ async def test_parallel_read_success_runs_concurrently_with_zero_executor():
         summarize_observation=_audit_result_summary,
         event_sink=sink,
         policy=policy,
-        tools=[profile, plan, progress],
+        tools=[profile, plan, progress, history],
     )
 
     trace = result.execution_trace
-    assert set(started) == set(allowlist)
+    assert set(started) == set(parallel_tools)
+    assert history_calls == []
     assert policy.decision_inputs == []
     assert [item.status for item in trace.plan.steps] == [
         "completed",
@@ -291,6 +303,383 @@ async def test_parallel_read_success_runs_concurrently_with_zero_executor():
     assert "全部允许证据源" in (
         policy.finalize_inputs[0]["steps"][1]["summary"]
     )
+
+
+@pytest.mark.asyncio
+async def test_parallel_read_primary_error_invokes_conditional_fallback():
+    calls: list[str] = []
+
+    @tool(
+        "profile_get_summary",
+        args_schema=NoArguments,
+        description="读取用户资料",
+    )
+    async def profile():
+        calls.append("profile.get_summary")
+        return {"found": True}
+
+    @tool(
+        "plan_get_active",
+        args_schema=NoArguments,
+        description="读取活动计划",
+    )
+    async def plan():
+        calls.append("plan.get_active")
+        return {"found": True, "plan": {"name": "当前计划"}}
+
+    @tool(
+        "workout_get_progress",
+        args_schema=NoArguments,
+        description="读取训练进度",
+    )
+    async def progress():
+        calls.append("workout.get_progress")
+        raise TimeoutError("fixture timeout")
+
+    @tool(
+        "workout_list_history",
+        args_schema=WorkoutHistoryArguments,
+        description="读取训练历史",
+    )
+    async def history(limit: int = 5):
+        calls.append("workout.list_history")
+        return {"count": 1, "sessions": [{"id": "session-1"}]}
+
+    primary_tools = [
+        "profile.get_summary",
+        "plan.get_active",
+        "workout.get_progress",
+    ]
+    allowlist = [*primary_tools, "workout.list_history"]
+    policy = ScriptedPolicy(
+        plan=MicroPlan(
+            goal="结合资料、计划和训练证据判断适配度",
+            steps=[
+                MicroPlanStep(
+                    objective="并行取得三项主证据",
+                    candidate_tools=primary_tools,
+                    execution_strategy="parallel_read",
+                    completion_policy="after_all_observations",
+                    planned_actions=[
+                        PlannedToolAction(tool_id=item, arguments={})
+                        for item in primary_tools
+                    ],
+                    success_signal="三项主证据均已解析",
+                ),
+                MicroPlanStep(
+                    objective="进度失败时补充训练历史",
+                    candidate_tools=["workout.list_history"],
+                    execution_strategy="direct",
+                    success_signal="取得训练历史替代证据",
+                ),
+            ],
+        ),
+        decisions=[],
+    )
+    audits: list[ToolAuditEvent] = []
+
+    async def sink(_trace, audit):
+        if audit is not None:
+            audits.append(audit)
+
+    result = await execute_planned_agent(
+        db=None,
+        user_id="user-1",
+        run_id="parallel-conditional-fallback",
+        model=None,
+        goal="结合资料、计划和训练证据判断适配度",
+        subtasks=["读取资料", "读取计划", "读取训练证据"],
+        tool_allowlist=allowlist,
+        initial_trace=_planned_trace(allowlist),
+        summarize_observation=_audit_result_summary,
+        event_sink=sink,
+        policy=policy,
+        tools=[profile, plan, progress, history],
+    )
+
+    trace = result.execution_trace
+    assert set(calls) == set(allowlist)
+    assert policy.decision_inputs == []
+    assert [item.status for item in trace.plan.steps] == [
+        "completed",
+        "skipped",
+    ]
+    assert trace.termination_reason == "agent_completed_evidence_covered"
+    assert [item.tool_id for item in trace.actions] == allowlist
+    assert [item.status for item in trace.observations] == [
+        "success",
+        "success",
+        "error",
+        "success",
+    ]
+    assert trace.actions[-1].batch_id is not None
+    assert trace.actions[-1].batch_id.startswith("fallback-")
+    assert [item.status for item in audits] == [
+        "completed",
+        "completed",
+        "failed",
+        "completed",
+    ]
+    assert trace.budget_usage.tool_calls == 4
+    assert trace.budget_usage.model_calls == 2
+    assert [item.error_category for item in trace.stage_timings] == [
+        None,
+        "parallel_tool_failure",
+        None,
+        None,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_parallel_read_conditional_fallback_failure_wakes_executor():
+    @tool(
+        "profile_get_summary",
+        args_schema=NoArguments,
+        description="读取用户资料",
+    )
+    async def profile():
+        return {"found": True}
+
+    @tool(
+        "workout_get_progress",
+        args_schema=NoArguments,
+        description="读取训练进度",
+    )
+    async def progress():
+        raise TimeoutError("progress timeout")
+
+    @tool(
+        "workout_list_history",
+        args_schema=WorkoutHistoryArguments,
+        description="读取训练历史",
+    )
+    async def history(limit: int = 5):
+        raise TimeoutError(f"history timeout at limit={limit}")
+
+    primary_tools = ["profile.get_summary", "workout.get_progress"]
+    allowlist = [*primary_tools, "workout.list_history"]
+    policy = ScriptedPolicy(
+        plan=MicroPlan(
+            goal="读取近期训练证据",
+            steps=[MicroPlanStep(
+                objective="并行读取资料与聚合训练进度",
+                candidate_tools=primary_tools,
+                execution_strategy="parallel_read",
+                completion_policy="after_all_observations",
+                planned_actions=[
+                    PlannedToolAction(tool_id=item, arguments={})
+                    for item in primary_tools
+                ],
+                success_signal="取得进度或历史替代证据",
+            )],
+        ),
+        decisions=[_decision(
+            "complete_step",
+            step_summary="进度与历史均读取失败，透明保守收口",
+        )],
+    )
+
+    result = await execute_planned_agent(
+        db=None,
+        user_id="user-1",
+        run_id="parallel-conditional-fallback-failure",
+        model=None,
+        goal="读取近期训练证据",
+        subtasks=["读取进度", "失败时读取历史"],
+        tool_allowlist=allowlist,
+        initial_trace=_planned_trace(allowlist),
+        summarize_observation=_audit_result_summary,
+        policy=policy,
+        tools=[profile, progress, history],
+    )
+
+    trace = result.execution_trace
+    assert len(policy.decision_inputs) == 1
+    assert policy.decision_inputs[0]["remaining_step_tool_calls"] == 0
+    assert [item.tool_id for item in trace.actions] == allowlist
+    assert [item.status for item in trace.observations] == [
+        "success",
+        "error",
+        "error",
+    ]
+    assert [item.error_category for item in trace.stage_timings] == [
+        None,
+        "parallel_tool_failure",
+        "conditional_fallback_failure",
+        None,
+        None,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_parallel_read_not_found_invokes_next_workout_fallback():
+    next_calls = 0
+
+    @tool(
+        "profile_get_summary",
+        args_schema=NoArguments,
+        description="读取用户资料",
+    )
+    async def profile():
+        return {"found": True}
+
+    @tool(
+        "workout_get_active_session",
+        args_schema=NoArguments,
+        description="读取活动训练",
+    )
+    async def active_session():
+        return {"found": False}
+
+    @tool(
+        "workout_get_next",
+        args_schema=NoArguments,
+        description="读取下一练",
+    )
+    async def next_workout():
+        nonlocal next_calls
+        next_calls += 1
+        return {"found": True, "day_of_week": 1}
+
+    primary_tools = [
+        "profile.get_summary",
+        "workout.get_active_session",
+    ]
+    allowlist = [*primary_tools, "workout.get_next"]
+    policy = ScriptedPolicy(
+        plan=MicroPlan(
+            goal="判断继续训练还是开始下一练",
+            steps=[
+                MicroPlanStep(
+                    objective="读取资料与活动训练主证据",
+                    candidate_tools=primary_tools,
+                    execution_strategy="parallel_read",
+                    completion_policy="after_all_observations",
+                    planned_actions=[
+                        PlannedToolAction(tool_id=item, arguments={})
+                        for item in primary_tools
+                    ],
+                    success_signal="活动训练状态已解析",
+                ),
+                MicroPlanStep(
+                    objective="没有活动训练时读取下一练",
+                    candidate_tools=["workout.get_next"],
+                    execution_strategy="direct",
+                    success_signal="取得下一练",
+                ),
+            ],
+        ),
+        decisions=[],
+    )
+
+    result = await execute_planned_agent(
+        db=None,
+        user_id="user-1",
+        run_id="parallel-not-found-fallback",
+        model=None,
+        goal="判断继续训练还是开始下一练",
+        subtasks=["读取活动训练", "必要时读取下一练"],
+        tool_allowlist=allowlist,
+        initial_trace=_planned_trace(allowlist),
+        summarize_observation=_audit_result_summary,
+        policy=policy,
+        tools=[profile, active_session, next_workout],
+    )
+
+    trace = result.execution_trace
+    assert next_calls == 1
+    assert policy.decision_inputs == []
+    assert [item.tool_id for item in trace.actions] == allowlist
+    assert [item.status for item in trace.plan.steps] == [
+        "completed",
+        "skipped",
+    ]
+    assert trace.termination_reason == "agent_completed_evidence_covered"
+    assert trace.budget_usage.tool_calls == 3
+    assert trace.budget_usage.model_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_active_session_error_does_not_trigger_next_workout_fallback():
+    next_calls = 0
+
+    @tool(
+        "profile_get_summary",
+        args_schema=NoArguments,
+        description="读取用户资料",
+    )
+    async def profile():
+        return {"found": True}
+
+    @tool(
+        "workout_get_active_session",
+        args_schema=NoArguments,
+        description="读取活动训练",
+    )
+    async def active_session():
+        raise TimeoutError("active session timeout")
+
+    @tool(
+        "workout_get_next",
+        args_schema=NoArguments,
+        description="读取下一练",
+    )
+    async def next_workout():
+        nonlocal next_calls
+        next_calls += 1
+        return {"found": True}
+
+    primary_tools = [
+        "profile.get_summary",
+        "workout.get_active_session",
+    ]
+    allowlist = [*primary_tools, "workout.get_next"]
+    policy = ScriptedPolicy(
+        plan=MicroPlan(
+            goal="判断继续训练还是开始下一练",
+            steps=[MicroPlanStep(
+                objective="读取资料与活动训练主证据",
+                candidate_tools=primary_tools,
+                execution_strategy="parallel_read",
+                completion_policy="after_all_observations",
+                planned_actions=[
+                    PlannedToolAction(tool_id=item, arguments={})
+                    for item in primary_tools
+                ],
+                success_signal="活动训练状态已解析",
+            )],
+        ),
+        decisions=[_decision(
+            "complete_step",
+            step_summary="活动训练读取失败，未误判为没有活动训练",
+        )],
+    )
+
+    result = await execute_planned_agent(
+        db=None,
+        user_id="user-1",
+        run_id="parallel-active-session-error",
+        model=None,
+        goal="判断继续训练还是开始下一练",
+        subtasks=["读取活动训练", "必要时读取下一练"],
+        tool_allowlist=allowlist,
+        initial_trace=_planned_trace(allowlist),
+        summarize_observation=_audit_result_summary,
+        policy=policy,
+        tools=[profile, active_session, next_workout],
+    )
+
+    trace = result.execution_trace
+    assert next_calls == 0
+    assert len(policy.decision_inputs) == 1
+    assert [item.tool_id for item in trace.actions] == primary_tools
+    assert [item.status for item in trace.observations] == [
+        "success",
+        "error",
+    ]
+    assert "conditional_fallback_failure" not in {
+        item.error_category for item in trace.stage_timings
+    }
 
 
 @pytest.mark.asyncio

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from langchain_core.tools import BaseTool
 from langchain.tools import tool
@@ -52,13 +53,40 @@ READ_TOOL_IDS: tuple[str, ...] = (
     "workout.get_progress",
 )
 
+
+@dataclass(frozen=True)
+class ConditionalReadEvidenceGroup:
+    """Server-owned direction and trigger for one conditional read fallback."""
+
+    primary_tool_id: str
+    fallback_tool_id: str
+    fallback_trigger: Literal["on_error", "on_not_found"]
+
+
+# These are evidence alternatives, not extra model permissions. The Controller
+# may invoke a fallback only when both tools were routed into the run allowlist
+# and the primary observation satisfies the fixed server-side trigger.
+CONDITIONAL_READ_EVIDENCE_GROUPS = (
+    ConditionalReadEvidenceGroup(
+        primary_tool_id="workout.get_progress",
+        fallback_tool_id="workout.list_history",
+        fallback_trigger="on_error",
+    ),
+    ConditionalReadEvidenceGroup(
+        primary_tool_id="workout.get_active_session",
+        fallback_tool_id="workout.get_next",
+        fallback_trigger="on_not_found",
+    ),
+)
+
 # Only side-effect-free tools may appear in Planner-owned concurrent batches.
-# Pairs below are observation-dependent alternatives and must remain bounded
-# ReAct so the first result can decide whether the second read is necessary.
+# Pairs below are observation-dependent alternatives and must never be
+# speculatively placed in the same Planner-owned batch. The Controller or a
+# bounded ReAct step must observe the primary before invoking the fallback.
 PARALLEL_READ_SAFE_TOOL_IDS = frozenset(READ_TOOL_IDS)
-PARALLEL_READ_CONDITIONAL_TOOL_PAIRS = (
-    frozenset(("workout.get_active_session", "workout.get_next")),
-    frozenset(("workout.get_progress", "workout.list_history")),
+PARALLEL_READ_CONDITIONAL_TOOL_PAIRS = tuple(
+    frozenset((item.primary_tool_id, item.fallback_tool_id))
+    for item in CONDITIONAL_READ_EVIDENCE_GROUPS
 )
 
 LANGCHAIN_TOOL_NAMES: dict[str, str] = {

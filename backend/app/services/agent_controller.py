@@ -34,8 +34,10 @@ from app.services.agent_planner import (
 )
 from app.services.agent_structured_errors import safe_error_category
 from app.services.agent_tools import (
+    CONDITIONAL_READ_EVIDENCE_GROUPS,
     PARALLEL_READ_CONDITIONAL_TOOL_PAIRS,
     PARALLEL_READ_SAFE_TOOL_IDS,
+    ConditionalReadEvidenceGroup,
     TOOL_ID_BY_LANGCHAIN_NAME,
     build_read_tools,
 )
@@ -70,6 +72,14 @@ class _ToolInvocationResult:
     status: str
     error_code: str | None
     duration_ms: int
+
+
+@dataclass(frozen=True)
+class _RecordedToolBatch:
+    trace: AgentExecutionTrace
+    raw_observations: list[dict[str, Any]]
+    cards: list[dict[str, Any]]
+    audits: list[ToolAuditEvent]
 
 
 TraceEventSink = Callable[
@@ -264,8 +274,8 @@ def _planner_deadline_fallback_plan(
 
     # A Planner deadline must not turn independent reads into a long serial
     # Executor chain. Group only generic, side-effect-free primary evidence.
-    # Conditional tools stay out; history remains available to Replanner when
-    # the primary progress read actually fails.
+    # Conditional tools stay out; the Controller invokes history only when the
+    # primary progress read actually fails.
     independent_items = [
         item for item in tool_catalog
         if item["tool_id"] not in (
@@ -565,17 +575,188 @@ async def _invoke_tool(
     )
 
 
-def _parallel_batch_covers_all_routed_tools(
+def _record_tool_batch(
+    trace: AgentExecutionTrace,
+    *,
+    actions: list[AgentActionTrace],
+    results: list[_ToolInvocationResult],
+) -> _RecordedToolBatch:
+    updated_actions = list(trace.actions)
+    observations = list(trace.observations)
+    raw_observations: list[dict[str, Any]] = []
+    cards: list[dict[str, Any]] = []
+    audits: list[ToolAuditEvent] = []
+    for action, result in zip(actions, results, strict=True):
+        action_index = updated_actions.index(action)
+        updated_actions[action_index] = action.model_copy(update={
+            "status": (
+                "completed" if result.status == "success" else "failed"
+            ),
+        })
+        observations.append(AgentObservationTrace(
+            sequence=(
+                max(
+                    [item.sequence for item in updated_actions]
+                    + [item.sequence for item in observations],
+                    default=0,
+                ) + 1
+            ),
+            action_sequence=action.sequence,
+            call_id=action.call_id,
+            batch_id=action.batch_id,
+            tool_id=result.tool_id,
+            status=result.status,
+            summary=result.summary,
+            result_fingerprint=observation_fingerprint(result.raw_result),
+            fact_keys=observation_fact_keys(
+                result.tool_id,
+                result.summary,
+            ),
+        ))
+        raw_observations.append(_raw_observation_for_prompt(
+            step_id=action.step_id or "",
+            call_id=action.call_id or "",
+            tool_id=result.tool_id,
+            status=result.status,
+            result=result.raw_result,
+        ))
+        if result.status == "success":
+            cards.append({
+                "type": result.tool_id,
+                "data": result.raw_result,
+            })
+        audits.append(ToolAuditEvent(
+            call_id=action.call_id or "",
+            tool_id=result.tool_id,
+            arguments=result.arguments,
+            result_summary=result.summary,
+            status=(
+                "completed" if result.status == "success" else "failed"
+            ),
+            error_code=result.error_code,
+            duration_ms=result.duration_ms,
+        ))
+
+    return _RecordedToolBatch(
+        trace=trace.model_copy(update={
+            "actions": updated_actions,
+            "observations": observations,
+            "budget_usage": trace.budget_usage.model_copy(update={
+                "tool_calls": trace.budget_usage.tool_calls + len(results),
+            }),
+        }),
+        raw_observations=raw_observations,
+        cards=cards,
+        audits=audits,
+    )
+
+
+def _conditional_fallback_triggered(
+    group: ConditionalReadEvidenceGroup,
+    primary_result: _ToolInvocationResult,
+) -> bool:
+    if group.fallback_trigger == "on_error":
+        return primary_result.status == "error"
+    return (
+        primary_result.status == "success"
+        and isinstance(primary_result.raw_result, dict)
+        and primary_result.raw_result.get("found") is False
+    )
+
+
+def _required_conditional_fallbacks(
+    results: list[_ToolInvocationResult],
+    *,
+    global_allowlist: set[str],
+) -> list[ConditionalReadEvidenceGroup]:
+    result_by_tool = {item.tool_id: item for item in results}
+    required: list[ConditionalReadEvidenceGroup] = []
+    for group in CONDITIONAL_READ_EVIDENCE_GROUPS:
+        if not {
+            group.primary_tool_id,
+            group.fallback_tool_id,
+        }.issubset(global_allowlist):
+            continue
+        primary_result = result_by_tool.get(group.primary_tool_id)
+        if (
+            primary_result is not None
+            and group.fallback_tool_id not in result_by_tool
+            and _conditional_fallback_triggered(group, primary_result)
+        ):
+            required.append(group)
+    return required
+
+
+def _routed_evidence_is_covered(
     results: list[_ToolInvocationResult],
     *,
     global_allowlist: set[str],
 ) -> bool:
-    """Stop only when one successful batch covers every routed tool source."""
-    return (
-        bool(global_allowlist)
-        and all(item.status == "success" for item in results)
-        and {item.tool_id for item in results} == global_allowlist
+    """Treat a resolved primary/fallback group as one routed evidence source."""
+    if not global_allowlist:
+        return False
+
+    result_by_tool = {item.tool_id: item for item in results}
+    grouped_tool_ids: set[str] = set()
+    for group in CONDITIONAL_READ_EVIDENCE_GROUPS:
+        group_tool_ids = {
+            group.primary_tool_id,
+            group.fallback_tool_id,
+        }
+        if not group_tool_ids.issubset(global_allowlist):
+            continue
+        grouped_tool_ids.update(group_tool_ids)
+        primary_result = result_by_tool.get(group.primary_tool_id)
+        if primary_result is None:
+            return False
+        if _conditional_fallback_triggered(group, primary_result):
+            fallback_result = result_by_tool.get(group.fallback_tool_id)
+            if fallback_result is None or fallback_result.status != "success":
+                return False
+        elif primary_result.status != "success":
+            return False
+
+    return all(
+        (
+            tool_id in grouped_tool_ids
+            or (
+                tool_id in result_by_tool
+                and result_by_tool[tool_id].status == "success"
+            )
+        )
+        for tool_id in global_allowlist
     )
+
+
+def _parallel_actions_are_resolved(
+    results: list[_ToolInvocationResult],
+    *,
+    planned_tool_ids: set[str],
+    global_allowlist: set[str],
+) -> bool:
+    """A failed primary is resolved only by its successful routed fallback."""
+    result_by_tool = {item.tool_id: item for item in results}
+    groups_by_primary = {
+        item.primary_tool_id: item
+        for item in CONDITIONAL_READ_EVIDENCE_GROUPS
+        if {
+            item.primary_tool_id,
+            item.fallback_tool_id,
+        }.issubset(global_allowlist)
+    }
+    for tool_id in planned_tool_ids:
+        result = result_by_tool.get(tool_id)
+        if result is None:
+            return False
+        group = groups_by_primary.get(tool_id)
+        if group is not None and _conditional_fallback_triggered(group, result):
+            fallback_result = result_by_tool.get(group.fallback_tool_id)
+            if fallback_result is None or fallback_result.status != "success":
+                return False
+            continue
+        if result.status != "success":
+            return False
+    return True
 
 
 def _guard_tool_decision(
@@ -802,119 +983,168 @@ async def execute_planned_agent(
                 )
                 for item in planned_actions
             ])
-            action_by_call_id = {
-                item.call_id: item for item in batch_actions
-            }
-            updated_actions = [
-                action_by_call_id.get(item.call_id, item)
-                for item in trace.actions
-            ]
-            audits: list[ToolAuditEvent] = []
-            observations = list(trace.observations)
-            for action, result in zip(batch_actions, results, strict=True):
-                updated = action.model_copy(update={
-                    "status": (
-                        "completed"
-                        if result.status == "success"
-                        else "failed"
-                    ),
-                })
-                updated_actions[updated_actions.index(action)] = updated
-                observations.append(AgentObservationTrace(
-                    sequence=(
-                        max(
-                            [item.sequence for item in updated_actions]
-                            + [item.sequence for item in observations],
-                            default=0,
-                        ) + 1
-                    ),
-                    action_sequence=action.sequence,
-                    call_id=action.call_id,
-                    batch_id=batch_id,
-                    tool_id=result.tool_id,
-                    status=result.status,
-                    summary=result.summary,
-                    result_fingerprint=observation_fingerprint(
-                        result.raw_result
-                    ),
-                    fact_keys=observation_fact_keys(
-                        result.tool_id,
-                        result.summary,
-                    ),
-                ))
+            recorded_batch = _record_tool_batch(
+                trace,
+                actions=batch_actions,
+                results=results,
+            )
+            trace = recorded_batch.trace
+            raw_observations.extend(recorded_batch.raw_observations)
+            cards.extend(recorded_batch.cards)
+            for result in results:
                 used_action_fingerprints.add(
                     _action_fingerprint(result.tool_id, result.arguments)
                 )
-                raw_observations.append(_raw_observation_for_prompt(
-                    step_id=step.id,
-                    call_id=action.call_id or "",
-                    tool_id=result.tool_id,
-                    status=result.status,
-                    result=result.raw_result,
-                ))
-                if result.status == "success":
-                    cards.append({
-                        "type": result.tool_id,
-                        "data": result.raw_result,
-                    })
-                audits.append(ToolAuditEvent(
-                    call_id=action.call_id or "",
-                    tool_id=result.tool_id,
-                    arguments=result.arguments,
-                    result_summary=result.summary,
-                    status=(
-                        "completed"
-                        if result.status == "success"
-                        else "failed"
-                    ),
-                    error_code=result.error_code,
-                    duration_ms=result.duration_ms,
-                ))
 
-            all_succeeded = all(
+            initial_batch_succeeded = all(
                 item.status == "success" for item in results
             )
-            trace = trace.model_copy(update={
-                "actions": updated_actions,
-                "observations": observations,
-                "budget_usage": trace.budget_usage.model_copy(update={
-                    "tool_calls": (
-                        trace.budget_usage.tool_calls + len(results)
-                    ),
-                }),
-            })
             trace = add_stage_timing(
                 trace,
                 stage="tool_batch",
                 source="controller",
-                status="success" if all_succeeded else "error",
+                status=(
+                    "success" if initial_batch_succeeded else "error"
+                ),
                 latency_ms=round(
                     (time.perf_counter() - batch_started) * 1000
                 ),
                 error_category=(
-                    None if all_succeeded else "parallel_tool_failure"
+                    None
+                    if initial_batch_succeeded
+                    else "parallel_tool_failure"
                 ),
             )
             step_tool_calls = len(results)
-            for audit in audits:
+            for audit in recorded_batch.audits:
                 await sink(trace, audit)
 
-            if all_succeeded:
+            fallback_groups = _required_conditional_fallbacks(
+                results,
+                global_allowlist=global_allowlist,
+            )
+            remaining_global_calls = max(
+                0,
+                settings.AGENT_MAX_TOOL_CALLS
+                - trace.budget_usage.tool_calls,
+            )
+            runnable_fallback_groups: list[
+                ConditionalReadEvidenceGroup
+            ] = []
+            for group in fallback_groups:
+                fallback_fingerprint = _action_fingerprint(
+                    group.fallback_tool_id,
+                    {},
+                )
+                if (
+                    len(runnable_fallback_groups) >= remaining_global_calls
+                    or group.fallback_tool_id not in tools_by_id
+                    or fallback_fingerprint in used_action_fingerprints
+                ):
+                    continue
+                runnable_fallback_groups.append(group)
+
+            if runnable_fallback_groups:
+                fallback_batch_id = (
+                    f"fallback-{run_id[:8]}-{uuid.uuid4()}"
+                )
+                fallback_actions: list[AgentActionTrace] = []
+                for group in runnable_fallback_groups:
+                    action = AgentActionTrace(
+                        sequence=_next_sequence(trace),
+                        call_id=f"plan-{run_id[:8]}-{uuid.uuid4()}",
+                        batch_id=fallback_batch_id,
+                        step_id=step.id,
+                        plan_version=trace.plan.version,
+                        tool_id=group.fallback_tool_id,
+                        arguments={},
+                    )
+                    fallback_actions.append(action)
+                    trace = trace.model_copy(update={
+                        "actions": [*trace.actions, action],
+                    })
+                await sink(trace, None)
+
+                fallback_started = time.perf_counter()
+                fallback_results = await asyncio.gather(*[
+                    _invoke_tool(
+                        tool_id=group.fallback_tool_id,
+                        arguments={},
+                        tool_map=tools_by_id,
+                        summarize_observation=summarize_observation,
+                        parallel_tool_invoker=parallel_tool_invoker,
+                    )
+                    for group in runnable_fallback_groups
+                ])
+                recorded_fallback = _record_tool_batch(
+                    trace,
+                    actions=fallback_actions,
+                    results=fallback_results,
+                )
+                trace = recorded_fallback.trace
+                raw_observations.extend(
+                    recorded_fallback.raw_observations
+                )
+                cards.extend(recorded_fallback.cards)
+                for result in fallback_results:
+                    used_action_fingerprints.add(
+                        _action_fingerprint(
+                            result.tool_id,
+                            result.arguments,
+                        )
+                    )
+
+                fallback_succeeded = all(
+                    item.status == "success"
+                    for item in fallback_results
+                )
+                trace = add_stage_timing(
+                    trace,
+                    stage="tool_batch",
+                    source="controller",
+                    status=(
+                        "success" if fallback_succeeded else "error"
+                    ),
+                    latency_ms=round(
+                        (time.perf_counter() - fallback_started) * 1000
+                    ),
+                    error_category=(
+                        None
+                        if fallback_succeeded
+                        else "conditional_fallback_failure"
+                    ),
+                )
+                step_tool_calls += len(fallback_results)
+                results.extend(fallback_results)
+                for audit in recorded_fallback.audits:
+                    await sink(trace, audit)
+
+            parallel_actions_resolved = _parallel_actions_are_resolved(
+                results,
+                planned_tool_ids={
+                    item.tool_id for item in planned_actions
+                },
+                global_allowlist=global_allowlist,
+            )
+            routed_coverage_satisfied = _routed_evidence_is_covered(
+                results,
+                global_allowlist=global_allowlist,
+            )
+
+            if parallel_actions_resolved:
                 step_summaries[step.id] = (
-                    f"{len(results)} 个独立只读观察均已返回，"
+                    f"{len(planned_actions)} 个独立主证据已解析，"
+                    f"条件替代调用 {len(results) - len(planned_actions)} 个，"
                     "parallel_read 步骤自动完成"
                 )
                 trace = _set_step_status(trace, step_index, "completed")
                 if (
                     step_index + 1 < len(trace.plan.steps)
-                    and _parallel_batch_covers_all_routed_tools(
-                        results,
-                        global_allowlist=global_allowlist,
-                    )
+                    and routed_coverage_satisfied
                 ):
                     for remaining_step in trace.plan.steps[step_index + 1:]:
                         step_summaries[remaining_step.id] = (
-                            "前序 parallel_read 已成功覆盖本轮全部允许证据源，"
+                            "前序主证据/条件替代证据已覆盖本轮全部允许证据源，"
                             "跳过不再提供新证据的冗余步骤"
                         )
                     trace = _finish_remaining_steps(
