@@ -141,6 +141,11 @@ _PROPOSAL_CAPABLE_MARKERS = (
     "提案",
 )
 
+_REPLANNER_DEADLINE_SAFE_REPLY = (
+    "我已经取得了部分训练数据，但本轮未能完成可靠分析。"
+    "我没有修改你的计划或训练记录，请稍后重试。"
+)
+
 _CHINESE_WEEK_COUNTS = {
     "一": 1,
     "二": 2,
@@ -721,6 +726,7 @@ async def execute_planned_agent(
     }
     step_index = 0
     executor_deadline_hit = False
+    replanner_deadline_hit = False
 
     while step_index < len(trace.plan.steps):
         step = trace.plan.steps[step_index]
@@ -1038,6 +1044,7 @@ async def execute_planned_agent(
                         ),
                     )
                 except Exception as exc:
+                    error_category = _planning_error_category(exc)
                     trace = add_stage_timing(
                         trace,
                         stage="replanner",
@@ -1046,10 +1053,31 @@ async def execute_planned_agent(
                         latency_ms=round(
                             (time.perf_counter() - replanner_started) * 1000
                         ),
-                        error_category=_planning_error_category(exc),
+                        error_category=error_category,
                     )
+                    if not (
+                        isinstance(exc, PlanningModelError)
+                        and exc.category == "replanner_deadline_exceeded"
+                    ):
+                        await sink(trace, None)
+                        raise
+                    trace = trace.model_copy(update={
+                        "budget_usage": trace.budget_usage.model_copy(update={
+                            "model_calls": trace.budget_usage.model_calls + 1,
+                            "replans": trace.budget_usage.replans + 1,
+                        }),
+                    })
+                    step_summaries[step.id] = (
+                        "Replanner 超过独立时限，停止新增工具调用并基于已有证据收口"
+                    )
+                    trace = _finish_remaining_steps(
+                        trace,
+                        current_index=step_index,
+                        current_status="failed",
+                    )
+                    replanner_deadline_hit = True
                     await sink(trace, None)
-                    raise
+                    break
                 trace = add_stage_timing(
                     trace,
                     stage="replanner",
@@ -1237,7 +1265,7 @@ async def execute_planned_agent(
 
         if replan_requested:
             continue
-        if executor_deadline_hit:
+        if executor_deadline_hit or replanner_deadline_hit:
             break
         if trace.plan.steps[step_index].status != "completed":
             trace = _set_step_status(trace, step_index, "failed")
@@ -1312,42 +1340,50 @@ async def execute_planned_agent(
                     if finalizer_metrics is not None else None
                 ),
             )
-            await sink(trace, None)
-            raise
-        trace = add_stage_timing(
-            trace,
-            stage="finalizer",
-            source="model",
-            status="success",
-            latency_ms=round(
-                (time.perf_counter() - finalizer_started) * 1000
-            ),
-            input_chars=(
-                finalizer_metrics.input_chars
-                if finalizer_metrics is not None else None
-            ),
-            output_chars=(
-                finalizer_metrics.output_chars
-                if finalizer_metrics is not None else None
-            ),
-            input_tokens=(
-                finalizer_metrics.input_tokens
-                if finalizer_metrics is not None else None
-            ),
-            output_tokens=(
-                finalizer_metrics.output_tokens
-                if finalizer_metrics is not None else None
-            ),
-            finish_reason=(
-                finalizer_metrics.finish_reason
-                if finalizer_metrics is not None else None
-            ),
-        )
+            if not replanner_deadline_hit:
+                await sink(trace, None)
+                raise
+            response = FinalResponse(
+                terminal_action="answer",
+                reply=_REPLANNER_DEADLINE_SAFE_REPLY,
+                outcome="insufficient_evidence",
+            )
+        else:
+            trace = add_stage_timing(
+                trace,
+                stage="finalizer",
+                source="model",
+                status="success",
+                latency_ms=round(
+                    (time.perf_counter() - finalizer_started) * 1000
+                ),
+                input_chars=(
+                    finalizer_metrics.input_chars
+                    if finalizer_metrics is not None else None
+                ),
+                output_chars=(
+                    finalizer_metrics.output_chars
+                    if finalizer_metrics is not None else None
+                ),
+                input_tokens=(
+                    finalizer_metrics.input_tokens
+                    if finalizer_metrics is not None else None
+                ),
+                output_tokens=(
+                    finalizer_metrics.output_tokens
+                    if finalizer_metrics is not None else None
+                ),
+                finish_reason=(
+                    finalizer_metrics.finish_reason
+                    if finalizer_metrics is not None else None
+                ),
+            )
         trace = trace.model_copy(update={
             "budget_usage": trace.budget_usage.model_copy(update={
                 "model_calls": trace.budget_usage.model_calls + 1,
             }),
         })
+        await sink(trace, None)
 
     _validate_final_response_contract(
         response,
@@ -1365,12 +1401,16 @@ async def execute_planned_agent(
         "status": "completed",
         "terminal_action": response.terminal_action,
         "termination_reason": (
-            "executor_deadline_exceeded"
-            if executor_deadline_hit
+            "replanner_deadline_exceeded"
+            if replanner_deadline_hit
             else (
-                "agent_completed_with_partial_evidence"
-                if partial
-                else "agent_completed"
+                "executor_deadline_exceeded"
+                if executor_deadline_hit
+                else (
+                    "agent_completed_with_partial_evidence"
+                    if partial
+                    else "agent_completed"
+                )
             )
         ),
         "finalization_contract": finalization_contract,

@@ -70,6 +70,8 @@ Executor 发现原步骤不再适用时只能请求重规划。Controller 最多
 - 工具 action 保存发生时的 `plan_version`；
 - 已调用的相同工具与相同规范化参数不能再次调用。
 
+Replanner 与初始 Planner 共用独立 deadline，但超时后的处理不同。初始 Planner 尚无工具观察，可以生成受限的 `deadline_fallback_v1`；Replanner 超时时已经存在真实观察或工具错误，Controller 不再猜测替代计划，也不允许新增工具调用，而是把当前步骤标为失败、后续步骤标为跳过，并交给 Finalizer 仅基于已有证据透明收口。trace 记录 `replanner_deadline_exceeded`，本次重规划尝试仍计入模型和重规划预算。若 Finalizer 随后也失败，运行时返回固定的只读安全说明，明确没有修改计划或训练记录，避免把可恢复的局部故障升级为整轮 run 失败。
+
 首版不保存完整计划版本历史，不实现 DAG、跨 run 步骤队列或分布式步骤恢复。只读工具在 worker attempt 中断后可以由新 attempt 重新决策；所有实际持久化事件仍受租约所有权和唯一索引保护。
 
 ## 硬预算
@@ -125,6 +127,7 @@ Finalizer 模型实际输出的是证据语义 outcome，而不是任意 termina
 - direct 步骤不能越权增加第二次调用；
 - 相同工具与参数不能重复；
 - 一次动态重规划及计划版本记录；
+- Replanner deadline 后停止新增工具调用，保留已有观察并通过 Finalizer 或固定安全说明完成 run；
 - 第二次重规划请求被硬预算拒绝；
 - 实时工具审计、助手消息和 worker 所有权保持唯一；
 - 首批多步评测集及完整后端回归。

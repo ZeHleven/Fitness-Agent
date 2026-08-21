@@ -102,6 +102,23 @@ class SlowExecutorPolicy(ScriptedPolicy):
         raise AssertionError("executor deadline did not cancel the call")
 
 
+class SlowReplannerPolicy(ScriptedPolicy):
+    async def revise_plan(self, **kwargs: Any) -> MicroPlan:
+        self.replan_inputs.append(kwargs)
+        await asyncio.sleep(1)
+        raise AssertionError("replanner deadline did not cancel the call")
+
+
+class SlowReplannerFailingFinalizerPolicy(SlowReplannerPolicy):
+    async def finalize(self, **kwargs: Any) -> FinalResponse:
+        self.finalize_inputs.append(kwargs)
+        raise PlanningModelError(
+            "finalizer failed after replanner deadline",
+            stage="finalizer",
+            category="finalizer_provider_error",
+        )
+
+
 def _planned_trace(tool_allowlist: list[str]):
     resolution = IntentResolution(
         primary_intent="active_workout_query",
@@ -1179,6 +1196,154 @@ async def test_controller_replans_once_and_versions_later_actions():
     assert sum(
         item.stage == "executor" for item in trace.stage_timings
     ) == 5
+
+
+@pytest.mark.asyncio
+async def test_replanner_deadline_finalizes_with_partial_evidence(monkeypatch):
+    history_calls: list[int] = []
+
+    @tool(
+        "workout_get_progress",
+        args_schema=NoArguments,
+        description="读取训练进度",
+    )
+    async def progress():
+        raise TimeoutError("fixture timeout")
+
+    @tool(
+        "workout_list_history",
+        args_schema=WorkoutHistoryArguments,
+        description="读取训练历史",
+    )
+    async def history(limit: int = 5):
+        history_calls.append(limit)
+        return {"count": 3, "sessions": []}
+
+    plan = _two_step_plan(
+        ["workout.get_progress"],
+        ["workout.list_history"],
+    )
+    policy = SlowReplannerPolicy(
+        plan=plan,
+        decisions=[
+            _decision(
+                "call_tool",
+                tool_id="workout.get_progress",
+                arguments={},
+            ),
+            _decision(
+                "request_replan",
+                reason="主进度工具超时，需要改用历史记录",
+            ),
+        ],
+        final_response=FinalResponse(
+            terminal_action="answer",
+            reply="进度查询未完成，本轮没有足够证据形成可靠结论。",
+            outcome="insufficient_evidence",
+        ),
+    )
+    allowlist = ["workout.get_progress", "workout.list_history"]
+    monkeypatch.setattr(settings, "AGENT_PLANNER_TIMEOUT_SECONDS", 0.01)
+
+    result = await execute_planned_agent(
+        db=None,
+        user_id="user-1",
+        run_id="replanner-deadline",
+        model=None,
+        goal="工具失败后查询可用训练证据",
+        subtasks=["查询训练进度", "基于可用证据回答"],
+        tool_allowlist=allowlist,
+        initial_trace=_planned_trace(allowlist),
+        summarize_observation=_audit_result_summary,
+        policy=policy,
+        tools=[progress, history],
+    )
+
+    trace = result.execution_trace
+    assert result.reply == "进度查询未完成，本轮没有足够证据形成可靠结论。"
+    assert trace.status == "completed"
+    assert trace.terminal_action == "answer"
+    assert trace.termination_reason == "replanner_deadline_exceeded"
+    assert [step.status for step in trace.plan.steps] == ["failed", "skipped"]
+    assert len(trace.actions) == 1
+    assert len(trace.observations) == 1
+    assert trace.observations[0].status == "error"
+    assert trace.budget_usage.tool_calls == 1
+    assert trace.budget_usage.replans == 1
+    assert trace.budget_usage.model_calls == 5
+    assert history_calls == []
+    assert len(policy.replan_inputs) == 1
+    assert len(policy.finalize_inputs) == 1
+    assert policy.finalize_inputs[0]["observations"][0]["status"] == "error"
+    replanner_timing = next(
+        item for item in trace.stage_timings if item.stage == "replanner"
+    )
+    assert replanner_timing.status == "error"
+    assert replanner_timing.error_category == "replanner_deadline_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_replanner_deadline_uses_safe_reply_when_finalizer_fails(
+    monkeypatch,
+):
+    @tool(
+        "workout_get_progress",
+        args_schema=NoArguments,
+        description="读取训练进度",
+    )
+    async def progress():
+        raise TimeoutError("fixture timeout")
+
+    plan = MicroPlan(
+        goal="工具失败后查询可用训练证据",
+        steps=[MicroPlanStep(
+            objective="查询训练进度",
+            candidate_tools=["workout.get_progress"],
+            execution_strategy="direct",
+            success_signal="取得进度观察",
+        )],
+    )
+    policy = SlowReplannerFailingFinalizerPolicy(
+        plan=plan,
+        decisions=[
+            _decision(
+                "call_tool",
+                tool_id="workout.get_progress",
+                arguments={},
+            ),
+            _decision("request_replan", reason="进度工具超时"),
+        ],
+    )
+    allowlist = ["workout.get_progress"]
+    monkeypatch.setattr(settings, "AGENT_PLANNER_TIMEOUT_SECONDS", 0.01)
+
+    result = await execute_planned_agent(
+        db=None,
+        user_id="user-1",
+        run_id="replanner-finalizer-fallback",
+        model=None,
+        goal="工具失败后查询可用训练证据",
+        subtasks=["查询训练进度", "基于可用证据回答"],
+        tool_allowlist=allowlist,
+        initial_trace=_planned_trace(allowlist),
+        summarize_observation=_audit_result_summary,
+        policy=policy,
+        tools=[progress],
+    )
+
+    trace = result.execution_trace
+    assert trace.status == "completed"
+    assert trace.terminal_action == "answer"
+    assert trace.termination_reason == "replanner_deadline_exceeded"
+    assert trace.finalization_contract is not None
+    assert trace.finalization_contract.selected_outcome == "insufficient_evidence"
+    assert "没有修改你的计划或训练记录" in result.reply
+    assert trace.budget_usage.model_calls == 5
+    finalizer_timing = next(
+        item for item in trace.stage_timings if item.stage == "finalizer"
+    )
+    assert finalizer_timing.status == "error"
+    assert finalizer_timing.error_category == "finalizer_provider_error"
 
 
 @pytest.mark.asyncio
