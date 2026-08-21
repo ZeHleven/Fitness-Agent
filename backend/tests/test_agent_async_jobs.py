@@ -319,6 +319,17 @@ async def test_worker_renews_lease_while_agent_execution_is_running(
         task = asyncio.create_task(process_agent_run(session_factory, run_id))
         try:
             await asyncio.wait_for(started.wait(), timeout=2)
+            running_response = await client.get(
+                f"/api/v1/agent/runs/{run_id}",
+                headers=headers,
+            )
+            assert running_response.json()["execution_mode"] == "direct"
+            assert running_response.json()["execution_trace"]["status"] == (
+                "running"
+            )
+            assert running_response.json()["execution_trace"][
+                "terminal_action"
+            ] is None
             await asyncio.sleep(1.1)
             await db_session.refresh(run)
             assert run.lease_expires_at > first_expiry

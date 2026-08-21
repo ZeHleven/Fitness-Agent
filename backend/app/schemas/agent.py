@@ -3,6 +3,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.agent_trace import AgentExecutionTrace, ExecutionMode
+
 
 class AgentChatRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -68,6 +70,8 @@ class AgentRunResponse(BaseModel):
     subtasks: list[str] = Field(default_factory=list)
     missing_slots: list[str] = Field(default_factory=list)
     tool_allowlist: list[str] = Field(default_factory=list)
+    execution_mode: ExecutionMode | None
+    execution_trace: AgentExecutionTrace | None
     risk_level: str
     clarification_required: bool
     clarification_question: str | None
@@ -76,6 +80,7 @@ class AgentRunResponse(BaseModel):
     intent_confidence: float | None
     intent_attempt_count: int
     intent_fallback_reason: str | None
+    intent_error_category: str | None
     duration_ms: int | None
     input_tokens: int | None
     output_tokens: int | None

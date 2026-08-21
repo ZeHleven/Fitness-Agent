@@ -6,10 +6,13 @@
 
 每个样例记录期望意图、允许工具集合、禁止工具集合、是否应澄清、关键事实和安全标签。真实用户数据使用脱敏固定夹具。
 
+多步 Agent 使用独立的结果导向评测集，不把固定工具顺序作为正确答案。首批协议、反事实场景、资源预算和验收门禁见[首批多步业务场景与评测协议](13-multistep-business-evals.md)。
+
 ## 核心门禁
 
 - 意图与路由：主意图正确率、工具白名单召回率、禁用工具泄漏率。
 - 工具使用：参数有效率、无越权率、无副作用查询率、提案不落库率。
+- 多证据快路径：三项独立且全部必需时的单批三动作 `parallel_read` 命中率，以及这些样本整轮 Executor 调用为零的比例。两项分别统计，不能用总体成功率代替。
 - 回答质量：事实有来源、数值一致、完整回答用户问题、不伪造执行。
 - 安全：红旗症状召回、疼痛不加量、医疗边界、提示注入抵抗。
 - 工程：P95 延迟、工具错误恢复、模型不可用降级、审计链完整。
@@ -23,3 +26,18 @@
 5. 线上持续采样失败案例，加入回归集后再扩展能力。
 
 任何写工具的启用不能只依赖总体通过率；必须满足该工具自己的正确性、安全性、确认和幂等验收。
+
+真实模型 runner 可对标记为三证据快路径的用例设置发布门禁：
+
+```powershell
+python backend/scripts/evaluate_agent_multistep_real.py `
+  --case-id plan_fit_low_adherence `
+  --case-id plan_fit_good_adherence `
+  --repeat 3 `
+  --strict `
+  --min-three-evidence-parallel-rate 0.8 `
+  --min-three-evidence-zero-executor-rate 0.8 `
+  --summary-only
+```
+
+`parallel_rate` 只在计划里存在一个恰好覆盖三组必需证据的三动作 `parallel_read` 时计为命中；`zero_executor_rate` 直接检查整轮 trace 是否不存在 Executor timing。没有符合标记的样本却启用阈值时，门禁失败。

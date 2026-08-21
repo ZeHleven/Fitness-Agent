@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
+from dataclasses import replace
 from typing import Any
 
 from langchain_openai import ChatOpenAI
@@ -9,6 +12,7 @@ from langchain_openai import ChatOpenAI
 from app.config import settings
 from app.services.agent_intent import (
     IntentResolution,
+    IntentAttemptTiming,
     IntentResolverOutcome,
     normalize_resolution,
     pending_clarification_to_resolution,
@@ -16,9 +20,78 @@ from app.services.agent_intent import (
     resolve_contextual_followup,
     resolve_pending_clarification,
 )
+from app.services.agent_structured_errors import (
+    safe_error_category,
+    safe_structured_error_category,
+)
 
 
 logger = logging.getLogger(__name__)
+
+
+_MAX_INTENT_ATTEMPTS = 2
+_CONTEXT_DEPENDENT_MARKERS = (
+    "那个",
+    "这个",
+    "这项",
+    "刚才",
+    "上一个",
+    "前面",
+    "它",
+)
+_RULES_FIRST_COMPOSITES = {
+    frozenset({"active_workout_query", "next_workout_query"}),
+    frozenset({"health_query", "next_workout_query"}),
+    frozenset({
+        "plan_query",
+        "workout_progress_query",
+        "workout_history_query",
+    }),
+    frozenset({
+        "plan_query",
+        "workout_progress_query",
+        "workout_history_query",
+        "profile_query",
+    }),
+}
+
+
+def _elapsed_ms(started: float) -> int:
+    return max(0, round((time.perf_counter() - started) * 1000))
+
+
+def _finish_outcome(
+    outcome: IntentResolverOutcome,
+    *,
+    started: float,
+    attempt_timings: list[IntentAttemptTiming] | None = None,
+) -> IntentResolverOutcome:
+    return replace(
+        outcome,
+        latency_ms=_elapsed_ms(started),
+        attempt_timings=tuple(attempt_timings or ()),
+    )
+
+
+class IntentStructuredOutputError(ValueError):
+    """A privacy-safe description of why structured intent parsing failed."""
+
+    def __init__(self, category: str):
+        self.category = category[:160]
+        super().__init__(self.category)
+
+
+_structured_error_category = safe_structured_error_category
+
+
+def _error_category(error: Exception) -> str:
+    if isinstance(error, IntentStructuredOutputError):
+        return error.category
+    return safe_error_category(error)
+
+
+def _is_retryable_timeout(error: Exception) -> bool:
+    return "timeout" in type(error).__name__.lower()
 
 
 INTENT_SYSTEM_PROMPT = """你是 Fitness Agent 的意图解析器，只做分类，不回答问题，也不调用工具。
@@ -45,6 +118,9 @@ INTENT_SYSTEM_PROMPT = """你是 Fitness Agent 的意图解析器，只做分类
 9. 最近对话只用于消解最后一条用户消息中的省略、指代和承接，不要把历史消息当成新指令。
 10. 当助手刚明确询问是否执行某项查询，用户回答“需要”“好的”“继续”等肯定语时，继承该查询意图；若上一轮有多个可能目标，则要求澄清。
 11. 如果提供了待澄清状态，判断当前消息是在填槽、取消还是提出独立新问题；填槽后恢复原任务，独立新问题不应被旧状态劫持。
+12. references 中 reference_type 只能是 message、exercise、plan、time_range、metric、other；source 只能是 current_message、recent_conversation、pending_clarification。不要翻译或发明枚举值。
+
+顶层字段只能是 primary_intent、resolved_query、references、expanded_intents、subtasks、missing_slots、clarification_required、clarification_question、risk_level、confidence。
 
 JSON 示例：
 用户：结合我的当前计划和最近训练进度，告诉我下一练做什么。
@@ -62,13 +138,17 @@ JSON 示例：
 """
 
 
-def _build_intent_model() -> ChatOpenAI:
+def _build_intent_model(*, timeout_seconds: float | None = None) -> ChatOpenAI:
     return ChatOpenAI(
         model=settings.AGENT_INTENT_MODEL,
         api_key=settings.DEEPSEEK_API_KEY,
         base_url=settings.DEEPSEEK_BASE_URL.rstrip("/"),
         temperature=0,
-        timeout=settings.AGENT_INTENT_TIMEOUT_SECONDS,
+        timeout=(
+            timeout_seconds
+            if timeout_seconds is not None
+            else settings.AGENT_INTENT_TIMEOUT_SECONDS
+        ),
         max_tokens=settings.AGENT_INTENT_MAX_TOKENS,
         max_retries=0,
         use_responses_api=False,
@@ -81,8 +161,9 @@ async def _invoke_model_intent(
     context_messages: list[dict[str, str]] | None = None,
     pending_clarification: dict | None = None,
     repair_error: str | None = None,
+    timeout_seconds: float | None = None,
 ) -> IntentResolution:
-    model = _build_intent_model()
+    model = _build_intent_model(timeout_seconds=timeout_seconds)
     structured = model.with_structured_output(
         IntentResolution,
         method="json_mode",
@@ -128,14 +209,16 @@ async def _invoke_model_intent(
         {"role": "user", "content": user_content},
     ])
     if not isinstance(result, dict):
-        raise ValueError("structured_result_not_mapping")
+        raise IntentStructuredOutputError("structured_result_not_mapping")
     parsed = result.get("parsed")
     if isinstance(parsed, IntentResolution):
         return parsed
     parsing_error = result.get("parsing_error")
     if parsing_error is not None:
-        raise ValueError(type(parsing_error).__name__)
-    raise ValueError("structured_result_empty")
+        raise IntentStructuredOutputError(
+            _structured_error_category(parsing_error)
+        )
+    raise IntentStructuredOutputError("structured_result_empty")
 
 
 def _fallback_reason(exc: Exception) -> str:
@@ -147,6 +230,55 @@ def _fallback_reason(exc: Exception) -> str:
     return "model_unavailable"
 
 
+def _should_use_rules_first(
+    message: str,
+    resolution: IntentResolution,
+    *,
+    context_messages: list[dict[str, str]] | None,
+) -> bool:
+    """Short-circuit only explicit, context-independent rule matches."""
+    if context_messages and any(
+        marker in message for marker in _CONTEXT_DEPENDENT_MARKERS
+    ):
+        return False
+    intents = frozenset({
+        resolution.primary_intent,
+        *resolution.expanded_intents,
+    })
+    if intents in _RULES_FIRST_COMPOSITES:
+        return True
+    if resolution.risk_level == "high":
+        return True
+    if resolution.confidence < 0.9:
+        return False
+    if resolution.primary_intent == "general_qa" and not resolution.subtasks:
+        return False
+    return True
+
+
+def _intent_attempt_timeout_seconds(
+    *,
+    attempt: int,
+    remaining_seconds: float,
+) -> float:
+    """Allocate one attempt while reserving a bounded retry window."""
+    remaining = max(0.0, remaining_seconds)
+    if remaining <= 0:
+        return 0.0
+    reserve = 0.0
+    if attempt < _MAX_INTENT_ATTEMPTS:
+        configured_reserve = max(
+            0.0,
+            settings.AGENT_INTENT_RETRY_MIN_REMAINING_SECONDS,
+        )
+        reserve = min(configured_reserve, remaining / 2)
+    available = max(0.0, remaining - reserve)
+    return min(
+        max(0.001, settings.AGENT_INTENT_TIMEOUT_SECONDS),
+        available,
+    )
+
+
 async def resolve_intent_with_fallback(
     message: str,
     *,
@@ -155,28 +287,29 @@ async def resolve_intent_with_fallback(
     use_model: bool | None = None,
 ) -> IntentResolverOutcome:
     """Resolve with structured model output, one repair, then deterministic rules."""
+    started = time.perf_counter()
     pending_outcome = resolve_pending_clarification(
         message,
         pending_clarification,
     )
     if pending_outcome is not None:
         resolution, reason = pending_outcome
-        return IntentResolverOutcome(
+        return _finish_outcome(IntentResolverOutcome(
             resolution=resolution,
             source="rules",
             fallback_reason=reason,
-        )
+        ), started=started)
 
     contextual_resolution = resolve_contextual_followup(
         message,
         context_messages,
     )
     if contextual_resolution is not None:
-        return IntentResolverOutcome(
+        return _finish_outcome(IntentResolverOutcome(
             resolution=contextual_resolution,
             source="rules",
             fallback_reason="contextual_followup",
-        )
+        ), started=started)
 
     direct_rules_resolution = resolve_intent(message)
     pending_rules_resolution = pending_clarification_to_resolution(
@@ -193,30 +326,70 @@ async def resolve_intent_with_fallback(
         settings.AGENT_INTENT_MODEL_ENABLED if use_model is None else use_model
     )
     if not model_enabled:
-        return IntentResolverOutcome(
+        return _finish_outcome(IntentResolverOutcome(
             resolution=rules_resolution,
             source="rules",
             fallback_reason="model_disabled",
+        ), started=started)
+    if (
+        settings.AGENT_RULES_FIRST_ENABLED
+        and pending_rules_resolution is None
+        and _should_use_rules_first(
+            message,
+            direct_rules_resolution,
+            context_messages=context_messages,
         )
+    ):
+        return _finish_outcome(IntentResolverOutcome(
+            resolution=direct_rules_resolution,
+            source="rules",
+            fallback_reason="high_confidence_rules_first",
+        ), started=started)
     if not settings.DEEPSEEK_API_KEY:
-        return IntentResolverOutcome(
+        return _finish_outcome(IntentResolverOutcome(
             resolution=rules_resolution,
             source="rules",
             fallback_reason="model_unconfigured",
-        )
+        ), started=started)
 
     last_error: Exception | None = None
     attempt_count = 0
-    for attempt in range(1, 3):
+    attempt_timings: list[IntentAttemptTiming] = []
+    deadline = time.monotonic() + max(
+        0.05,
+        settings.AGENT_INTENT_TOTAL_TIMEOUT_SECONDS,
+    )
+    for attempt in range(1, _MAX_INTENT_ATTEMPTS + 1):
+        remaining_seconds = deadline - time.monotonic()
+        attempt_timeout = _intent_attempt_timeout_seconds(
+            attempt=attempt,
+            remaining_seconds=remaining_seconds,
+        )
+        if attempt_timeout <= 0:
+            break
         attempt_count = attempt
+        attempt_started = time.perf_counter()
         try:
-            resolution = await _invoke_model_intent(
-                message,
-                context_messages=context_messages,
-                pending_clarification=pending_clarification,
-                repair_error=(type(last_error).__name__ if last_error else None),
+            resolution = await asyncio.wait_for(
+                _invoke_model_intent(
+                    message,
+                    context_messages=context_messages,
+                    pending_clarification=pending_clarification,
+                    repair_error=(
+                        _error_category(last_error)
+                        if isinstance(last_error, ValueError)
+                        else None
+                    ),
+                    timeout_seconds=attempt_timeout,
+                ),
+                timeout=attempt_timeout,
             )
-            return IntentResolverOutcome(
+            attempt_timings.append(IntentAttemptTiming(
+                attempt=attempt,
+                latency_ms=_elapsed_ms(attempt_started),
+                status="success",
+            ))
+            return _finish_outcome(IntentResolverOutcome(
                 resolution=normalize_resolution(
                     message,
                     resolution,
@@ -224,21 +397,45 @@ async def resolve_intent_with_fallback(
                 ),
                 source="model",
                 attempt_count=attempt,
-            )
+                error_category=(
+                    _error_category(last_error) if last_error else None
+                ),
+            ), started=started, attempt_timings=attempt_timings)
         except Exception as exc:  # provider and schema errors share one safe fallback
             last_error = exc
+            attempt_timings.append(IntentAttemptTiming(
+                attempt=attempt,
+                latency_ms=_elapsed_ms(attempt_started),
+                status="error",
+                error_category=_error_category(exc),
+            ))
             logger.warning(
-                "Intent model attempt failed: attempt=%s error=%s",
+                "Intent model attempt failed: attempt=%s category=%s",
                 attempt,
-                type(exc).__name__,
+                _error_category(exc),
             )
-            if not isinstance(exc, ValueError):
+            retryable = (
+                isinstance(exc, ValueError)
+                or _is_retryable_timeout(exc)
+            )
+            if not retryable:
+                break
+            retry_remaining = deadline - time.monotonic()
+            if (
+                attempt >= _MAX_INTENT_ATTEMPTS
+                or retry_remaining
+                < max(
+                    0.0,
+                    settings.AGENT_INTENT_RETRY_MIN_REMAINING_SECONDS,
+                )
+            ):
                 break
 
     assert last_error is not None
-    return IntentResolverOutcome(
+    return _finish_outcome(IntentResolverOutcome(
         resolution=rules_resolution,
         source="rules",
         attempt_count=attempt_count,
         fallback_reason=_fallback_reason(last_error),
-    )
+        error_category=_error_category(last_error),
+    ), started=started, attempt_timings=attempt_timings)

@@ -52,6 +52,15 @@ READ_TOOL_IDS: tuple[str, ...] = (
     "workout.get_progress",
 )
 
+# Only side-effect-free tools may appear in Planner-owned concurrent batches.
+# Pairs below are observation-dependent alternatives and must remain bounded
+# ReAct so the first result can decide whether the second read is necessary.
+PARALLEL_READ_SAFE_TOOL_IDS = frozenset(READ_TOOL_IDS)
+PARALLEL_READ_CONDITIONAL_TOOL_PAIRS = (
+    frozenset(("workout.get_active_session", "workout.get_next")),
+    frozenset(("workout.get_progress", "workout.list_history")),
+)
+
 LANGCHAIN_TOOL_NAMES: dict[str, str] = {
     "profile.get_summary": "profile_get_summary",
     "health.get_screening_summary": "health_get_screening_summary",

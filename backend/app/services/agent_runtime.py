@@ -14,14 +14,27 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.config import settings
+from app.database import AsyncSessionLocal
 from app.models.agent import (
     AgentConversation,
     AgentMessage,
     AgentRun,
     AgentToolCall,
 )
+from app.schemas.agent_trace import AgentExecutionTrace
+from app.services.agent_controller import (
+    ToolAuditEvent,
+    execute_planned_agent,
+)
 from app.services.agent_intent import IntentResolution, route_tools
 from app.services.agent_intent_model import resolve_intent_with_fallback
+from app.services.agent_structured_errors import safe_error_category
+from app.services.agent_trace import (
+    add_stage_timing,
+    build_initial_execution_trace,
+    complete_execution_trace,
+    terminate_execution_trace,
+)
 from app.services.agent_tools import TOOL_ID_BY_LANGCHAIN_NAME, build_read_tools
 from app.services.ai_client import AIServiceError
 
@@ -49,6 +62,7 @@ class AgentRuntimeResult:
     reply: str
     run_id: str
     cards: list[dict[str, Any]] = field(default_factory=list)
+    execution_trace: AgentExecutionTrace | None = None
 
 
 class AgentRunOwnershipLost(RuntimeError):
@@ -87,6 +101,7 @@ async def _mark_owned_run_failed(
     expected_attempt_count: int | None,
     error_code: str,
     duration_ms: int,
+    execution_trace: AgentExecutionTrace | None = None,
 ) -> None:
     await db.rollback()
     filters = [
@@ -95,16 +110,20 @@ async def _mark_owned_run_failed(
     ]
     if expected_attempt_count is not None:
         filters.append(AgentRun.attempt_count == expected_attempt_count)
+    values: dict[str, Any] = {
+        "status": "failed",
+        "error_code": error_code,
+        "completed_at": datetime.now(timezone.utc),
+        "duration_ms": duration_ms,
+        "lease_expires_at": None,
+    }
+    if execution_trace is not None:
+        values["execution_mode"] = execution_trace.execution_mode
+        values["execution_trace"] = execution_trace.model_dump(mode="json")
     result = await db.execute(
         update(AgentRun)
         .where(*filters)
-        .values(
-            status="failed",
-            error_code=error_code,
-            completed_at=datetime.now(timezone.utc),
-            duration_ms=duration_ms,
-            lease_expires_at=None,
-        )
+        .values(**values)
     )
     if result.rowcount != 1 and expected_attempt_count is not None:
         await db.rollback()
@@ -115,19 +134,28 @@ async def _mark_owned_run_failed(
     await db.commit()
 
 
-def _build_model() -> ChatOpenAI:
+def _build_model(
+    *,
+    temperature: float = 0.2,
+    max_tokens: int | None = None,
+) -> ChatOpenAI:
     if not settings.AGENT_ENABLED:
         raise AIServiceError("Agent 服务尚未启用")
     if not settings.DEEPSEEK_API_KEY:
         raise AIServiceError("AI 服务尚未配置，请先设置 DEEPSEEK_API_KEY")
+    model_options: dict[str, Any] = {
+        "model": settings.AGENT_MODEL,
+        "api_key": settings.DEEPSEEK_API_KEY,
+        "base_url": settings.DEEPSEEK_BASE_URL.rstrip("/"),
+        "temperature": temperature,
+        "timeout": settings.AGENT_TIMEOUT_SECONDS,
+        "max_retries": 1,
+        "use_responses_api": False,
+    }
+    if max_tokens is not None:
+        model_options["max_tokens"] = max_tokens
     return ChatOpenAI(
-        model=settings.AGENT_MODEL,
-        api_key=settings.DEEPSEEK_API_KEY,
-        base_url=settings.DEEPSEEK_BASE_URL.rstrip("/"),
-        temperature=0.2,
-        timeout=settings.AGENT_TIMEOUT_SECONDS,
-        max_retries=1,
-        use_responses_api=False,
+        **model_options,
     )
 
 
@@ -408,6 +436,7 @@ async def execute_agent_run(
     expected_attempt_count: int | None = None,
 ) -> AgentRuntimeResult:
     started = time.perf_counter()
+    execution_trace: AgentExecutionTrace | None = None
     try:
         existing = await db.scalar(
             select(AgentMessage).where(
@@ -417,6 +446,10 @@ async def execute_agent_run(
         )
         if existing is not None:
             cards = existing.content_data.get("cards", [])
+            if run.execution_trace:
+                execution_trace = AgentExecutionTrace.model_validate(
+                    run.execution_trace
+                )
             await _lock_run_ownership(
                 db,
                 run_id=run.id,
@@ -430,6 +463,7 @@ async def execute_agent_run(
                 reply=existing.content,
                 run_id=run.id,
                 cards=cards if isinstance(cards, list) else [],
+                execution_trace=execution_trace,
             )
 
         history = await _load_history(
@@ -444,6 +478,11 @@ async def execute_agent_run(
         )
         resolution = intent_outcome.resolution
         tool_allowlist = route_tools(resolution)
+        execution_trace = build_initial_execution_trace(
+            resolution,
+            tool_allowlist,
+            intent_outcome,
+        )
         run.status = "running"
         run.primary_intent = resolution.primary_intent
         run.resolved_query = resolution.resolved_query
@@ -452,6 +491,8 @@ async def execute_agent_run(
         run.subtasks = resolution.subtasks
         run.missing_slots = resolution.missing_slots
         run.tool_allowlist = tool_allowlist
+        run.execution_mode = execution_trace.execution_mode
+        run.execution_trace = execution_trace.model_dump(mode="json")
         run.risk_level = resolution.risk_level
         run.clarification_required = resolution.clarification_required
         run.clarification_question = resolution.clarification_question
@@ -460,6 +501,7 @@ async def execute_agent_run(
         run.intent_confidence = resolution.confidence
         run.intent_attempt_count = intent_outcome.attempt_count
         run.intent_fallback_reason = intent_outcome.fallback_reason
+        run.intent_error_category = intent_outcome.error_category
         run.model_name = settings.AGENT_MODEL
 
         if resolution.risk_level == "high":
@@ -496,6 +538,19 @@ async def execute_agent_run(
                 if resolution.risk_level == "high"
                 else _clarification_reply(resolution)
             )
+            execution_trace = terminate_execution_trace(
+                execution_trace,
+                terminal_action=(
+                    "safe_stop"
+                    if resolution.risk_level == "high"
+                    else "clarify"
+                ),
+                termination_reason=(
+                    "health_red_flag"
+                    if resolution.risk_level == "high"
+                    else "clarification_required"
+                ),
+            )
             await _lock_run_ownership(
                 db,
                 run_id=run.id,
@@ -520,18 +575,175 @@ async def execute_agent_run(
             run.completed_at = now
             run.duration_ms = round((time.perf_counter() - started) * 1000)
             run.lease_expires_at = None
+            run.execution_trace = execution_trace.model_dump(mode="json")
             conversation.updated_at = now
             await db.commit()
-            return AgentRuntimeResult(reply=reply, run_id=run.id)
+            return AgentRuntimeResult(
+                reply=reply,
+                run_id=run.id,
+                execution_trace=execution_trace,
+            )
 
-        result = await invoke_langchain_agent(
-            db,
-            user_id=run.user_id,
-            history=history,
-            user_message=user_message,
-            tool_allowlist=tool_allowlist,
-            resolved_query=resolution.resolved_query,
-            subtasks=resolution.subtasks,
+        if (
+            execution_trace.execution_mode == "planned"
+            and settings.AGENT_PLANNED_EXECUTION_ENABLED
+        ):
+            async def invoke_parallel_read_tool(
+                tool_id: str,
+                arguments: dict[str, Any],
+            ) -> Any:
+                # SQLAlchemy AsyncSession is not safe for concurrent tasks.
+                # Every Planner-owned parallel read therefore gets an isolated,
+                # short-lived session while identity remains server-owned.
+                async with AsyncSessionLocal() as parallel_db:
+                    parallel_tools = build_read_tools(
+                        parallel_db,
+                        user_id=run.user_id,
+                        allowlist=[tool_id],
+                    )
+                    return await parallel_tools[0].ainvoke(arguments)
+
+            async def persist_planned_event(
+                trace: AgentExecutionTrace,
+                audit: ToolAuditEvent | None,
+            ) -> None:
+                nonlocal execution_trace
+                execution_trace = trace
+                await _lock_run_ownership(
+                    db,
+                    run_id=run.id,
+                    expected_attempt_count=expected_attempt_count,
+                )
+                run.execution_trace = trace.model_dump(mode="json")
+                if audit is not None:
+                    existing_audit = await db.scalar(
+                        select(AgentToolCall.id).where(
+                            AgentToolCall.run_id == run.id,
+                            AgentToolCall.call_id == audit.call_id,
+                        )
+                    )
+                    if existing_audit is None:
+                        db.add(AgentToolCall(
+                            run_id=run.id,
+                            call_id=audit.call_id,
+                            tool_name=audit.tool_id,
+                            arguments_data=audit.arguments,
+                            result_data=audit.result_summary,
+                            status=audit.status,
+                            error_code=audit.error_code,
+                            duration_ms=audit.duration_ms,
+                        ))
+                await db.commit()
+
+            planned_result = await execute_planned_agent(
+                db=db,
+                user_id=run.user_id,
+                run_id=run.id,
+                model=_build_model(
+                    temperature=0,
+                    max_tokens=settings.AGENT_PLANNING_MAX_TOKENS,
+                ),
+                goal=resolution.resolved_query,
+                subtasks=resolution.subtasks,
+                tool_allowlist=tool_allowlist,
+                initial_trace=execution_trace,
+                summarize_observation=_audit_result_summary,
+                event_sink=persist_planned_event,
+                parallel_tool_invoker=invoke_parallel_read_tool,
+            )
+            execution_trace = planned_result.execution_trace
+            reply = planned_result.reply
+            cards = planned_result.cards
+            run.input_tokens = planned_result.input_tokens
+            run.output_tokens = planned_result.output_tokens
+
+            if execution_trace.terminal_action == "clarify":
+                run.clarification_required = True
+                run.clarification_question = reply
+                run.missing_slots = planned_result.missing_slots
+                conversation.pending_clarification = {
+                    "origin_run_id": run.id,
+                    "original_message": user_message,
+                    "resolved_query": resolution.resolved_query,
+                    "references": [
+                        item.model_dump() for item in resolution.references
+                    ],
+                    "primary_intent": resolution.primary_intent,
+                    "expanded_intents": resolution.expanded_intents,
+                    "subtasks": resolution.subtasks,
+                    "missing_slots": planned_result.missing_slots,
+                    "clarification_question": reply,
+                    "risk_level": resolution.risk_level,
+                    "confidence": resolution.confidence,
+                    "understanding_version": "v2",
+                }
+            elif execution_trace.terminal_action == "safe_stop":
+                run.risk_level = "high"
+                conversation.pending_clarification = {}
+
+            await _lock_run_ownership(
+                db,
+                run_id=run.id,
+                expected_attempt_count=expected_attempt_count,
+            )
+            db.add(AgentMessage(
+                conversation_id=conversation.id,
+                run_id=run.id,
+                role="assistant",
+                content=reply,
+                content_data={"cards": cards} if cards else {},
+            ))
+            now = datetime.now(timezone.utc)
+            run.status = "completed"
+            run.completed_at = now
+            run.duration_ms = round((time.perf_counter() - started) * 1000)
+            run.lease_expires_at = None
+            run.execution_trace = execution_trace.model_dump(mode="json")
+            conversation.updated_at = now
+            await db.commit()
+            return AgentRuntimeResult(
+                reply=reply,
+                run_id=run.id,
+                cards=cards,
+                execution_trace=execution_trace,
+            )
+
+        direct_started = time.perf_counter()
+        try:
+            result = await invoke_langchain_agent(
+                db,
+                user_id=run.user_id,
+                history=history,
+                user_message=user_message,
+                tool_allowlist=tool_allowlist,
+                resolved_query=resolution.resolved_query,
+                subtasks=resolution.subtasks,
+            )
+        except Exception as exc:
+            execution_trace = add_stage_timing(
+                execution_trace,
+                stage="direct_agent",
+                source="model",
+                status="error",
+                latency_ms=round(
+                    (time.perf_counter() - direct_started) * 1000
+                ),
+                error_category=safe_error_category(exc),
+            )
+            raise
+        execution_trace = add_stage_timing(
+            execution_trace,
+            stage="direct_agent",
+            source="model",
+            status="success",
+            latency_ms=round(
+                (time.perf_counter() - direct_started) * 1000
+            ),
+        )
+        execution_trace = complete_execution_trace(
+            execution_trace,
+            result,
+            summarize_observation=_audit_result_summary,
         )
         reply, cards = _extract_agent_output(result)
         await _lock_run_ownership(
@@ -554,29 +766,51 @@ async def execute_agent_run(
         run.completed_at = now
         run.duration_ms = round((time.perf_counter() - started) * 1000)
         run.lease_expires_at = None
+        run.execution_trace = execution_trace.model_dump(mode="json")
         conversation.updated_at = now
         await db.commit()
-        return AgentRuntimeResult(reply=reply, run_id=run.id, cards=cards)
+        return AgentRuntimeResult(
+            reply=reply,
+            run_id=run.id,
+            cards=cards,
+            execution_trace=execution_trace,
+        )
     except AgentRunOwnershipLost:
         await db.rollback()
         raise
     except AIServiceError as exc:
+        if execution_trace is not None:
+            execution_trace = terminate_execution_trace(
+                execution_trace,
+                terminal_action="failed",
+                termination_reason="ai_service_error",
+                failed=True,
+            )
         await _mark_owned_run_failed(
             db,
             run_id=run.id,
             expected_attempt_count=expected_attempt_count,
             error_code="ai_service_error",
             duration_ms=round((time.perf_counter() - started) * 1000),
+            execution_trace=execution_trace,
         )
         raise
     except Exception as exc:
         logger.exception("Agent run failed: run_id=%s", run.id)
+        if execution_trace is not None:
+            execution_trace = terminate_execution_trace(
+                execution_trace,
+                terminal_action="failed",
+                termination_reason="agent_runtime_error",
+                failed=True,
+            )
         await _mark_owned_run_failed(
             db,
             run_id=run.id,
             expected_attempt_count=expected_attempt_count,
             error_code="agent_runtime_error",
             duration_ms=round((time.perf_counter() - started) * 1000),
+            execution_trace=execution_trace,
         )
         raise AIServiceError("Agent 暂时无法完成请求，请稍后重试") from exc
 

@@ -72,6 +72,14 @@
     "risk_level": "medium"
   },
   {
+    "id": "health_next_workout_composite",
+    "message": "我膝盖最近不舒服，结合健康筛查和下一练，告诉我哪些内容需要避开。",
+    "expected_primary": "health_query",
+    "allowed_tools": ["health.get_screening_summary", "workout.get_next"],
+    "forbidden_tools": ["workout.record_set", "workout.complete"],
+    "risk_level": "medium"
+  },
+  {
     "id": "next_plan_composite",
     "message": "结合当前训练计划告诉我下一练做什么",
     "expected_primary": "next_workout_query",

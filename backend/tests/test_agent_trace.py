@@ -1,0 +1,259 @@
+import json
+
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+from app.services.agent_intent import (
+    IntentAttemptTiming,
+    IntentResolution,
+    IntentResolverOutcome,
+)
+from app.services.agent_runtime import _audit_result_summary
+from app.services.agent_trace import (
+    build_initial_execution_trace,
+    complete_execution_trace,
+    select_execution_mode,
+)
+from evals.multistep_schema import load_multistep_dataset
+from evals.multistep_scorer import score_runtime_execution_trace
+
+
+def test_execution_mode_gate_covers_direct_planned_clarify_and_safe_stop():
+    direct = IntentResolution(
+        primary_intent="next_workout_query",
+        resolved_query="查询下一练",
+        subtasks=["查询下一练"],
+        confidence=0.9,
+    )
+    planned = direct.model_copy(update={
+        "subtasks": ["检查活动训练", "查询下一练"],
+    })
+    clarify = direct.model_copy(update={
+        "missing_slots": ["时间范围"],
+        "clarification_required": True,
+    })
+    safe_stop = direct.model_copy(update={"risk_level": "high"})
+
+    assert select_execution_mode(direct, ["workout.get_next"])[0] == "direct"
+    assert select_execution_mode(
+        planned,
+        ["workout.get_active_session", "workout.get_next"],
+    )[0] == "planned"
+    assert select_execution_mode(
+        direct,
+        ["workout.get_active_session", "workout.get_next"],
+    )[0] == "direct"
+    assert select_execution_mode(clarify, [])[0] == "clarify"
+    assert select_execution_mode(safe_stop, [])[0] == "safe_stop"
+
+
+def test_initial_trace_records_intent_attempts_and_rules_fallback():
+    resolution = IntentResolution(
+        primary_intent="workout_history_query",
+        resolved_query="查询训练历史",
+        subtasks=["查询训练历史"],
+        confidence=0.9,
+    )
+    outcome = IntentResolverOutcome(
+        resolution=resolution,
+        source="rules",
+        attempt_count=1,
+        fallback_reason="model_timeout",
+        error_category="TimeoutError",
+        latency_ms=125,
+        attempt_timings=(IntentAttemptTiming(
+            attempt=1,
+            latency_ms=124,
+            status="error",
+            error_category="TimeoutError",
+        ),),
+    )
+
+    trace = build_initial_execution_trace(
+        resolution,
+        ["workout.list_history"],
+        outcome,
+    )
+
+    assert [item.source for item in trace.stage_timings] == [
+        "model",
+        "rules",
+    ]
+    assert trace.stage_timings[0].latency_ms == 124
+    assert trace.stage_timings[0].error_category == "TimeoutError"
+    assert trace.stage_timings[1].attempt == 0
+    assert trace.stage_timings[1].latency_ms == 0
+
+
+def test_completed_trace_records_real_tool_actions_and_sanitized_observations():
+    resolution = IntentResolution(
+        primary_intent="profile_query",
+        resolved_query="查询我的训练目标",
+        subtasks=["读取训练资料"],
+        confidence=0.9,
+    )
+    trace = build_initial_execution_trace(
+        resolution,
+        ["profile.get_summary"],
+    )
+    result = {
+        "messages": [
+            HumanMessage(content="我的训练目标是什么？"),
+            AIMessage(
+                content="",
+                tool_calls=[{
+                    "name": "profile_get_summary",
+                    "args": {},
+                    "id": "trace-profile-call",
+                    "type": "tool_call",
+                }],
+            ),
+            ToolMessage(
+                content=json.dumps({
+                    "found": True,
+                    "primary_goal": "增肌",
+                    "training_days_per_week": 3,
+                }),
+                tool_call_id="trace-profile-call",
+                name="profile_get_summary",
+            ),
+            AIMessage(content="你当前的目标是增肌。"),
+        ]
+    }
+
+    completed = complete_execution_trace(
+        trace,
+        result,
+        summarize_observation=_audit_result_summary,
+    )
+
+    assert completed.status == "completed"
+    assert completed.execution_mode == "direct"
+    assert completed.terminal_action == "answer"
+    assert completed.budget_usage.model_calls == 2
+    assert completed.budget_usage.tool_calls == 1
+    assert completed.actions[0].tool_id == "profile.get_summary"
+    assert completed.actions[0].status == "completed"
+    assert completed.observations[0].status == "success"
+    assert "primary_goal" in completed.observations[0].summary["fields_returned"]
+    assert "增肌" not in str(completed.observations[0].summary)
+    assert len(completed.observations[0].result_fingerprint) == 64
+    assert "profile.get_summary.primary_goal" in (
+        completed.observations[0].fact_keys
+    )
+
+
+def test_real_runtime_trace_can_be_scored_without_fixed_tool_order():
+    dataset = load_multistep_dataset()
+    case = next(
+        item
+        for item in dataset.cases
+        if item.id == "active_session_resume_when_absent"
+    )
+    resolution = IntentResolution(
+        primary_intent="active_workout_query",
+        resolved_query=case.message,
+        expanded_intents=["next_workout_query"],
+        subtasks=["检查活动训练", "根据结果决定是否查询下一练"],
+        confidence=0.9,
+    )
+    trace = build_initial_execution_trace(resolution, case.candidate_tools)
+    active_result = next(
+        stub.result
+        for stub in case.tool_stubs
+        if stub.tool == "workout.get_active_session"
+    )
+    next_result = next(
+        stub.result
+        for stub in case.tool_stubs
+        if stub.tool == "workout.get_next"
+    )
+    result = {
+        "messages": [
+            AIMessage(
+                content="",
+                tool_calls=[{
+                    "name": "workout_get_active_session",
+                    "args": {},
+                    "id": "active-call",
+                    "type": "tool_call",
+                }],
+            ),
+            ToolMessage(
+                content=json.dumps(active_result),
+                tool_call_id="active-call",
+                name="workout_get_active_session",
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[{
+                    "name": "workout_get_next",
+                    "args": {},
+                    "id": "next-call",
+                    "type": "tool_call",
+                }],
+            ),
+            ToolMessage(
+                content=json.dumps(next_result),
+                tool_call_id="next-call",
+                name="workout_get_next",
+            ),
+            AIMessage(content="当前没有进行中的训练，今天可以进行下一练。"),
+        ]
+    }
+    completed = complete_execution_trace(
+        trace,
+        result,
+        summarize_observation=_audit_result_summary,
+    )
+
+    score = score_runtime_execution_trace(case, completed)
+
+    assert score.deterministic_pass is True
+    assert score.required_tool_group_recall == 1
+    assert score.required_fact_coverage == 1
+
+
+def test_runtime_trace_does_not_award_facts_when_observation_differs():
+    dataset = load_multistep_dataset()
+    case = next(
+        item
+        for item in dataset.cases
+        if item.id == "simple_next_workout_stays_direct"
+    )
+    resolution = IntentResolution(
+        primary_intent="next_workout_query",
+        resolved_query=case.message,
+        subtasks=["查询下一练"],
+        confidence=0.9,
+    )
+    trace = build_initial_execution_trace(resolution, case.candidate_tools)
+    result = {
+        "messages": [
+            AIMessage(
+                content="",
+                tool_calls=[{
+                    "name": "workout_get_next",
+                    "args": {},
+                    "id": "mismatched-next-call",
+                    "type": "tool_call",
+                }],
+            ),
+            ToolMessage(
+                content=json.dumps({"found": False, "reason": "no_active_plan"}),
+                tool_call_id="mismatched-next-call",
+                name="workout_get_next",
+            ),
+            AIMessage(content="当前没有活动计划。"),
+        ]
+    }
+    completed = complete_execution_trace(
+        trace,
+        result,
+        summarize_observation=_audit_result_summary,
+    )
+
+    score = score_runtime_execution_trace(case, completed)
+
+    assert score.required_tool_group_recall == 1
+    assert score.required_fact_coverage == 0
+    assert score.deterministic_pass is False

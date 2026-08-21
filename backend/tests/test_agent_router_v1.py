@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -7,6 +8,14 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.models.agent import AgentConversation, AgentRun, AgentToolCall
+from app.models.user import User
+from app.schemas.agent_planning import (
+    ExecutorDecision,
+    FinalResponse,
+    MicroPlan,
+    MicroPlanStep,
+    PlannedToolAction,
+)
 from app.services.agent_intent import IntentResolution, IntentResolverOutcome
 
 
@@ -88,6 +97,12 @@ async def test_agent_chat_persists_conversation_run_messages_and_tool_audit(
     assert run_response.json()["intent_source"] == "rules"
     assert run_response.json()["intent_confidence"] == 0.9
     assert run_response.json()["duration_ms"] is not None
+    assert run_response.json()["execution_mode"] == "direct"
+    execution_trace = run_response.json()["execution_trace"]
+    assert execution_trace["status"] == "completed"
+    assert execution_trace["terminal_action"] == "answer"
+    assert execution_trace["actions"][0]["tool_id"] == "profile.get_summary"
+    assert execution_trace["observations"][0]["status"] == "success"
 
     tool_call = await db_session.scalar(
         select(AgentToolCall).where(AgentToolCall.run_id == body["run_id"])
@@ -121,6 +136,87 @@ async def test_agent_conversation_is_isolated_by_user(client):
 
 
 @pytest.mark.asyncio
+async def test_composite_request_persists_planned_execution_trace(
+    client,
+    db_session,
+):
+    token = await _token(client, "agent-planned-trace@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    plan = MicroPlan(
+        goal="结合资料查看当前计划",
+        steps=[MicroPlanStep(
+            objective="并行读取当前计划和训练资料",
+            candidate_tools=[
+                "plan.get_active",
+                "profile.get_summary",
+            ],
+            execution_strategy="parallel_read",
+            completion_policy="after_all_observations",
+            planned_actions=[
+                PlannedToolAction(tool_id="plan.get_active", arguments={}),
+                PlannedToolAction(
+                    tool_id="profile.get_summary",
+                    arguments={},
+                ),
+            ],
+            success_signal="计划和资料观察均已返回",
+        )],
+    )
+    policy = SimpleNamespace(
+        create_plan=AsyncMock(return_value=plan),
+        decide_step=AsyncMock(),
+        revise_plan=AsyncMock(),
+        finalize=AsyncMock(return_value=FinalResponse(
+            terminal_action="answer",
+            reply="你目前没有活动计划，也没有保存完整训练资料。",
+        )),
+    )
+    with (
+        patch("app.services.agent_runtime._build_model", return_value=object()),
+        patch(
+            "app.services.agent_controller.ModelPlanningPolicy",
+            return_value=policy,
+        ),
+    ):
+        response = await client.post(
+            "/api/v1/agent/chat",
+            json={"message": "结合我的资料，看看当前计划是什么"},
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    run = await client.get(
+        f"/api/v1/agent/runs/{response.json()['run_id']}",
+        headers=headers,
+    )
+    trace = run.json()["execution_trace"]
+    assert run.json()["execution_mode"] == "planned"
+    assert trace["plan"]["planner_source"] == "model_micro_plan_v1"
+    assert len(trace["plan"]["steps"]) == 1
+    assert trace["plan"]["steps"][0]["execution_strategy"] == (
+        "parallel_read"
+    )
+    assert [item["tool_id"] for item in trace["actions"]] == [
+        "plan.get_active",
+        "profile.get_summary",
+    ]
+    assert [item["status"] for item in trace["observations"]] == [
+        "success",
+        "success",
+    ]
+    assert len({item["batch_id"] for item in trace["actions"]}) == 1
+    assert policy.decide_step.await_count == 0
+    assert trace["budget_usage"]["model_calls"] == 2
+    tool_audits = list((await db_session.execute(
+        select(AgentToolCall).where(
+            AgentToolCall.run_id == response.json()["run_id"]
+        )
+    )).scalars().all())
+    assert len(tool_audits) == 2
+    assert len({item.call_id for item in tool_audits}) == 2
+
+
+@pytest.mark.asyncio
 async def test_agent_unconfigured_model_returns_503_and_marks_run_failed(
     client,
     db_session,
@@ -134,15 +230,74 @@ async def test_agent_unconfigured_model_returns_503_and_marks_run_failed(
         )
 
     assert response.status_code == 503
+    user = await db_session.scalar(
+        select(User).where(User.email == "agent-disabled@example.com")
+    )
+    assert user is not None
     failed_run = await db_session.scalar(
         select(AgentRun)
-        .where(AgentRun.model_name == settings.AGENT_MODEL)
+        .where(
+            AgentRun.model_name == settings.AGENT_MODEL,
+            AgentRun.user_id == user.id,
+        )
         .order_by(AgentRun.started_at.desc())
         .limit(1)
     )
     assert failed_run is not None
     assert failed_run.status == "failed"
     assert failed_run.error_code == "ai_service_error"
+    assert failed_run.execution_mode == "direct"
+    assert failed_run.execution_trace["status"] == "failed"
+    assert failed_run.execution_trace["terminal_action"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_agent_run_exposes_privacy_safe_intent_error_category(client):
+    token = await _token(client, "agent-intent-error-category@example.com")
+    outcome = IntentResolverOutcome(
+        resolution=IntentResolution(
+            primary_intent="next_workout_query",
+            resolved_query="查询下一练",
+            subtasks=["查询下一练"],
+            confidence=0.9,
+        ),
+        source="rules",
+        attempt_count=2,
+        fallback_reason="schema_validation_failed",
+        error_category=(
+            "ValidationError>ValidationError:"
+            "literal_error@expanded_intents.0"
+        ),
+    )
+    with (
+        patch(
+            "app.services.agent_runtime.resolve_intent_with_fallback",
+            new=AsyncMock(return_value=outcome),
+        ),
+        patch(
+            "app.services.agent_runtime.invoke_langchain_agent",
+            new=AsyncMock(return_value={
+                "messages": [AIMessage(content="下一练查询完成。")],
+            }),
+        ),
+    ):
+        response = await client.post(
+            "/api/v1/agent/chat",
+            json={"message": "我的下一练是什么？"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    run = await client.get(
+        f"/api/v1/agent/runs/{response.json()['run_id']}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert run.json()["intent_fallback_reason"] == (
+        "schema_validation_failed"
+    )
+    assert run.json()["intent_error_category"] == (
+        "ValidationError>ValidationError:"
+        "literal_error@expanded_intents.0"
+    )
 
 
 @pytest.mark.asyncio
@@ -166,6 +321,8 @@ async def test_agent_health_red_flag_is_intercepted_before_model(client):
     )
     assert run.json()["risk_level"] == "high"
     assert run.json()["tool_allowlist"] == []
+    assert run.json()["execution_mode"] == "safe_stop"
+    assert run.json()["execution_trace"]["terminal_action"] == "safe_stop"
     invoke_agent.assert_not_awaited()
 
 
@@ -200,6 +357,12 @@ async def test_agent_required_clarification_does_not_call_tools_or_main_model(cl
 
     assert response.status_code == 200
     assert "时间范围" in response.json()["reply"]
+    run = await client.get(
+        f"/api/v1/agent/runs/{response.json()['run_id']}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert run.json()["execution_mode"] == "clarify"
+    assert run.json()["execution_trace"]["terminal_action"] == "clarify"
     invoke_agent.assert_not_awaited()
 
 

@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.4.0"
+    [string]$Version = "0.5.0"
 )
 
 $ErrorActionPreference = "Stop"
@@ -40,7 +40,16 @@ $required = @(
     "./alembic/versions/0013_agent_run_queue.py",
     "./alembic/versions/0014_agent_run_serialization.py",
     "./alembic/versions/0015_agent_conversation_understanding.py",
+    "./alembic/versions/0016_agent_run_result_uniqueness.py",
+    "./alembic/versions/0017_agent_execution_trace.py",
+    "./alembic/versions/0018_agent_tool_call_uniqueness.py",
+    "./alembic/versions/0019_agent_intent_error_category.py",
     "./app/services/agent_jobs.py",
+    "./app/services/agent_controller.py",
+    "./app/services/agent_planner.py",
+    "./app/services/agent_trace.py",
+    "./app/schemas/agent_planning.py",
+    "./app/schemas/agent_trace.py",
     "./scripts/start_server.sh"
 )
 foreach ($entry in $required) {

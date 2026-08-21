@@ -1,3 +1,5 @@
+import asyncio
+import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -9,7 +11,31 @@ from app.services.agent_intent import (
     resolve_intent,
     route_tools,
 )
-from app.services.agent_intent_model import resolve_intent_with_fallback
+from app.services.agent_intent_model import (
+    IntentStructuredOutputError,
+    _intent_attempt_timeout_seconds,
+    _structured_error_category,
+    resolve_intent_with_fallback,
+)
+
+
+class IntentModelTimeoutError(RuntimeError):
+    pass
+
+
+class SafeFakeValidationError(Exception):
+    def errors(self):
+        return [{
+            "type": "literal_error",
+            "loc": ("expanded_intents", 0),
+            "input": "must-never-appear-in-category",
+        }]
+
+
+@pytest.fixture(autouse=True)
+def disable_rules_first_for_model_contract_tests(monkeypatch):
+    """Most tests in this module explicitly exercise the model branch."""
+    monkeypatch.setattr(settings, "AGENT_RULES_FIRST_ENABLED", False)
 
 
 @pytest.mark.asyncio
@@ -38,6 +64,9 @@ async def test_structured_model_resolution_is_normalized_and_keeps_whitelist():
 
     assert outcome.source == "model"
     assert outcome.attempt_count == 1
+    assert outcome.latency_ms >= 0
+    assert len(outcome.attempt_timings) == 1
+    assert outcome.attempt_timings[0].status == "success"
     assert outcome.resolution.expanded_intents == ["plan_query"]
     assert route_tools(outcome.resolution) == [
         "workout.get_next",
@@ -67,7 +96,25 @@ async def test_structured_model_gets_one_repair_attempt():
 
     assert outcome.source == "model"
     assert outcome.attempt_count == 2
+    assert outcome.error_category == "ValueError"
+    assert [item.status for item in outcome.attempt_timings] == [
+        "error",
+        "success",
+    ]
+    assert outcome.attempt_timings[0].error_category == "ValueError"
     assert invoked.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_rules_resolution_reports_total_latency_without_model_attempts():
+    outcome = await resolve_intent_with_fallback(
+        "查看我的训练历史",
+        use_model=False,
+    )
+
+    assert outcome.source == "rules"
+    assert outcome.latency_ms >= 0
+    assert outcome.attempt_timings == ()
 
 
 @pytest.mark.asyncio
@@ -86,6 +133,7 @@ async def test_structured_model_falls_back_after_two_failures():
 
     assert outcome.source == "rules"
     assert outcome.fallback_reason == "schema_validation_failed"
+    assert outcome.error_category == "ValueError"
     assert outcome.resolution.primary_intent == "workout_history_query"
     assert invoked.await_count == 2
 
@@ -108,6 +156,233 @@ async def test_provider_failure_falls_back_without_wasteful_repair():
     assert outcome.attempt_count == 1
     assert outcome.fallback_reason == "model_unavailable"
     invoked.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_high_confidence_rules_first_skips_intent_model():
+    with (
+        patch.object(settings, "AGENT_RULES_FIRST_ENABLED", True),
+        patch.object(settings, "DEEPSEEK_API_KEY", "test-key"),
+        patch(
+            "app.services.agent_intent_model._invoke_model_intent",
+            new=AsyncMock(),
+        ) as invoked,
+    ):
+        outcome = await resolve_intent_with_fallback(
+            "我昨天那次训练没做完，现在应该接着练还是开始下一练？",
+            use_model=True,
+        )
+
+    assert outcome.source == "rules"
+    assert outcome.attempt_count == 0
+    assert outcome.fallback_reason == "high_confidence_rules_first"
+    assert route_tools(outcome.resolution) == [
+        "workout.get_active_session",
+        "workout.get_next",
+    ]
+    assert outcome.resolution.subtasks == [
+        "检查活动训练",
+        "必要时查询下一练",
+    ]
+    invoked.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_health_next_workout_composite_uses_rules_first():
+    with (
+        patch.object(settings, "AGENT_RULES_FIRST_ENABLED", True),
+        patch.object(settings, "DEEPSEEK_API_KEY", "test-key"),
+        patch(
+            "app.services.agent_intent_model._invoke_model_intent",
+            new=AsyncMock(),
+        ) as invoked,
+    ):
+        outcome = await resolve_intent_with_fallback(
+            "我膝盖最近不舒服，结合健康筛查和下一练，告诉我哪些内容需要避开。",
+            use_model=True,
+        )
+
+    assert outcome.source == "rules"
+    assert outcome.fallback_reason == "high_confidence_rules_first"
+    assert outcome.attempt_count == 0
+    assert outcome.resolution.primary_intent == "health_query"
+    assert outcome.resolution.expanded_intents == ["next_workout_query"]
+    assert outcome.resolution.risk_level == "medium"
+    assert route_tools(outcome.resolution) == [
+        "health.get_screening_summary",
+        "workout.get_next",
+    ]
+    invoked.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_context_dependent_high_confidence_query_still_uses_model():
+    candidate = IntentResolution(
+        primary_intent="plan_query",
+        resolved_query="查询上一轮提到的当前训练计划",
+        subtasks=["读取当前计划"],
+        confidence=0.91,
+    )
+    with (
+        patch.object(settings, "AGENT_RULES_FIRST_ENABLED", True),
+        patch.object(settings, "DEEPSEEK_API_KEY", "test-key"),
+        patch(
+            "app.services.agent_intent_model._invoke_model_intent",
+            new=AsyncMock(return_value=candidate),
+        ) as invoked,
+    ):
+        outcome = await resolve_intent_with_fallback(
+            "这个训练计划是什么？",
+            context_messages=[{
+                "role": "assistant",
+                "content": "刚才展示的是你的当前训练计划。",
+            }],
+            use_model=True,
+        )
+
+    assert outcome.source == "model"
+    invoked.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_intent_timeout_gets_one_bounded_retry_and_can_recover():
+    recovered = IntentResolution(
+        primary_intent="active_workout_query",
+        expanded_intents=["next_workout_query"],
+        subtasks=["检查活动训练", "必要时查询下一练"],
+        confidence=0.88,
+    )
+    with (
+        patch.object(settings, "DEEPSEEK_API_KEY", "test-key"),
+        patch(
+            "app.services.agent_intent_model._invoke_model_intent",
+            new=AsyncMock(side_effect=[
+                IntentModelTimeoutError("timeout"),
+                recovered,
+            ]),
+        ) as invoked,
+    ):
+        outcome = await resolve_intent_with_fallback(
+            "昨天没做完，现在接着练还是开始下一练？",
+            use_model=True,
+        )
+
+    assert outcome.source == "model"
+    assert outcome.attempt_count == 2
+    assert outcome.error_category == "IntentModelTimeoutError"
+    assert invoked.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_intent_timeout_stops_after_exactly_two_attempts():
+    with (
+        patch.object(settings, "DEEPSEEK_API_KEY", "test-key"),
+        patch(
+            "app.services.agent_intent_model._invoke_model_intent",
+            new=AsyncMock(side_effect=IntentModelTimeoutError("timeout")),
+        ) as invoked,
+    ):
+        outcome = await resolve_intent_with_fallback(
+            "昨天没做完，现在接着练还是开始下一练？",
+            use_model=True,
+        )
+
+    assert outcome.source == "rules"
+    assert outcome.attempt_count == 2
+    assert outcome.fallback_reason == "model_timeout"
+    assert outcome.error_category == "IntentModelTimeoutError"
+    assert invoked.await_count == 2
+
+
+def test_intent_attempt_timeout_reserves_total_retry_budget():
+    with (
+        patch.object(settings, "AGENT_INTENT_TIMEOUT_SECONDS", 6.0),
+        patch.object(
+            settings,
+            "AGENT_INTENT_RETRY_MIN_REMAINING_SECONDS",
+            2.0,
+        ),
+    ):
+        first = _intent_attempt_timeout_seconds(
+            attempt=1,
+            remaining_seconds=10.0,
+        )
+        second = _intent_attempt_timeout_seconds(
+            attempt=2,
+            remaining_seconds=4.0,
+        )
+
+    assert first == 6.0
+    assert second == 4.0
+
+
+@pytest.mark.asyncio
+async def test_intent_retries_stay_inside_total_deadline():
+    calls = 0
+
+    async def slow_intent(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(1)
+        raise AssertionError("deadline should cancel the attempt")
+
+    with (
+        patch.object(settings, "DEEPSEEK_API_KEY", "test-key"),
+        patch.object(settings, "AGENT_INTENT_TIMEOUT_SECONDS", 0.03),
+        patch.object(settings, "AGENT_INTENT_TOTAL_TIMEOUT_SECONDS", 0.05),
+        patch.object(
+            settings,
+            "AGENT_INTENT_RETRY_MIN_REMAINING_SECONDS",
+            0.01,
+        ),
+        patch(
+            "app.services.agent_intent_model._invoke_model_intent",
+            new=slow_intent,
+        ),
+    ):
+        started = time.monotonic()
+        outcome = await resolve_intent_with_fallback(
+            "帮我比较一个不明确的训练问题",
+            use_model=True,
+        )
+        elapsed = time.monotonic() - started
+
+    assert outcome.source == "rules"
+    assert outcome.fallback_reason == "model_timeout"
+    assert calls == 2
+    assert elapsed < 0.2
+
+
+def test_structured_error_category_exposes_path_without_raw_value():
+    category = _structured_error_category(SafeFakeValidationError())
+
+    assert category == (
+        "SafeFakeValidationError>SafeFakeValidationError:"
+        "literal_error@expanded_intents.0"
+    )
+    assert "must-never-appear" not in category
+
+
+@pytest.mark.asyncio
+async def test_structured_error_category_is_exposed_on_fallback():
+    category = (
+        "ValidationError>ValidationError:"
+        "literal_error@expanded_intents.0"
+    )
+    with (
+        patch.object(settings, "DEEPSEEK_API_KEY", "test-key"),
+        patch(
+            "app.services.agent_intent_model._invoke_model_intent",
+            new=AsyncMock(side_effect=IntentStructuredOutputError(category)),
+        ),
+    ):
+        outcome = await resolve_intent_with_fallback(
+            "查看我的训练历史",
+            use_model=True,
+        )
+
+    assert outcome.fallback_reason == "schema_validation_failed"
+    assert outcome.error_category == category
 
 
 def test_health_red_flag_overrides_tools_without_model():
@@ -219,6 +494,108 @@ async def test_next_workout_removes_redundant_plan_tool_without_explicit_plan_re
 
     assert outcome.resolution.expanded_intents == []
     assert route_tools(outcome.resolution) == ["workout.get_next"]
+
+
+@pytest.mark.asyncio
+async def test_active_continuation_overlay_removes_model_overexpansion():
+    candidate = IntentResolution(
+        primary_intent="next_workout_query",
+        resolved_query="查询昨天记录并核对计划后判断下一练",
+        expanded_intents=[
+            "workout_history_query",
+            "plan_query",
+            "active_workout_query",
+        ],
+        subtasks=["查询历史", "读取计划", "查询下一练"],
+        confidence=0.84,
+    )
+    with (
+        patch.object(settings, "DEEPSEEK_API_KEY", "test-key"),
+        patch(
+            "app.services.agent_intent_model._invoke_model_intent",
+            new=AsyncMock(return_value=candidate),
+        ),
+    ):
+        outcome = await resolve_intent_with_fallback(
+            "昨天那次训练没做完，现在应该接着练还是开始下一练？",
+            use_model=True,
+        )
+
+    assert outcome.source == "model"
+    assert outcome.resolution.primary_intent == "active_workout_query"
+    assert outcome.resolution.expanded_intents == ["next_workout_query"]
+    assert outcome.resolution.subtasks == [
+        "检查活动训练",
+        "必要时查询下一练",
+    ]
+    assert route_tools(outcome.resolution) == [
+        "workout.get_active_session",
+        "workout.get_next",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_active_continuation_overlay_never_overrides_health_red_flag():
+    candidate = IntentResolution(
+        primary_intent="next_workout_query",
+        expanded_intents=["active_workout_query"],
+        subtasks=["继续训练"],
+        confidence=0.8,
+    )
+    with (
+        patch.object(settings, "DEEPSEEK_API_KEY", "test-key"),
+        patch(
+            "app.services.agent_intent_model._invoke_model_intent",
+            new=AsyncMock(return_value=candidate),
+        ),
+    ):
+        outcome = await resolve_intent_with_fallback(
+            "昨天没做完，我现在胸痛，是接着练还是开始下一练？",
+            use_model=True,
+        )
+
+    assert outcome.resolution.primary_intent == "health_query"
+    assert outcome.resolution.risk_level == "high"
+    assert route_tools(outcome.resolution) == []
+
+
+@pytest.mark.asyncio
+async def test_plan_fit_overlay_restores_profile_and_history_candidates():
+    candidate = IntentResolution(
+        primary_intent="plan_query",
+        expanded_intents=["workout_progress_query"],
+        subtasks=["读取计划", "读取进度"],
+        confidence=0.88,
+    )
+    with (
+        patch.object(settings, "DEEPSEEK_API_KEY", "test-key"),
+        patch(
+            "app.services.agent_intent_model._invoke_model_intent",
+            new=AsyncMock(return_value=candidate),
+        ),
+    ):
+        outcome = await resolve_intent_with_fallback(
+            "结合我最近四周的实际完成情况，看看当前计划是不是太激进，并给调整建议。",
+            use_model=True,
+        )
+
+    assert outcome.resolution.expanded_intents == [
+        "workout_progress_query",
+        "workout_history_query",
+        "profile_query",
+    ]
+    assert outcome.resolution.subtasks == [
+        "读取用户训练偏好",
+        "读取当前训练计划",
+        "读取近期训练进度，失败时改查历史记录",
+        "评估并形成待确认的调整建议",
+    ]
+    assert route_tools(outcome.resolution) == [
+        "plan.get_active",
+        "workout.get_progress",
+        "workout.list_history",
+        "profile.get_summary",
+    ]
 
 
 @pytest.mark.asyncio

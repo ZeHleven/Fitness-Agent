@@ -31,3 +31,9 @@
 Alembic `0015` 为会话增加 `pending_clarification`，并为 run 增加 `resolved_query`、`references`、`clarification_question` 和 `understanding_version`，使指代、扩展、拆解与澄清决策可以回放和评测。
 
 Alembic `0016` 为每个 run 的助手消息增加部分唯一索引。worker 在最终结果事务中同时写入助手消息和工具审计；即使旧执行 attempt 在租约接管后返回，也不能产生第二份回答或重复审计。
+
+Alembic `0017` 为 run 增加 `execution_mode` 和版本化 `execution_trace` JSONB。执行门控状态在 Planner 或主模型调用前持久化；规划路径随后逐步写入真实 plan、action、脱敏 observation、终止动作和预算用量，并继续受 attempt 所有权保护。
+
+Alembic `0018` 为工具审计增加 `(run_id, call_id)` 部分唯一索引。规划模式下 action 请求和 observation 会逐步持久化，工具审计在 observation 事务中写入；唯一索引与 run attempt 所有权共同防止重复记录。
+
+Alembic `0019` 为 run 增加 `intent_error_category`。该字段最多 160 字符，只保存稳定异常类型或结构化校验的字段路径，不保存 DeepSeek 原始输出、无效字段值或用户消息。`GET /api/v1/agent/runs/{run_id}` 同步返回该安全分类，便于区分 provider 超时与 schema 不兼容。

@@ -3,6 +3,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -61,6 +62,11 @@ class AgentRun(Base):
             unique=True,
             postgresql_where=text("status = 'running'"),
         ),
+        CheckConstraint(
+            "execution_mode IS NULL OR execution_mode IN "
+            "('direct', 'planned', 'clarify', 'safe_stop')",
+            name="ck_agent_runs_execution_mode",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
@@ -103,6 +109,12 @@ class AgentRun(Base):
     tool_allowlist: Mapped[list] = mapped_column(
         JSONB, default=list, server_default=text("'[]'::jsonb")
     )
+    execution_mode: Mapped[str | None] = mapped_column(
+        String(20), nullable=True
+    )
+    execution_trace: Mapped[dict | None] = mapped_column(
+        JSONB, nullable=True
+    )
     risk_level: Mapped[str] = mapped_column(
         String(20), default="low", server_default="low"
     )
@@ -122,6 +134,9 @@ class AgentRun(Base):
     )
     intent_fallback_reason: Mapped[str | None] = mapped_column(
         String(80), nullable=True
+    )
+    intent_error_category: Mapped[str | None] = mapped_column(
+        String(160), nullable=True
     )
     model_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -168,6 +183,15 @@ class AgentMessage(Base):
 
 class AgentToolCall(Base):
     __tablename__ = "agent_tool_calls"
+    __table_args__ = (
+        Index(
+            "uq_agent_tool_calls_run_call_id",
+            "run_id",
+            "call_id",
+            unique=True,
+            postgresql_where=text("call_id IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
     run_id: Mapped[str] = mapped_column(

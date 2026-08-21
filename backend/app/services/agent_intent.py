@@ -54,21 +54,82 @@ class IntentResolution(BaseModel):
 
 
 @dataclass(frozen=True)
+class IntentAttemptTiming:
+    attempt: int
+    latency_ms: int
+    status: Literal["success", "error"]
+    error_category: str | None = None
+
+
+@dataclass(frozen=True)
 class IntentResolverOutcome:
     resolution: IntentResolution
     source: Literal["model", "rules"]
     attempt_count: int = 0
     fallback_reason: str | None = None
+    error_category: str | None = None
+    latency_ms: int = 0
+    attempt_timings: tuple[IntentAttemptTiming, ...] = ()
 
 
 _INTENT_KEYWORDS: tuple[tuple[IntentName, tuple[str, ...]], ...] = (
     ("health_query", ("伤病", "慢性病", "健康筛查", "禁忌", "疼痛", "疼", "痛", "膝盖", "肩膀", "不舒服")),
     ("next_workout_query", ("下一练", "下次练", "下次该练", "下次应该练", "今天练什么", "接下来练什么")),
-    ("active_workout_query", ("进行中的训练", "正在训练", "练到哪", "已经记录", "当前这次训练")),
+    (
+        "active_workout_query",
+        (
+            "进行中的训练",
+            "正在训练",
+            "练到哪",
+            "已经记录",
+            "当前这次训练",
+            "没做完",
+            "未完成训练",
+            "接着练",
+            "继续上次",
+        ),
+    ),
     ("workout_progress_query", ("训练进度", "训练量", "周进度", "完成了多少", "坚持得怎么样")),
     ("workout_history_query", ("训练历史", "训练记录", "最近练", "以前练", "过去训练")),
     ("plan_query", ("训练计划", "当前计划", "计划安排", "一周怎么练", "计划是什么")),
     ("profile_query", ("我的资料", "个人资料", "身高", "体重", "训练目标", "训练偏好", "训练经验")),
+)
+
+_ACTIVE_CONTINUATION_MARKERS = (
+    "没做完",
+    "未完成训练",
+    "接着练",
+    "继续上次",
+)
+
+_NEXT_WORKOUT_MARKERS = (
+    "下一练",
+    "下次练",
+    "下次该练",
+    "下次应该练",
+)
+
+_PLAN_ADJUSTMENT_MARKERS = (
+    "调整",
+    "太激进",
+    "激进",
+    "适合我",
+    "合适",
+)
+
+_RECENT_COMPLETION_MARKERS = (
+    "最近四周",
+    "最近训练",
+    "实际完成",
+    "完成情况",
+    "训练情况",
+)
+
+_PERSONAL_FIT_MARKERS = (
+    "太激进",
+    "激进",
+    "适合我",
+    "合适",
 )
 
 _HIGH_RISK_KEYWORDS = (
@@ -206,6 +267,28 @@ def contains_unsupported_write_request(message: str) -> bool:
     return any(keyword in normalized for keyword in _UNSUPPORTED_WRITE_KEYWORDS)
 
 
+def _is_active_continuation_comparison(message: str) -> bool:
+    normalized = message.strip().lower()
+    return (
+        any(marker in normalized for marker in _ACTIVE_CONTINUATION_MARKERS)
+        and any(marker in normalized for marker in _NEXT_WORKOUT_MARKERS)
+    )
+
+
+def _is_plan_adjustment_assessment(message: str) -> bool:
+    normalized = message.strip().lower()
+    return (
+        any(marker in normalized for marker in _EXPLICIT_PLAN_KEYWORDS)
+        and any(marker in normalized for marker in _PLAN_ADJUSTMENT_MARKERS)
+        and any(marker in normalized for marker in _RECENT_COMPLETION_MARKERS)
+    )
+
+
+def _asks_personal_plan_fit(message: str) -> bool:
+    normalized = message.strip().lower()
+    return any(marker in normalized for marker in _PERSONAL_FIT_MARKERS)
+
+
 def resolve_intent(message: str) -> IntentResolution:
     """Deterministic resolver used as a safe fallback for the model classifier."""
     normalized = message.strip().lower()
@@ -226,6 +309,23 @@ def resolve_intent(message: str) -> IntentResolution:
     if contains_health_red_flag(message) and "health_query" not in matched:
         matched.insert(0, "health_query")
 
+    if (
+        _is_active_continuation_comparison(message)
+        and "health_query" not in matched
+    ):
+        matched = ["active_workout_query", "next_workout_query"]
+    elif (
+        _is_plan_adjustment_assessment(message)
+        and "health_query" not in matched
+    ):
+        matched = [
+            "plan_query",
+            "workout_progress_query",
+            "workout_history_query",
+        ]
+        if _asks_personal_plan_fit(message):
+            matched.append("profile_query")
+
     if not matched:
         return IntentResolution(
             primary_intent="general_qa",
@@ -243,11 +343,34 @@ def resolve_intent(message: str) -> IntentResolution:
         if "health_query" in matched
         else "low"
     )
+    resolved_query = message.strip()
+    subtasks = [f"查询并回答：{intent}" for intent in matched]
+    if (
+        _is_active_continuation_comparison(message)
+        and primary != "health_query"
+    ):
+        resolved_query = (
+            "检查是否存在未完成的活动训练；若不存在，再查询下一练，"
+            "判断现在应该继续上次训练还是开始下一练"
+        )
+        subtasks = ["检查活动训练", "必要时查询下一练"]
+    elif (
+        _is_plan_adjustment_assessment(message)
+        and primary != "health_query"
+    ):
+        subtasks = []
+        if _asks_personal_plan_fit(message):
+            subtasks.append("读取用户训练偏好")
+        subtasks.extend([
+            "读取当前训练计划",
+            "读取近期训练进度，失败时改查历史记录",
+            "评估并形成待确认的调整建议",
+        ])
     return IntentResolution(
         primary_intent=primary,
-        resolved_query=message.strip(),
+        resolved_query=resolved_query,
         expanded_intents=matched[1:],
-        subtasks=[f"查询并回答：{intent}" for intent in matched],
+        subtasks=subtasks,
         risk_level=risk_level,
         confidence=0.9 if len(matched) == 1 else 0.82,
     )
@@ -445,6 +568,23 @@ def normalize_resolution(
     ):
         primary = "general_qa"
         expanded = []
+    elif (
+        _is_active_continuation_comparison(message)
+        and rules_resolution.primary_intent != "health_query"
+    ):
+        primary = "active_workout_query"
+        expanded = ["next_workout_query"]
+    elif (
+        _is_plan_adjustment_assessment(message)
+        and rules_resolution.primary_intent != "health_query"
+    ):
+        primary = "plan_query"
+        expanded = [
+            "workout_progress_query",
+            "workout_history_query",
+        ]
+        if _asks_personal_plan_fit(message):
+            expanded.append("profile_query")
     elif rules_resolution.primary_intent == "health_query":
         if primary not in ("general_qa", "health_query") and primary not in expanded:
             expanded.insert(0, primary)
@@ -477,6 +617,28 @@ def normalize_resolution(
     expanded = [intent for intent in expanded if intent != primary][:7]
 
     resolved_query = resolution.resolved_query.strip() or message.strip()
+    subtasks = list(resolution.subtasks)
+    if (
+        _is_active_continuation_comparison(message)
+        and rules_resolution.primary_intent != "health_query"
+    ):
+        resolved_query = (
+            "检查是否存在未完成的活动训练；若不存在，再查询下一练，"
+            "判断现在应该继续上次训练还是开始下一练"
+        )
+        subtasks = ["检查活动训练", "必要时查询下一练"]
+    elif (
+        _is_plan_adjustment_assessment(message)
+        and rules_resolution.primary_intent != "health_query"
+    ):
+        subtasks = []
+        if _asks_personal_plan_fit(message):
+            subtasks.append("读取用户训练偏好")
+        subtasks.extend([
+            "读取当前训练计划",
+            "读取近期训练进度，失败时改查历史记录",
+            "评估并形成待确认的调整建议",
+        ])
     missing_slots = list(dict.fromkeys(
         item.strip() for item in resolution.missing_slots if item.strip()
     ))[:8]
@@ -533,6 +695,7 @@ def normalize_resolution(
         "clarification_required": clarification_required,
         "clarification_question": clarification_question,
         "references": references[:12],
+        "subtasks": subtasks,
     })
 
 

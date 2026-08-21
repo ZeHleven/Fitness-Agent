@@ -1,3 +1,5 @@
+import pytest
+
 from app.services.agent_intent import resolve_intent, route_tools
 
 
@@ -45,3 +47,69 @@ def test_router_never_exposes_write_tools():
     assert all(not item.startswith("write.") for item in routed)
     assert "workout.record_set" not in routed
     assert "workout.complete" not in routed
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "昨天那次没做完，现在接着练还是开始下一练？",
+        "我有未完成训练，还能直接开始下一练吗？",
+        "我想继续上次的训练，然后再看下一练。",
+    ],
+)
+def test_unfinished_workout_fallback_routes_active_session(message):
+    resolution = resolve_intent(message)
+
+    assert "active_workout_query" in {
+        resolution.primary_intent,
+        *resolution.expanded_intents,
+    }
+    assert "workout.get_active_session" in route_tools(resolution)
+
+
+def test_unfinished_workout_counterfactual_gets_both_dynamic_candidates():
+    resolution = resolve_intent(
+        "我昨天那次训练没做完，现在应该接着练还是开始下一练？"
+    )
+
+    assert resolution.primary_intent == "active_workout_query"
+    assert resolution.expanded_intents == ["next_workout_query"]
+    assert route_tools(resolution) == [
+        "workout.get_active_session",
+        "workout.get_next",
+    ]
+
+
+def test_plan_adjustment_fallback_includes_progress_failure_alternative():
+    resolution = resolve_intent(
+        "结合最近四周训练情况，判断当前计划是否需要调整。"
+    )
+
+    assert resolution.primary_intent == "plan_query"
+    assert resolution.expanded_intents == [
+        "workout_progress_query",
+        "workout_history_query",
+    ]
+    assert route_tools(resolution) == [
+        "plan.get_active",
+        "workout.get_progress",
+        "workout.list_history",
+    ]
+
+
+def test_personal_plan_fit_fallback_also_includes_profile():
+    resolution = resolve_intent(
+        "结合我最近四周的实际完成情况，看看当前计划是不是太激进，并给调整建议。"
+    )
+
+    assert resolution.expanded_intents == [
+        "workout_progress_query",
+        "workout_history_query",
+        "profile_query",
+    ]
+    assert route_tools(resolution) == [
+        "plan.get_active",
+        "workout.get_progress",
+        "workout.list_history",
+        "profile.get_summary",
+    ]
