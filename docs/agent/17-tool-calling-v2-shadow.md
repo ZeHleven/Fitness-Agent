@@ -175,4 +175,4 @@ report 投影为受模型约束的指标样本。运行时通过可替换的同�
 4. `test: verify registry shadow behavioral parity`：已完成 direct 配置矩阵、planned 并行读取、条件替代、工具失败替代和 shadow 内部错误的运行级对照；固定夹具验证回复、卡片、模型/工具调用、参数、审计、终止动作和预算不变。
 5. 通过 CI 与真实小流量观测后，再决定是否进入 Registry catalog authority。
 
-当前已完成 shadow 数据模型、设计、固定 comparator 夹具、六类纯比较器、稳定采样、可选 Trace 接线、运行级行为一致性夹具、纯指标投影器和 fail-open 指标适配器；生产开关仍关闭，下一步是提交本批、通过 CI 后准备真实小流量观测。
+当前已完成 shadow 数据模型、设计、固定 comparator 夹具、六类纯比较器、稳定采样、可选 Trace 接线、运行级行为一致性夹具、纯指标投影器和 fail-open 指标适配器；生产开关仍关闭。真实小流量的配置矩阵、日志汇总、硬门禁和回滚步骤见[观测手册](18-tool-registry-shadow-observation.md)。

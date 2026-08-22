@@ -13,6 +13,7 @@ from app.services.agent_intent import IntentResolution
 from app.services.agent_runtime import _finalize_registry_shadow_trace
 from app.services.agent_tool_registry_shadow_metric_adapter import (
     emit_registry_shadow_metrics,
+    logger,
 )
 from app.services.agent_tool_registry_shadow_trace import (
     ToolRegistryShadowSession,
@@ -61,6 +62,10 @@ class FailingMetricAdapter(RecordingMetricAdapter):
         value: int,
     ) -> None:
         raise RuntimeError("private metric backend detail")
+
+
+def test_default_adapter_uses_production_console_logger():
+    assert logger.name == "uvicorn.error"
 
 
 def _resolution() -> IntentResolution:

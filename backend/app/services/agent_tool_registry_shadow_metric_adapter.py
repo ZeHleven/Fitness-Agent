@@ -16,7 +16,9 @@ from app.services.agent_tool_registry_shadow_metrics import (
 )
 
 
-logger = logging.getLogger(__name__)
+# Uvicorn owns the production console handler. Using its error logger keeps
+# INFO metric events visible in container logs without changing global logging.
+logger = logging.getLogger("uvicorn.error")
 
 
 class ToolRegistryShadowMetricAdapter(Protocol):

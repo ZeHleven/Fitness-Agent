@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.5.0"
+    [string]$Version = "0.5.2"
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,9 +47,18 @@ $required = @(
     "./app/services/agent_jobs.py",
     "./app/services/agent_controller.py",
     "./app/services/agent_planner.py",
+    "./app/services/agent_tool_registry.py",
+    "./app/services/agent_tool_registry_shadow.py",
+    "./app/services/agent_tool_registry_shadow_facts.py",
+    "./app/services/agent_tool_registry_shadow_trace.py",
+    "./app/services/agent_tool_registry_shadow_metrics.py",
+    "./app/services/agent_tool_registry_shadow_metric_adapter.py",
+    "./app/services/agent_tool_registry_shadow_observation.py",
     "./app/services/agent_trace.py",
     "./app/schemas/agent_planning.py",
+    "./app/schemas/agent_tool_registry.py",
     "./app/schemas/agent_trace.py",
+    "./scripts/summarize_registry_shadow_metrics.py",
     "./scripts/start_server.sh"
 )
 foreach ($entry in $required) {
