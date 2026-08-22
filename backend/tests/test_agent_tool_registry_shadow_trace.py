@@ -90,6 +90,9 @@ def test_shadow_settings_default_to_fully_disabled():
     assert Settings.model_fields[
         "AGENT_TOOL_REGISTRY_SHADOW_PERSIST_TRACE"
     ].default is False
+    assert Settings.model_fields[
+        "AGENT_TOOL_REGISTRY_SHADOW_EMIT_METRICS"
+    ].default is False
 
 
 def test_stable_sampling_is_bounded_and_retry_independent():
@@ -165,15 +168,16 @@ def test_trace_attachment_is_optional_and_marks_unreached_checks_skipped():
     )
     session = ToolRegistryShadowSession(sample_bucket=42)
     session.record_route(_resolution(), ["profile.get_summary"])
+    report = session.build_report()
 
     unchanged = attach_registry_shadow_report(
         trace,
-        session,
+        report,
         persist_trace=False,
     )
     attached = attach_registry_shadow_report(
         trace,
-        session,
+        report,
         persist_trace=True,
     )
 

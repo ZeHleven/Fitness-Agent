@@ -62,6 +62,7 @@ class Settings(BaseSettings):
         le=1.0,
     )
     AGENT_TOOL_REGISTRY_SHADOW_PERSIST_TRACE: bool = False
+    AGENT_TOOL_REGISTRY_SHADOW_EMIT_METRICS: bool = False
 
 
 settings = Settings()

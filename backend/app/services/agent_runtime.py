@@ -29,6 +29,9 @@ from app.services.agent_controller import (
 from app.services.agent_intent import IntentResolution, route_tools
 from app.services.agent_intent_model import resolve_intent_with_fallback
 from app.services.agent_structured_errors import safe_error_category
+from app.services.agent_tool_registry_shadow_metric_adapter import (
+    emit_registry_shadow_metrics,
+)
 from app.services.agent_tool_registry_shadow_trace import (
     ToolRegistryShadowSession,
     attach_registry_shadow_report,
@@ -78,18 +81,30 @@ def _finalize_registry_shadow_trace(
     trace: AgentExecutionTrace,
     session: ToolRegistryShadowSession | None,
 ) -> AgentExecutionTrace:
+    if session is None:
+        return trace
     try:
-        if session is not None and trace.observations:
+        if trace.observations:
             session.record_final_observations(trace)
-        return attach_registry_shadow_report(
-            trace,
-            session,
-            persist_trace=(
-                settings.AGENT_TOOL_REGISTRY_SHADOW_PERSIST_TRACE
+        report = session.build_report()
+    except Exception:  # pragma: no cover - report loss must not fail v1
+        return trace
+    try:
+        emit_registry_shadow_metrics(
+            report,
+            enabled=(
+                settings.AGENT_TOOL_REGISTRY_SHADOW_EMIT_METRICS
             ),
         )
-    except Exception:  # pragma: no cover - shadow must never fail v1
-        return trace
+    except Exception:  # pragma: no cover - defensive adapter boundary
+        pass
+    return attach_registry_shadow_report(
+        trace,
+        report,
+        persist_trace=(
+            settings.AGENT_TOOL_REGISTRY_SHADOW_PERSIST_TRACE
+        ),
+    )
 
 
 async def _lock_run_ownership(

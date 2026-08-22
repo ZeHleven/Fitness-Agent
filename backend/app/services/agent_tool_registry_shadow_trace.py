@@ -222,14 +222,13 @@ def create_registry_shadow_session(
 
 def attach_registry_shadow_report(
     trace: AgentExecutionTrace,
-    session: ToolRegistryShadowSession | None,
+    report: ToolRegistryShadowReport | None,
     *,
     persist_trace: bool,
 ) -> AgentExecutionTrace:
-    if session is None or not persist_trace:
+    if report is None or not persist_trace:
         return trace
     try:
-        report = session.build_report()
         return trace.model_copy(update={
             "trace_version": "1.1",
             "tool_registry_shadow": report,
