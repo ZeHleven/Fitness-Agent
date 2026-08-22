@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Literal, Self
+from typing import Any, Literal, Self, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -329,4 +329,95 @@ class ToolRegistryShadowReport(BaseModel):
             raise ValueError("partial reports require a skipped check")
         if self.status == "error" and "error" not in check_statuses:
             raise ValueError("error reports require an error check")
+        return self
+
+
+ToolRegistryShadowMetricName = Literal[
+    "agent_tool_registry_shadow_runs_total",
+    "agent_tool_registry_shadow_checks_total",
+    "agent_tool_registry_shadow_mismatches_total",
+    "agent_tool_registry_shadow_errors_total",
+    "agent_tool_registry_shadow_latency_ms",
+]
+ToolRegistryShadowMetricKind = Literal["counter", "histogram"]
+ToolRegistryShadowMetricErrorCategory = Literal[
+    "comparator_internal_error",
+    "invalid_shadow_fact",
+    "shadow_fact_builder_error",
+    "other",
+]
+
+
+_SHADOW_METRIC_CONTRACT: dict[
+    ToolRegistryShadowMetricName,
+    tuple[ToolRegistryShadowMetricKind, tuple[str, ...]],
+] = {
+    "agent_tool_registry_shadow_runs_total": (
+        "counter",
+        ("status",),
+    ),
+    "agent_tool_registry_shadow_checks_total": (
+        "counter",
+        ("check_type", "status"),
+    ),
+    "agent_tool_registry_shadow_mismatches_total": (
+        "counter",
+        ("check_type", "code"),
+    ),
+    "agent_tool_registry_shadow_errors_total": (
+        "counter",
+        ("check_type", "error_category"),
+    ),
+    "agent_tool_registry_shadow_latency_ms": (
+        "histogram",
+        (),
+    ),
+}
+
+
+class ToolRegistryShadowMetricSample(BaseModel):
+    """One bounded, privacy-safe sample projected from a shadow report."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: ToolRegistryShadowMetricName
+    kind: ToolRegistryShadowMetricKind
+    labels: dict[str, str] = Field(default_factory=dict, max_length=2)
+    value: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_metric_contract(self) -> Self:
+        expected_kind, expected_labels = _SHADOW_METRIC_CONTRACT[self.name]
+        if self.kind != expected_kind:
+            raise ValueError("shadow metric kind does not match its name")
+        if tuple(self.labels) != expected_labels:
+            raise ValueError("shadow metric labels do not match its name")
+        if self.kind == "counter" and self.value != 1:
+            raise ValueError("shadow counter samples must increment by one")
+
+        allowed_label_values: dict[str, set[str]] = {
+            "check_type": set(get_args(ToolRegistryShadowCheckType)),
+            "code": set(get_args(ToolRegistryShadowMismatchCode)),
+            "error_category": set(get_args(
+                ToolRegistryShadowMetricErrorCategory
+            )),
+        }
+        for label_name, allowed_values in allowed_label_values.items():
+            value = self.labels.get(label_name)
+            if value is not None and value not in allowed_values:
+                raise ValueError(
+                    "shadow metric label value is not in its bounded domain"
+                )
+
+        status = self.labels.get("status")
+        if status is not None:
+            allowed_statuses = (
+                {"not_sampled", "match", "mismatch", "partial", "error"}
+                if self.name == "agent_tool_registry_shadow_runs_total"
+                else {"match", "mismatch", "skipped", "error"}
+            )
+            if status not in allowed_statuses:
+                raise ValueError(
+                    "shadow metric status is not in its bounded domain"
+                )
         return self

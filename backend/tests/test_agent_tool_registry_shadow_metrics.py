@@ -1,14 +1,22 @@
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 from typing import Any, get_args
 
+import pytest
+from pydantic import ValidationError
+
 from app.schemas.agent_tool_registry import (
     ToolRegistryShadowCheck,
     ToolRegistryShadowCheckType,
+    ToolRegistryShadowMetricSample,
     ToolRegistryShadowMismatchCode,
     ToolRegistryShadowReport,
+)
+from app.services.agent_tool_registry_shadow_metrics import (
+    project_registry_shadow_metrics,
 )
 
 
@@ -297,3 +305,63 @@ def test_metric_projection_contract_is_trace_persistence_independent_and_safe():
         ensure_ascii=False,
         sort_keys=True,
     )
+
+
+@pytest.mark.parametrize(
+    "case",
+    _load_metric_fixture()["cases"],
+    ids=lambda case: case["case_id"],
+)
+def test_metric_projector_matches_declared_case(case: dict[str, Any]):
+    report = ToolRegistryShadowReport.model_validate(case["report"])
+    report_before = report.model_dump(mode="json")
+
+    samples = project_registry_shadow_metrics(report)
+
+    assert [
+        sample.model_dump(mode="json") for sample in samples
+    ] == case["expected_samples"]
+    assert report.model_dump(mode="json") == report_before
+    assert project_registry_shadow_metrics(report) == samples
+
+
+def test_metric_projector_accepts_only_the_validated_report():
+    signature = inspect.signature(project_registry_shadow_metrics)
+
+    assert list(signature.parameters) == ["report"]
+    assert signature.parameters["report"].default is inspect.Parameter.empty
+
+
+@pytest.mark.parametrize(
+    "sample",
+    [
+        {
+            "name": "agent_tool_registry_shadow_runs_total",
+            "kind": "counter",
+            "labels": {"status": "private-status"},
+            "value": 1,
+        },
+        {
+            "name": "agent_tool_registry_shadow_errors_total",
+            "kind": "counter",
+            "labels": {
+                "check_type": "route_allowlist",
+                "error_category": "private-provider-error-12345",
+            },
+            "value": 1,
+        },
+        {
+            "name": "agent_tool_registry_shadow_runs_total",
+            "kind": "counter",
+            "labels": {
+                "status": "match",
+                "run_id": "private-run-id",
+            },
+            "value": 1,
+        },
+    ],
+    ids=["unknown-status", "unknown-error-category", "extra-label"],
+)
+def test_metric_sample_rejects_unbounded_labels(sample: dict[str, Any]):
+    with pytest.raises(ValidationError):
+        ToolRegistryShadowMetricSample.model_validate(sample)

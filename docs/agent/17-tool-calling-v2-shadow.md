@@ -121,7 +121,7 @@ AGENT_TOOL_REGISTRY_SHADOW_PERSIST_TRACE=false
 
 所有持久化仍经过现有 run 所有权检查。旧 worker attempt 无权覆盖新 attempt 的 shadow 报告。
 
-## 指标（尚未接线）
+## 指标（投影器已实现，适配器尚未接线）
 
 聚合指标只使用低基数标签：
 
@@ -132,6 +132,10 @@ agent_tool_registry_shadow_mismatches_total{check_type,code}
 agent_tool_registry_shadow_errors_total{check_type,error_category}
 agent_tool_registry_shadow_latency_ms
 ```
+
+纯函数 `project_registry_shadow_metrics(report)` 已按上述契约把通过校验的
+shadow report 投影为受模型约束的指标样本；它不读取配置、不依赖 Trace 是否持久化，
+也不执行 I/O。指标适配器和运行时发射仍是后续工作。
 
 工具 ID 不作为长期监控标签，避免未来工具数量增长造成高基数；具体 ID 只保存在受所有权保护的采样 trace 中。
 
@@ -169,4 +173,4 @@ agent_tool_registry_shadow_latency_ms
 4. `test: verify registry shadow behavioral parity`：已完成 direct 配置矩阵、planned 并行读取、条件替代、工具失败替代和 shadow 内部错误的运行级对照；固定夹具验证回复、卡片、模型/工具调用、参数、审计、终止动作和预算不变。
 5. 通过 CI 与真实小流量观测后，再决定是否进入 Registry catalog authority。
 
-当前已完成 shadow 数据模型、设计、固定 comparator 夹具、六类纯比较器、稳定采样、可选 Trace 接线和运行级行为一致性夹具；生产开关仍关闭，下一步是通过 CI 后接入聚合指标并准备真实小流量观测。
+当前已完成 shadow 数据模型、设计、固定 comparator 夹具、六类纯比较器、稳定采样、可选 Trace 接线、运行级行为一致性夹具和纯指标投影器；生产开关仍关闭，下一步是接入 fail-open 指标适配器并准备真实小流量观测。
