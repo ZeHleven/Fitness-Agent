@@ -14,6 +14,10 @@ from app.schemas.agent_tool_registry import (
     ToolRegistryShadowReport,
 )
 from app.services.agent_tool_registry import TOOL_REGISTRY_V2
+from app.services.agent_tool_registry_shadow import (
+    compare_registry_shadow_facts,
+    shadow_fact_fingerprint,
+)
 
 
 _FINGERPRINT_A = "a" * 64
@@ -250,3 +254,116 @@ def test_comparator_case_fixtures_have_stable_canonical_json():
                 sort_keys=True,
             )
             assert json.loads(canonical) == case[fact_name]
+
+
+@pytest.mark.parametrize(
+    "case",
+    _load_comparator_cases(),
+    ids=lambda case: case["case_id"],
+)
+def test_pure_comparator_matches_declared_case(case: dict[str, Any]):
+    check = compare_registry_shadow_facts(
+        case["check_type"],
+        case["legacy_fact"],
+        case["registry_fact"],
+    )
+
+    assert check.status == case["expected"]["status"]
+    assert list(check.mismatch_codes) == case["expected"]["mismatch_codes"]
+    assert check.legacy_fingerprint == shadow_fact_fingerprint(
+        case["check_type"],
+        case["legacy_fact"],
+    )
+    assert check.registry_fingerprint == shadow_fact_fingerprint(
+        case["check_type"],
+        case["registry_fact"],
+    )
+    assert check.latency_ms == 0
+
+
+def test_route_permission_expansion_is_reported_before_other_differences():
+    check = compare_registry_shadow_facts(
+        "route_allowlist",
+        {"tool_ids": ["plan.get_active"]},
+        {"tool_ids": ["profile.get_summary"]},
+    )
+
+    assert check.status == "mismatch"
+    assert check.mismatch_codes == (
+        "permission_expansion",
+        "registered_tool_missing",
+    )
+
+
+def test_invalid_or_private_facts_return_safe_errors_without_fingerprints():
+    check = compare_registry_shadow_facts(
+        "route_allowlist",
+        {
+            "tool_ids": ["plan.get_active"],
+            "message": "must never be fingerprinted",
+        },
+        {"tool_ids": ["plan.get_active"]},
+    )
+
+    assert check.status == "error"
+    assert check.mismatch_codes == ("shadow_internal_error",)
+    assert check.error_category == "invalid_shadow_fact"
+    assert check.legacy_fingerprint is None
+    assert check.registry_fingerprint is None
+    assert check.legacy_tool_ids == ()
+    assert check.registry_tool_ids == ()
+
+
+def test_argument_tool_order_does_not_invent_default_argument_drift():
+    no_arguments = {
+        "tool_id": "plan.get_active",
+        "schema_ref": "NoArguments",
+        "additional_properties": False,
+        "fields": [],
+    }
+    bounded_arguments = {
+        "tool_id": "workout.get_progress",
+        "schema_ref": "WorkoutProgressArguments",
+        "additional_properties": False,
+        "fields": [
+            {
+                "name": "weeks",
+                "type": "integer",
+                "required": False,
+                "default": 8,
+                "minimum": 1,
+                "maximum": 52,
+            }
+        ],
+    }
+
+    check = compare_registry_shadow_facts(
+        "argument_schema",
+        {"tools": [no_arguments, bounded_arguments]},
+        {"tools": [bounded_arguments, no_arguments]},
+    )
+
+    assert check.mismatch_codes == ("argument_schema_mismatch",)
+
+
+def test_canonical_fingerprint_ignores_object_key_order_but_not_tool_order():
+    legacy_order = {
+        "tools": [],
+        "conditional_pairs": [],
+    }
+    reversed_keys = {
+        "conditional_pairs": [],
+        "tools": [],
+    }
+    assert shadow_fact_fingerprint(
+        "parallel_policy",
+        legacy_order,
+    ) == shadow_fact_fingerprint("parallel_policy", reversed_keys)
+
+    assert shadow_fact_fingerprint(
+        "route_allowlist",
+        {"tool_ids": ["plan.get_active", "profile.get_summary"]},
+    ) != shadow_fact_fingerprint(
+        "route_allowlist",
+        {"tool_ids": ["profile.get_summary", "plan.get_active"]},
+    )

@@ -163,10 +163,10 @@ agent_tool_registry_shadow_latency_ms
 
 ## 实现提交顺序
 
-1. `test: define registry shadow comparator cases`：纯函数测试夹具，不接运行时。
-2. `feat: add registry shadow comparator`：实现六类纯比较器，输入均为脱敏事实。
+1. `test: define registry shadow comparator cases`：已由 `834a907` 完成；纯函数测试夹具不接运行时。
+2. `feat: add registry shadow comparator`：六类纯比较器已实现并通过固定夹具；仍未接运行时。
 3. `feat: record optional registry shadow trace`：增加配置、稳定采样和可选 trace 字段，默认关闭。
 4. `test: verify registry shadow behavioral parity`：同一固定输入开关前后比较完整 v1 结果。
 5. 通过 CI 与真实小流量观测后，再决定是否进入 Registry catalog authority。
 
-当前只完成 shadow 数据模型、设计和静态契约测试；上述运行时实现提交尚未开始。
+当前已完成 shadow 数据模型、设计、固定 comparator 夹具和六类纯比较器；配置、采样、Trace 持久化以及全部运行时接线尚未开始。
