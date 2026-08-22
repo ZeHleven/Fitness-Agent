@@ -1,6 +1,6 @@
 # Tool Calling v2：现有工具审计与 Registry 契约
 
-状态：`design_only`，2026-08-22。本文和对应静态模型不接入 Planner、Controller、Prompt、工具构建或生产执行路径。
+状态：`shadow`，默认关闭，2026-08-22。Registry 只参与脱敏旁路比较，不进入 Planner Prompt，也不控制路由、工具构建或执行。
 
 ## 目标与边界
 
@@ -60,6 +60,7 @@ Registry 根对象包含：
 ```text
 registry_version
 status = design_only | shadow | active
+max_routed_tools
 tools[]
 conditional_evidence[]
 ```
@@ -81,7 +82,7 @@ audit
 
 - `arguments`：Pydantic schema 引用、默认参数、是否允许额外字段、身份来源。
 - `observation`：当前输出形态、严格输出 schema 状态、无数据语义、异常行为。
-- `freshness`：目标复用范围、最大年龄和失效事件；`design_only` 时不执行。
+- `freshness`：目标复用范围、最大年龄和失效事件；shadow 阶段仍不执行。
 - `audit`：规范化参数、摘要与指纹、身份是否落日志、敏感结果字段。
 - `conditional_evidence`：主工具、替代工具、固定触发条件、默认参数和禁止推测式并行。
 
@@ -119,19 +120,19 @@ result_storage = summary_and_fingerprint
 
 ## 激活路线
 
-1. **design_only（当前）**：Registry 只被契约测试导入，CI 校验它与 v1 工具、路由、参数 schema 和条件证据组完全一致。
-2. **shadow**：运行时继续使用 v1，但旁路比较 Registry 推导结果；任何差异只记录指标，不影响调用。详细边界见 [Tool Calling v2：Registry Shadow 设计](17-tool-calling-v2-shadow.md)。
+1. **design_only（已完成）**：Registry 只被契约测试导入，CI 校验它与 v1 工具、路由、参数 schema 和条件证据组完全一致。
+2. **shadow（当前）**：运行时继续使用 v1，但可在默认关闭的开关下旁路比较 Registry 推导结果；任何差异不影响调用。详细边界见 [Tool Calling v2：Registry Shadow 设计](17-tool-calling-v2-shadow.md)。
 3. **registry catalog**：在功能开关下由 Registry 生成模型目录和并行/权限校验，v1 仍可回退。
 4. **normalized observation**：逐工具增加严格输出模型，再统一 envelope；不能一次性包裹后假装内部数据已经强类型。
 5. **per-run evidence state**：只复用满足 freshness、参数指纹和失效版本的同 run 观察。
 
 进入 shadow 前必须补齐至少 30 个 Tool Calling 专项用例，并保持越权调用为 0、参数合法率 100%、条件替代门禁 100%。
 
-## 零运行时变化证明
+## Shadow 权威边界
 
-- 新 Registry 状态固定为 `design_only`。
-- `agent_tools.py`、`agent_intent.py`、Planner 和 Controller 不导入 Registry。
-- 现有 `READ_TOOL_IDS`、工具构建、路由、白名单、Prompt、预算和执行流程不改。
-- 新测试只验证静态契约与 v1 事实一致，不改变测试夹具行为。
+- shadow 配置默认全部关闭，关闭时不创建 session 或报告，Trace 保持 `1.0` 且不增加空字段。
+- `agent_tools.py`、`agent_intent.py` 和 Planner 不读取 Registry；Controller 与 Runtime 只把已发生的脱敏事实交给旁路 session。
+- 现有 `READ_TOOL_IDS`、工具构建、路由、白名单、Prompt、预算和执行流程仍是唯一权威。
+- shadow 复用已有工具实例，不增加模型、工具、数据库或外部 API 调用。
 
-只有后续独立提交显式进入 shadow 阶段时，才允许运行时代码读取 Registry。
+Registry 只有在未来独立通过 authority 门禁后，才允许生成工具目录或参与边界决策。

@@ -186,8 +186,8 @@ def test_shadow_report_schema_excludes_user_content_and_tool_payloads():
         assert forbidden_field not in schema
 
 
-def test_shadow_design_does_not_activate_the_registry():
-    assert TOOL_REGISTRY_V2.status == "design_only"
+def test_shadow_registry_is_not_active_authority():
+    assert TOOL_REGISTRY_V2.status == "shadow"
 
 
 def test_comparator_case_fixtures_cover_every_check_and_stable_difference():

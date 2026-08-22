@@ -1,8 +1,17 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
+
+from app.schemas.agent_tool_registry import ToolRegistryShadowReport
 
 
 ExecutionMode = Literal["direct", "planned", "clarify", "safe_stop"]
@@ -164,7 +173,7 @@ class AgentFinalizationContractTrace(BaseModel):
 class AgentExecutionTrace(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    trace_version: Literal["1.0"] = "1.0"
+    trace_version: Literal["1.0", "1.1"] = "1.0"
     execution_mode: ExecutionMode
     risk_level: Literal["low", "medium", "high"]
     mode_reasons: list[str] = Field(default_factory=list, max_length=8)
@@ -185,3 +194,23 @@ class AgentExecutionTrace(BaseModel):
     budget_usage: AgentBudgetUsageTrace = Field(
         default_factory=AgentBudgetUsageTrace
     )
+    tool_registry_shadow: ToolRegistryShadowReport | None = None
+
+    @model_validator(mode="after")
+    def validate_shadow_trace_version(self) -> Self:
+        if (
+            self.tool_registry_shadow is not None
+            and self.trace_version != "1.1"
+        ):
+            raise ValueError("tool registry shadow requires trace version 1.1")
+        return self
+
+    @model_serializer(mode="wrap")
+    def omit_inactive_shadow_field(
+        self,
+        handler: SerializerFunctionWrapHandler,
+    ) -> dict[str, Any]:
+        serialized = handler(self)
+        if self.tool_registry_shadow is None:
+            serialized.pop("tool_registry_shadow", None)
+        return serialized

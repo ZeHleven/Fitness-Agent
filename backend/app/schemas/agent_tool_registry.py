@@ -16,6 +16,41 @@ ToolIntentName = Literal[
 ]
 
 
+class ToolArgumentFieldContract(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(
+        pattern=r"^[a-z][a-z0-9_]*$",
+        min_length=1,
+        max_length=80,
+    )
+    json_type: Literal[
+        "integer",
+        "number",
+        "string",
+        "boolean",
+        "array",
+        "object",
+    ]
+    required: bool = False
+    has_default: bool = False
+    default: Any = None
+    minimum: int | float | None = None
+    maximum: int | float | None = None
+
+    @model_validator(mode="after")
+    def validate_default_presence(self) -> Self:
+        if not self.has_default and self.default is not None:
+            raise ValueError("fields without defaults cannot declare a value")
+        if (
+            self.minimum is not None
+            and self.maximum is not None
+            and self.minimum > self.maximum
+        ):
+            raise ValueError("argument minimum cannot exceed maximum")
+        return self
+
+
 class ToolArgumentContract(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -23,6 +58,26 @@ class ToolArgumentContract(BaseModel):
     default_arguments: dict[str, Any] = Field(default_factory=dict)
     additional_properties: bool = False
     identity_source: Literal["server_context"] = "server_context"
+    fields: tuple[ToolArgumentFieldContract, ...] = Field(
+        default=(),
+        max_length=30,
+    )
+
+    @model_validator(mode="after")
+    def validate_declared_defaults(self) -> Self:
+        field_names = [item.name for item in self.fields]
+        if len(field_names) != len(set(field_names)):
+            raise ValueError("argument field names must be unique")
+        declared_defaults = {
+            item.name: item.default
+            for item in self.fields
+            if item.has_default
+        }
+        if declared_defaults != self.default_arguments:
+            raise ValueError(
+                "default arguments must match declared field defaults"
+            )
+        return self
 
 
 class ToolObservationContract(BaseModel):
@@ -147,6 +202,7 @@ class ToolRegistryV2(BaseModel):
 
     registry_version: str = Field(min_length=1, max_length=40)
     status: Literal["design_only", "shadow", "active"]
+    max_routed_tools: int = Field(ge=1, le=8)
     tools: tuple[ToolRegistryEntry, ...] = Field(min_length=1, max_length=100)
     conditional_evidence: tuple[ConditionalEvidenceContract, ...] = Field(
         default=(),

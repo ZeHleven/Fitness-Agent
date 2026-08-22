@@ -29,6 +29,11 @@ from app.services.agent_controller import (
 from app.services.agent_intent import IntentResolution, route_tools
 from app.services.agent_intent_model import resolve_intent_with_fallback
 from app.services.agent_structured_errors import safe_error_category
+from app.services.agent_tool_registry_shadow_trace import (
+    ToolRegistryShadowSession,
+    attach_registry_shadow_report,
+    create_registry_shadow_session,
+)
 from app.services.agent_trace import (
     add_stage_timing,
     build_initial_execution_trace,
@@ -67,6 +72,24 @@ class AgentRuntimeResult:
 
 class AgentRunOwnershipLost(RuntimeError):
     """Raised when a stale worker attempt tries to persist a run result."""
+
+
+def _finalize_registry_shadow_trace(
+    trace: AgentExecutionTrace,
+    session: ToolRegistryShadowSession | None,
+) -> AgentExecutionTrace:
+    try:
+        if session is not None and trace.observations:
+            session.record_final_observations(trace)
+        return attach_registry_shadow_report(
+            trace,
+            session,
+            persist_trace=(
+                settings.AGENT_TOOL_REGISTRY_SHADOW_PERSIST_TRACE
+            ),
+        )
+    except Exception:  # pragma: no cover - shadow must never fail v1
+        return trace
 
 
 async def _lock_run_ownership(
@@ -392,6 +415,7 @@ async def invoke_langchain_agent(
     tool_allowlist: list[str],
     resolved_query: str | None = None,
     subtasks: list[str] | None = None,
+    shadow_session: ToolRegistryShadowSession | None = None,
 ) -> dict[str, Any]:
     model = _build_model()
     tools = build_read_tools(
@@ -399,6 +423,8 @@ async def invoke_langchain_agent(
         user_id=user_id,
         allowlist=tool_allowlist,
     )
+    if shadow_session is not None:
+        shadow_session.record_constructed_tools(tools, tool_allowlist)
     agent = create_agent(
         model=model,
         tools=tools,
@@ -437,6 +463,7 @@ async def execute_agent_run(
 ) -> AgentRuntimeResult:
     started = time.perf_counter()
     execution_trace: AgentExecutionTrace | None = None
+    shadow_session: ToolRegistryShadowSession | None = None
     try:
         existing = await db.scalar(
             select(AgentMessage).where(
@@ -466,6 +493,11 @@ async def execute_agent_run(
                 execution_trace=execution_trace,
             )
 
+        shadow_session = create_registry_shadow_session(
+            run_id=run.id,
+            enabled=settings.AGENT_TOOL_REGISTRY_SHADOW_ENABLED,
+            sample_rate=settings.AGENT_TOOL_REGISTRY_SHADOW_SAMPLE_RATE,
+        )
         history = await _load_history(
             db,
             conversation_id=conversation.id,
@@ -478,6 +510,8 @@ async def execute_agent_run(
         )
         resolution = intent_outcome.resolution
         tool_allowlist = route_tools(resolution)
+        if shadow_session is not None:
+            shadow_session.record_route(resolution, tool_allowlist)
         execution_trace = build_initial_execution_trace(
             resolution,
             tool_allowlist,
@@ -550,6 +584,10 @@ async def execute_agent_run(
                     if resolution.risk_level == "high"
                     else "clarification_required"
                 ),
+            )
+            execution_trace = _finalize_registry_shadow_trace(
+                execution_trace,
+                shadow_session,
             )
             await _lock_run_ownership(
                 db,
@@ -650,8 +688,13 @@ async def execute_agent_run(
                 summarize_observation=_audit_result_summary,
                 event_sink=persist_planned_event,
                 parallel_tool_invoker=invoke_parallel_read_tool,
+                shadow_session=shadow_session,
             )
             execution_trace = planned_result.execution_trace
+            execution_trace = _finalize_registry_shadow_trace(
+                execution_trace,
+                shadow_session,
+            )
             reply = planned_result.reply
             cards = planned_result.cards
             run.input_tokens = planned_result.input_tokens
@@ -718,6 +761,7 @@ async def execute_agent_run(
                 tool_allowlist=tool_allowlist,
                 resolved_query=resolution.resolved_query,
                 subtasks=resolution.subtasks,
+                shadow_session=shadow_session,
             )
         except Exception as exc:
             execution_trace = add_stage_timing(
@@ -744,6 +788,10 @@ async def execute_agent_run(
             execution_trace,
             result,
             summarize_observation=_audit_result_summary,
+        )
+        execution_trace = _finalize_registry_shadow_trace(
+            execution_trace,
+            shadow_session,
         )
         reply, cards = _extract_agent_output(result)
         await _lock_run_ownership(
@@ -786,6 +834,10 @@ async def execute_agent_run(
                 termination_reason="ai_service_error",
                 failed=True,
             )
+            execution_trace = _finalize_registry_shadow_trace(
+                execution_trace,
+                shadow_session,
+            )
         await _mark_owned_run_failed(
             db,
             run_id=run.id,
@@ -803,6 +855,10 @@ async def execute_agent_run(
                 terminal_action="failed",
                 termination_reason="agent_runtime_error",
                 failed=True,
+            )
+            execution_trace = _finalize_registry_shadow_trace(
+                execution_trace,
+                shadow_session,
             )
         await _mark_owned_run_failed(
             db,

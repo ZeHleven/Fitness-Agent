@@ -33,6 +33,9 @@ from app.services.agent_planner import (
     build_tool_catalog,
 )
 from app.services.agent_structured_errors import safe_error_category
+from app.services.agent_tool_registry_shadow_trace import (
+    ToolRegistryShadowSession,
+)
 from app.services.agent_tools import (
     CONDITIONAL_READ_EVIDENCE_GROUPS,
     PARALLEL_READ_CONDITIONAL_TOOL_PAIRS,
@@ -803,6 +806,7 @@ async def execute_planned_agent(
     policy: PlanningPolicy | None = None,
     tools: list[BaseTool] | None = None,
     parallel_tool_invoker: ParallelToolInvoker | None = None,
+    shadow_session: ToolRegistryShadowSession | None = None,
 ) -> PlannedExecutionResult:
     """Execute one small linear plan with explicit, planner-owned boundaries."""
     sink = event_sink or _noop_event_sink
@@ -817,6 +821,11 @@ async def execute_planned_agent(
     )
     tools_by_id = _tool_map(available_tools)
     tool_catalog = build_tool_catalog(available_tools)
+    if shadow_session is not None:
+        shadow_session.record_constructed_tools(
+            available_tools,
+            tool_allowlist,
+        )
     planning_policy = policy or ModelPlanningPolicy(model)
     global_allowlist = set(tool_allowlist)
 
@@ -832,6 +841,11 @@ async def execute_planned_agent(
             stage="planner",
             timeout_seconds=settings.AGENT_PLANNER_TIMEOUT_SECONDS,
         )
+        if shadow_session is not None:
+            shadow_session.record_parallel_policy(
+                tool_allowlist,
+                plan_steps=plan.steps,
+            )
         _validate_plan_boundary(
             plan,
             allowlist=global_allowlist,
@@ -850,6 +864,11 @@ async def execute_planned_agent(
                 tool_catalog=tool_catalog,
                 max_steps=settings.AGENT_MAX_PLAN_STEPS,
             )
+            if shadow_session is not None:
+                shadow_session.record_parallel_policy(
+                    tool_allowlist,
+                    plan_steps=plan.steps,
+                )
             planner_deadline_fallback = True
         else:
             trace = add_stage_timing(

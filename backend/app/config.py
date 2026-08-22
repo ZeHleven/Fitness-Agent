@@ -1,3 +1,4 @@
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -54,6 +55,13 @@ class Settings(BaseSettings):
     AGENT_WORKER_POLL_SECONDS: float = 0.5
     AGENT_RUN_LEASE_SECONDS: int = 180
     AGENT_RUN_MAX_ATTEMPTS: int = 3
+    AGENT_TOOL_REGISTRY_SHADOW_ENABLED: bool = False
+    AGENT_TOOL_REGISTRY_SHADOW_SAMPLE_RATE: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+    )
+    AGENT_TOOL_REGISTRY_SHADOW_PERSIST_TRACE: bool = False
 
 
 settings = Settings()

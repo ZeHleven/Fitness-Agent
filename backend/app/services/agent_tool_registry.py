@@ -1,7 +1,7 @@
-"""Declarative Tool Registry v2 draft.
+"""Declarative Tool Registry v2 used by non-authoritative shadow checks.
 
-This module is intentionally not imported by the Agent runtime. Phase 1 keeps
-the v1 tool construction, routing, planning, and execution paths unchanged.
+The v1 tool construction, routing, planning, and execution paths remain the
+only runtime authority. Shadow consumers may read this immutable metadata.
 """
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ from __future__ import annotations
 from app.schemas.agent_tool_registry import (
     ConditionalEvidenceContract,
     ToolArgumentContract,
+    ToolArgumentFieldContract,
     ToolAuditContract,
     ToolFreshnessContract,
     ToolObservationContract,
@@ -22,7 +23,8 @@ _SUMMARY_AND_FINGERPRINT_AUDIT = ToolAuditContract()
 
 TOOL_REGISTRY_V2 = ToolRegistryV2(
     registry_version="2.0.0-draft.1",
-    status="design_only",
+    status="shadow",
+    max_routed_tools=4,
     tools=(
         ToolRegistryEntry(
             tool_id="profile.get_summary",
@@ -241,6 +243,14 @@ TOOL_REGISTRY_V2 = ToolRegistryV2(
             arguments=ToolArgumentContract(
                 schema_ref="WorkoutHistoryArguments",
                 default_arguments={"limit": 5},
+                fields=(ToolArgumentFieldContract(
+                    name="limit",
+                    json_type="integer",
+                    has_default=True,
+                    default=5,
+                    minimum=1,
+                    maximum=20,
+                ),),
             ),
             observation=ToolObservationContract(
                 current_shape="legacy_mapping",
@@ -276,6 +286,14 @@ TOOL_REGISTRY_V2 = ToolRegistryV2(
             arguments=ToolArgumentContract(
                 schema_ref="WorkoutProgressArguments",
                 default_arguments={"weeks": 8},
+                fields=(ToolArgumentFieldContract(
+                    name="weeks",
+                    json_type="integer",
+                    has_default=True,
+                    default=8,
+                    minimum=1,
+                    maximum=52,
+                ),),
             ),
             observation=ToolObservationContract(
                 current_shape="legacy_mapping",

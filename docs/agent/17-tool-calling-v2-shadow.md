@@ -1,6 +1,6 @@
 # Tool Calling v2：Registry Shadow 设计
 
-状态：设计完成、运行时未接线，2026-08-22。Registry 仍保持 `design_only`，本文不启用 shadow 流量。
+状态：shadow 旁路已实现、默认关闭，2026-08-22。Registry 保持非权威，本文不启用生产 shadow 流量。
 
 ## 目标
 
@@ -115,13 +115,13 @@ AGENT_TOOL_REGISTRY_SHADOW_PERSIST_TRACE=false
 
 ## 持久化与协议
 
-推荐在实现阶段为 `AgentExecutionTrace` 增加可选的 `tool_registry_shadow` 字段，并让解析器同时接受 trace `1.0` 和新版本；JSONB 列无需数据库迁移。只有采样且 `PERSIST_TRACE=true` 时写入报告，否则只输出聚合指标。
+`AgentExecutionTrace` 已增加可选的 `tool_registry_shadow` 字段，解析器同时接受 trace `1.0` 和 `1.1`；JSONB 列无需数据库迁移。只有采样且 `PERSIST_TRACE=true` 时写入报告；否则只执行 run-local 检查，不持久化报告。聚合指标适配器仍是后续工作。
 
 不得把 shadow 检查伪装成现有 `stage_timings`：它不是模型或业务执行阶段。单独字段可以避免改变模型调用和阶段延迟统计语义。
 
 所有持久化仍经过现有 run 所有权检查。旧 worker attempt 无权覆盖新 attempt 的 shadow 报告。
 
-## 指标
+## 指标（尚未接线）
 
 聚合指标只使用低基数标签：
 
@@ -165,8 +165,8 @@ agent_tool_registry_shadow_latency_ms
 
 1. `test: define registry shadow comparator cases`：已由 `834a907` 完成；纯函数测试夹具不接运行时。
 2. `feat: add registry shadow comparator`：六类纯比较器已实现并通过固定夹具；仍未接运行时。
-3. `feat: record optional registry shadow trace`：增加配置、稳定采样和可选 trace 字段，默认关闭。
-4. `test: verify registry shadow behavioral parity`：同一固定输入开关前后比较完整 v1 结果。
+3. `feat: record optional registry shadow trace`：已实现配置、稳定采样、六接点旁路和可选 Trace，默认关闭。
+4. `test: verify registry shadow behavioral parity`：已开始覆盖 direct/planned 开关前后行为；完整运行级夹具仍需独立收口。
 5. 通过 CI 与真实小流量观测后，再决定是否进入 Registry catalog authority。
 
-当前已完成 shadow 数据模型、设计、固定 comparator 夹具和六类纯比较器；配置、采样、Trace 持久化以及全部运行时接线尚未开始。
+当前已完成 shadow 数据模型、设计、固定 comparator 夹具、六类纯比较器、稳定采样和可选 Trace 接线；生产开关仍关闭，完整运行级行为一致性提交尚未完成。

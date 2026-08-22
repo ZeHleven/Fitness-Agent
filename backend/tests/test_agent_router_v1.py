@@ -103,6 +103,8 @@ async def test_agent_chat_persists_conversation_run_messages_and_tool_audit(
     assert execution_trace["terminal_action"] == "answer"
     assert execution_trace["actions"][0]["tool_id"] == "profile.get_summary"
     assert execution_trace["observations"][0]["status"] == "success"
+    assert execution_trace["trace_version"] == "1.0"
+    assert "tool_registry_shadow" not in execution_trace
 
     tool_call = await db_session.scalar(
         select(AgentToolCall).where(AgentToolCall.run_id == body["run_id"])
@@ -111,6 +113,78 @@ async def test_agent_chat_persists_conversation_run_messages_and_tool_audit(
     assert tool_call.tool_name == "profile.get_summary"
     assert "primary_goal" in tool_call.result_data["fields_returned"]
     assert "增肌" not in str(tool_call.result_data)
+
+
+@pytest.mark.asyncio
+async def test_sampled_shadow_report_is_optional_and_privacy_safe(client):
+    token = await _token(client, "agent-shadow-trace@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    mocked_result = {
+        "messages": [
+            AIMessage(
+                content="",
+                tool_calls=[{
+                    "name": "profile_get_summary",
+                    "args": {},
+                    "id": "shadow-profile-call",
+                    "type": "tool_call",
+                }],
+            ),
+            ToolMessage(
+                content=json.dumps({
+                    "found": True,
+                    "primary_goal": "敏感目标值",
+                }),
+                tool_call_id="shadow-profile-call",
+                name="profile_get_summary",
+            ),
+            AIMessage(content="已根据资料回答。"),
+        ]
+    }
+
+    with (
+        patch.object(
+            settings,
+            "AGENT_TOOL_REGISTRY_SHADOW_ENABLED",
+            True,
+        ),
+        patch.object(
+            settings,
+            "AGENT_TOOL_REGISTRY_SHADOW_SAMPLE_RATE",
+            1.0,
+        ),
+        patch.object(
+            settings,
+            "AGENT_TOOL_REGISTRY_SHADOW_PERSIST_TRACE",
+            True,
+        ),
+        patch(
+            "app.services.agent_runtime.invoke_langchain_agent",
+            new=AsyncMock(return_value=mocked_result),
+        ),
+    ):
+        response = await client.post(
+            "/api/v1/agent/chat",
+            json={"message": "我的训练目标是什么？"},
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    run_response = await client.get(
+        f"/api/v1/agent/runs/{response.json()['run_id']}",
+        headers=headers,
+    )
+    trace = run_response.json()["execution_trace"]
+    report = trace["tool_registry_shadow"]
+    serialized_report = json.dumps(report, ensure_ascii=False)
+
+    assert trace["trace_version"] == "1.1"
+    assert report["mode"] == "shadow"
+    assert report["status"] == "partial"
+    assert report["checks"][0]["check_type"] == "route_allowlist"
+    assert report["checks"][0]["status"] == "match"
+    assert "敏感目标值" not in serialized_report
+    assert "我的训练目标是什么" not in serialized_report
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,9 @@ from pydantic import PrivateAttr
 from app.models.profile import UserProfile
 from app.models.user import User
 from app.services.agent_runtime import _audit_result_summary, invoke_langchain_agent
+from app.services.agent_tool_registry_shadow_trace import (
+    ToolRegistryShadowSession,
+)
 
 
 class ToolAwareFakeChatModel(FakeMessagesListChatModel):
@@ -17,6 +20,48 @@ class ToolAwareFakeChatModel(FakeMessagesListChatModel):
     def bind_tools(self, tools, **_kwargs):
         self._bound_tool_names = [item.name for item in tools]
         return self
+
+
+@pytest.mark.asyncio
+async def test_shadow_session_does_not_change_direct_agent_messages():
+    async def invoke(model, shadow_session=None):
+        with patch(
+            "app.services.agent_runtime._build_model",
+            return_value=model,
+        ):
+            return await invoke_langchain_agent(
+                object(),
+                user_id="direct-shadow-parity",
+                history=[],
+                user_message="我的训练目标是什么？",
+                tool_allowlist=["profile.get_summary"],
+                shadow_session=shadow_session,
+            )
+
+    baseline = await invoke(ToolAwareFakeChatModel(
+        responses=[AIMessage(content="请先完善训练目标资料。")]
+    ))
+    session = ToolRegistryShadowSession(sample_bucket=11)
+    shadowed = await invoke(
+        ToolAwareFakeChatModel(
+            responses=[AIMessage(content="请先完善训练目标资料。")]
+        ),
+        session,
+    )
+
+    def snapshot(result):
+        return [
+            {
+                "type": message.type,
+                "content": message.content,
+                "tool_calls": getattr(message, "tool_calls", None),
+            }
+            for message in result["messages"]
+        ]
+
+    assert snapshot(shadowed) == snapshot(baseline)
+    assert session.checks["constructed_tools"].status == "match"
+    assert session.checks["argument_schema"].status == "match"
 
 
 @pytest.mark.asyncio

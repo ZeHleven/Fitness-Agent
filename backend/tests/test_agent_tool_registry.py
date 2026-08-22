@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.schemas.agent_tool_registry import ToolRegistryV2
-from app.services.agent_intent import INTENT_TOOL_ALLOWLIST
+from app.services.agent_intent import INTENT_TOOL_ALLOWLIST, MAX_ROUTED_TOOLS
 from app.services.agent_tool_registry import (
     TOOL_REGISTRY_V2,
     TOOL_REGISTRY_V2_BY_ID,
@@ -19,8 +19,9 @@ from app.services.agent_tools import (
 )
 
 
-def test_registry_v2_is_design_only_and_covers_every_active_read_tool():
-    assert TOOL_REGISTRY_V2.status == "design_only"
+def test_registry_v2_is_shadow_only_and_covers_every_active_read_tool():
+    assert TOOL_REGISTRY_V2.status == "shadow"
+    assert TOOL_REGISTRY_V2.max_routed_tools == MAX_ROUTED_TOOLS
     assert tuple(TOOL_REGISTRY_V2_BY_ID) == READ_TOOL_IDS
     assert set(TOOL_REGISTRY_V2_BY_ID) == set(PARALLEL_READ_SAFE_TOOL_IDS)
     assert all(item.availability == "active" for item in TOOL_REGISTRY_V2.tools)

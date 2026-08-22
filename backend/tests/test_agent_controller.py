@@ -22,8 +22,15 @@ from app.services.agent_controller import (
 )
 from app.services.agent_intent import IntentResolution
 from app.services.agent_runtime import _audit_result_summary
+from app.services.agent_tool_registry_shadow_trace import (
+    ToolRegistryShadowSession,
+)
 from app.services.agent_planner import PlanningModelError
-from app.services.agent_tools import NoArguments, WorkoutHistoryArguments
+from app.services.agent_tools import (
+    NoArguments,
+    WorkoutHistoryArguments,
+    WorkoutProgressArguments,
+)
 from app.services.agent_trace import build_initial_execution_trace
 
 
@@ -173,6 +180,80 @@ def test_planning_deadline_defaults_are_role_specific():
         Settings.model_fields["AGENT_REPLANNER_TIMEOUT_SECONDS"].default
         == 30.0
     )
+
+
+@pytest.mark.asyncio
+async def test_shadow_session_does_not_change_planned_controller_behavior():
+    @tool(
+        "workout_get_progress",
+        args_schema=WorkoutProgressArguments,
+        description="读取训练进度",
+    )
+    async def progress(weeks: int = 8):
+        return {"weeks": weeks, "total_sessions": 3}
+
+    plan = MicroPlan(
+        goal="判断是否需要查询训练进度",
+        steps=[MicroPlanStep(
+            objective="判断现有证据是否足够",
+            candidate_tools=["workout.get_progress"],
+            execution_strategy="direct",
+            success_signal="完成判断",
+        )],
+    )
+
+    async def run(shadow_session=None):
+        policy = ScriptedPolicy(
+            plan=plan,
+            decisions=[_decision(
+                "complete_step",
+                step_summary="无需调用工具即可完成测试收口",
+            )],
+        )
+        result = await execute_planned_agent(
+            db=None,
+            user_id="shadow-parity-user",
+            run_id="shadow-parity-run",
+            model=None,
+            goal=plan.goal,
+            subtasks=["验证旁路不改变控制流"],
+            tool_allowlist=["workout.get_progress"],
+            initial_trace=_planned_trace(["workout.get_progress"]),
+            summarize_observation=_audit_result_summary,
+            policy=policy,
+            tools=[progress],
+            shadow_session=shadow_session,
+        )
+        return result, policy
+
+    baseline, baseline_policy = await run()
+    session = ToolRegistryShadowSession(sample_bucket=9)
+    shadowed, shadowed_policy = await run(session)
+
+    assert shadowed.reply == baseline.reply
+    assert shadowed.cards == baseline.cards
+    assert shadowed.missing_slots == baseline.missing_slots
+    assert shadowed.execution_trace.terminal_action == (
+        baseline.execution_trace.terminal_action
+    )
+    assert shadowed.execution_trace.budget_usage == (
+        baseline.execution_trace.budget_usage
+    )
+    assert shadowed.execution_trace.actions == baseline.execution_trace.actions
+    assert shadowed.execution_trace.observations == (
+        baseline.execution_trace.observations
+    )
+    assert len(shadowed_policy.decision_inputs) == len(
+        baseline_policy.decision_inputs
+    )
+    assert {
+        check_type: check.status
+        for check_type, check in session.checks.items()
+    } == {
+        "constructed_tools": "match",
+        "argument_schema": "match",
+        "parallel_policy": "match",
+    }
 
 
 @pytest.mark.asyncio
@@ -889,6 +970,7 @@ async def test_parallel_read_rejects_observation_dependent_tool_pair():
         ),
         decisions=[],
     )
+    shadow_session = ToolRegistryShadowSession(sample_bucket=13)
 
     with pytest.raises(
         ValueError,
@@ -906,7 +988,12 @@ async def test_parallel_read_rejects_observation_dependent_tool_pair():
             summarize_observation=_audit_result_summary,
             policy=policy,
             tools=[active_session, next_workout],
+            shadow_session=shadow_session,
         )
+
+    parallel_check = shadow_session.checks["parallel_policy"]
+    assert parallel_check.status == "mismatch"
+    assert parallel_check.mismatch_codes == ("parallel_policy_mismatch",)
 
 
 @pytest.mark.asyncio
