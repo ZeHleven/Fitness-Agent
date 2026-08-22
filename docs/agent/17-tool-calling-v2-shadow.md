@@ -166,7 +166,7 @@ agent_tool_registry_shadow_latency_ms
 1. `test: define registry shadow comparator cases`：已由 `834a907` 完成；纯函数测试夹具不接运行时。
 2. `feat: add registry shadow comparator`：六类纯比较器已实现并通过固定夹具；仍未接运行时。
 3. `feat: record optional registry shadow trace`：已实现配置、稳定采样、六接点旁路和可选 Trace，默认关闭。
-4. `test: verify registry shadow behavioral parity`：已开始覆盖 direct/planned 开关前后行为；完整运行级夹具仍需独立收口。
+4. `test: verify registry shadow behavioral parity`：已完成 direct 配置矩阵、planned 并行读取、条件替代、工具失败替代和 shadow 内部错误的运行级对照；固定夹具验证回复、卡片、模型/工具调用、参数、审计、终止动作和预算不变。
 5. 通过 CI 与真实小流量观测后，再决定是否进入 Registry catalog authority。
 
-当前已完成 shadow 数据模型、设计、固定 comparator 夹具、六类纯比较器、稳定采样和可选 Trace 接线；生产开关仍关闭，完整运行级行为一致性提交尚未完成。
+当前已完成 shadow 数据模型、设计、固定 comparator 夹具、六类纯比较器、稳定采样、可选 Trace 接线和运行级行为一致性夹具；生产开关仍关闭，下一步是通过 CI 后接入聚合指标并准备真实小流量观测。
