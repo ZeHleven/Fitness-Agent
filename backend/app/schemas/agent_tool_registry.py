@@ -175,3 +175,102 @@ class ToolRegistryV2(BaseModel):
                     "conditional evidence groups must reference registered tools"
                 )
         return self
+
+
+ToolRegistryShadowCheckType = Literal[
+    "route_allowlist",
+    "constructed_tools",
+    "argument_schema",
+    "parallel_policy",
+    "conditional_evidence",
+    "observation_semantics",
+]
+
+ToolRegistryShadowMismatchCode = Literal[
+    "permission_expansion",
+    "registered_tool_missing",
+    "unexpected_tool",
+    "tool_order_mismatch",
+    "langchain_name_mismatch",
+    "argument_schema_mismatch",
+    "default_argument_mismatch",
+    "parallel_policy_mismatch",
+    "conditional_evidence_mismatch",
+    "observation_semantics_mismatch",
+    "shadow_internal_error",
+]
+
+
+class ToolRegistryShadowCheck(BaseModel):
+    """Privacy-safe result of one deterministic v1/v2 comparison."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    check_type: ToolRegistryShadowCheckType
+    status: Literal["match", "mismatch", "skipped", "error"]
+    mismatch_codes: tuple[ToolRegistryShadowMismatchCode, ...] = Field(
+        default=(),
+        max_length=12,
+    )
+    legacy_fingerprint: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    registry_fingerprint: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    legacy_tool_ids: tuple[str, ...] = Field(default=(), max_length=8)
+    registry_tool_ids: tuple[str, ...] = Field(default=(), max_length=8)
+    latency_ms: int = Field(default=0, ge=0)
+    skip_reason: str | None = Field(default=None, max_length=120)
+    error_category: str | None = Field(default=None, max_length=160)
+
+    @model_validator(mode="after")
+    def validate_status_payload(self) -> Self:
+        if self.status == "mismatch" and not self.mismatch_codes:
+            raise ValueError("mismatch checks require a stable mismatch code")
+        if self.status not in ("mismatch", "error") and self.mismatch_codes:
+            raise ValueError("non-mismatch checks cannot carry mismatch codes")
+        if self.status == "skipped" and not self.skip_reason:
+            raise ValueError("skipped checks require a reason")
+        if self.status != "skipped" and self.skip_reason is not None:
+            raise ValueError("only skipped checks may carry a skip reason")
+        if self.status == "error" and not self.error_category:
+            raise ValueError("error checks require an error category")
+        if self.status != "error" and self.error_category is not None:
+            raise ValueError("only error checks may carry an error category")
+        return self
+
+
+class ToolRegistryShadowReport(BaseModel):
+    """Run-local shadow report; never participates in an Agent decision."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    registry_version: str = Field(min_length=1, max_length=40)
+    mode: Literal["shadow"] = "shadow"
+    status: Literal["not_sampled", "match", "mismatch", "partial", "error"]
+    sample_bucket: int = Field(ge=0, le=9999)
+    checks: tuple[ToolRegistryShadowCheck, ...] = Field(
+        default=(),
+        max_length=20,
+    )
+    total_latency_ms: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def validate_report_status(self) -> Self:
+        check_statuses = {item.status for item in self.checks}
+        if self.status == "not_sampled" and self.checks:
+            raise ValueError("non-sampled reports cannot contain checks")
+        if self.status == "match" and (
+            not self.checks or check_statuses != {"match"}
+        ):
+            raise ValueError("match reports require only matching checks")
+        if self.status == "mismatch" and "mismatch" not in check_statuses:
+            raise ValueError("mismatch reports require a mismatching check")
+        if self.status == "partial" and "skipped" not in check_statuses:
+            raise ValueError("partial reports require a skipped check")
+        if self.status == "error" and "error" not in check_statuses:
+            raise ValueError("error reports require an error check")
+        return self
