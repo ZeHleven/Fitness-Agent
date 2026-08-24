@@ -110,7 +110,7 @@ Replanner 与初始 Planner 共用独立 deadline，但超时后的处理不同�
 
 当前所有工具仍为只读。Finalizer 可以把调整建议标记为 `terminal_action=proposal`，但这只表示待确认文本提案，不会创建或执行写操作。
 
-Finalizer 模型实际输出的是证据语义 outcome，而不是任意 terminal action。普通问答不能产生未经请求的 proposal；需要评估调整的请求仍由模型根据观察在“建议调整、无需调整、证据不足”之间动态判断，Controller 只负责把语义 outcome 确定映射到 `answer|proposal`。因此该契约约束业务类型一致性，不把反事实结论硬编码成工作流。
+Finalizer 模型实际输出的是证据语义 outcome，而不是任意 terminal action。普通问答不能产生未经请求的 proposal；需要评估调整的请求通常仍由模型根据观察在“建议调整、无需调整、证据不足”之间动态判断。为消除同一完整反事实证据的终态漂移，Controller 只在两个保守边界收窄集合：明确低完成率只允许调整提案；偏好与计划频率一致、至少两周完成率不低于 80%，且没有额外或失败证据时只允许无需调整。其余情况仍动态判断，Controller 最终把语义 outcome 确定映射到 `answer|proposal`。
 
 初始 Planner 超过 15 秒 deadline 时，不再无限等待或直接切换成通用工作流。Controller 只生成一次 `deadline_fallback_v1` 微计划：白名单内参数已知、相互独立的 2 至 3 个主证据直接合并为一个显式 `parallel_read`；聚合进度与训练历史这类替代关系不并行预取。主进度位于并行批次时由 Controller 在失败后调用历史；单独条件步骤仍可由 bounded ReAct 处理。该路径是超时降级，不参与正常 Planner 决策，也不能扩展工具权限。Replanner 仍使用独立的 30 秒 deadline，避免初始规划的延迟策略无意改变已有观察后的恢复边界。
 

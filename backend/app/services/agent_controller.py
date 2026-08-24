@@ -279,6 +279,75 @@ def _has_clear_low_plan_adherence(
     )
 
 
+def _has_clear_high_plan_fit(
+    observations: list[dict[str, Any]],
+) -> bool:
+    """Require aligned preferences and complete aggregate evidence."""
+    supported_tool_ids = {
+        "profile.get_summary",
+        "plan.get_active",
+        "workout.get_progress",
+    }
+    if any(
+        observation.get("status") != "success"
+        or observation.get("tool_id") not in supported_tool_ids
+        for observation in observations
+    ):
+        return False
+
+    profile_result = _latest_successful_observation_result(
+        observations,
+        "profile.get_summary",
+    )
+    plan_result = _latest_successful_observation_result(
+        observations,
+        "plan.get_active",
+    )
+    progress_result = _latest_successful_observation_result(
+        observations,
+        "workout.get_progress",
+    )
+    if (
+        profile_result is None
+        or plan_result is None
+        or progress_result is None
+        or profile_result.get("found") is not True
+        or plan_result.get("found") is not True
+    ):
+        return False
+    plan = plan_result.get("plan")
+    if not isinstance(plan, dict):
+        return False
+
+    preferred_days = _valid_non_negative_number(
+        profile_result.get("training_days_per_week")
+    )
+    scheduled_days = _valid_non_negative_number(
+        plan.get("days_per_week", plan.get("scheduled_days_per_week"))
+    )
+    weeks = _valid_non_negative_number(progress_result.get("weeks"))
+    completed_sessions = _valid_non_negative_number(
+        progress_result.get("total_sessions")
+    )
+    if (
+        preferred_days is None
+        or not 1 <= preferred_days <= 7
+        or scheduled_days is None
+        or not 1 <= scheduled_days <= 7
+        or preferred_days != scheduled_days
+        or weeks is None
+        or weeks < 2
+        or completed_sessions is None
+    ):
+        return False
+
+    expected_sessions = scheduled_days * weeks
+    return (
+        expected_sessions >= 4
+        and completed_sessions / expected_sessions >= 0.8
+    )
+
+
 def _finalization_outcomes_for_observations(
     *,
     goal: str,
@@ -291,6 +360,11 @@ def _finalization_outcomes_for_observations(
         and _has_clear_low_plan_adherence(observations)
     ):
         return ["adjustment_proposal"]
+    if (
+        "no_change_needed" in allowed_outcomes
+        and _has_clear_high_plan_fit(observations)
+    ):
+        return ["no_change_needed"]
     return allowed_outcomes
 
 

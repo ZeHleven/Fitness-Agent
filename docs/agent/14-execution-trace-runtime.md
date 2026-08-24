@@ -39,7 +39,7 @@ Planner、Replanner 与 Executor 的 deadline 由 Controller 包裹实际策略�
 
 `finalization_contract` 记录本轮允许的语义结果、模型选择的结果和 Controller 派生的终止动作。普通查询只允许 `informational_answer|insufficient_evidence`；具有个性化调整、冲突或避让语义的请求允许 `adjustment_proposal|no_change_needed|insufficient_evidence`。这只决定 proposal 是否属于本轮能力边界，不预判事实结论。
 
-Finalizer 根据真实观察选择语义结果；Controller 唯一映射：`adjustment_proposal → proposal`，其他结果均为 `answer`。模型选择集合外结果、普通查询擅自产生 proposal，或 outcome 与 terminal action 不一致时，以稳定的 Finalizer 契约错误拒绝，不进入最终消息。
+Finalizer 根据真实观察选择语义结果；Controller 唯一映射：`adjustment_proposal → proposal`，其他结果均为 `answer`。计划适配问题只有两类完整聚合证据会进一步收窄 outcome：明确低完成率只允许 `adjustment_proposal`；偏好频率与计划一致、至少覆盖两周且完成率不低于 80%，并且没有额外或失败证据时，只允许 `no_change_needed`。资料缺失、偏好冲突、额外趋势/健康证据或工具失败仍保留动态结果集合。模型选择集合外结果、普通查询擅自产生 proposal，或 outcome 与 terminal action 不一致时，以稳定的 Finalizer 契约错误拒绝，不进入最终消息。
 
 ## Execution Mode
 
