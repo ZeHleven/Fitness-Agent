@@ -22,7 +22,9 @@ from app.services.agent_tool_registry_read_authority import (
 )
 
 
-logger = logging.getLogger(__name__)
+# Uvicorn owns the production console handler. Route authority decisions through
+# its error logger so INFO events remain visible in CloudBase container logs.
+logger = logging.getLogger("uvicorn.error")
 
 REGISTRY_READ_AUTHORITY_LOG_PREFIX = "agent_tool_registry_read_authority "
 

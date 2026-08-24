@@ -7,6 +7,7 @@ from app.services.agent_intent import IntentResolution, route_tools
 from app.services.agent_tool_registry_read_enforcement import (
     REGISTRY_READ_AUTHORITY_LOG_PREFIX,
     apply_optional_registry_read_enforcement,
+    logger,
 )
 
 
@@ -30,6 +31,10 @@ def _decision_logs(caplog) -> list[dict]:
                 message[len(REGISTRY_READ_AUTHORITY_LOG_PREFIX):]
             ))
     return payloads
+
+
+def test_authority_log_uses_production_console_logger():
+    assert logger.name == "uvicorn.error"
 
 
 def test_disabled_enforcement_returns_legacy_without_registry_projection(
