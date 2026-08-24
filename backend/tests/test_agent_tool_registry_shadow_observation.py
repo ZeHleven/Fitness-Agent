@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from app.services.agent_tool_registry_shadow_observation import (
+    parse_registry_shadow_metric_line,
     registry_shadow_observation_gate_failures,
     summarize_registry_shadow_metric_lines,
 )
@@ -56,6 +57,22 @@ def test_observation_summary_accepts_plain_and_json_envelope_logs():
         min_sampled_runs=1,
         max_p95_latency_ms=5,
     ) == []
+
+
+def test_parser_accepts_cloudbase_tsv_export_row():
+    row = (
+        "3\t2026-08-24 14:29:23\tINFO: agent_tool_registry_shadow_metric "
+        '{"kind":"histogram","labels":{},'
+        '"name":"agent_tool_registry_shadow_latency_ms","value":2}'
+        "\tfitness-agent-api-014\tfitness-agent-api-014-pod"
+    )
+
+    sample, invalid = parse_registry_shadow_metric_line(row)
+
+    assert invalid is False
+    assert sample is not None
+    assert sample.name == "agent_tool_registry_shadow_latency_ms"
+    assert sample.value == 2
 
 
 def test_observation_gate_detects_permission_expansion_and_shape_loss():

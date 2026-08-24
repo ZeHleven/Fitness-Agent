@@ -57,7 +57,7 @@ def parse_registry_shadow_metric_line(
             maxsplit=1,
         )[1].strip()
         try:
-            payload = json.loads(payload_text)
+            payload, _ = json.JSONDecoder().raw_decode(payload_text)
             return ToolRegistryShadowMetricSample.model_validate(payload), False
         except (TypeError, ValueError, ValidationError):
             continue
