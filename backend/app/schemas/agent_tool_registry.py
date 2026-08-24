@@ -233,6 +233,57 @@ class ToolRegistryV2(BaseModel):
         return self
 
 
+ToolRegistryReadAuthoritySurface = Literal[
+    "route_allowlist",
+    "constructed_tools",
+    "argument_schema",
+    "parallel_policy",
+    "conditional_evidence",
+]
+
+
+class ToolRegistryReadEnforcementContract(BaseModel):
+    """Conservative, reversible transition from shadow to read authority."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    contract_version: str = Field(
+        pattern=r"^\d+\.\d+\.\d+$",
+        max_length=20,
+    )
+    from_mode: Literal["shadow"] = "shadow"
+    to_mode: Literal["enforce"] = "enforce"
+    feature_flag: Literal[
+        "AGENT_TOOL_REGISTRY_ENFORCE_READS_ENABLED"
+    ] = "AGENT_TOOL_REGISTRY_ENFORCE_READS_ENABLED"
+    enabled_by_default: Literal[False] = False
+    scope: Literal["read_only"] = "read_only"
+    tool_ids: tuple[str, ...] = Field(min_length=1, max_length=100)
+    authority_surfaces: tuple[ToolRegistryReadAuthoritySurface, ...] = Field(
+        min_length=1,
+        max_length=5,
+    )
+    effective_allowlist_policy: Literal[
+        "legacy_registry_intersection"
+    ] = "legacy_registry_intersection"
+    fallback_on_registry_error: Literal["legacy_read_runtime"] = (
+        "legacy_read_runtime"
+    )
+    shadow_observation_during_enforce: bool = True
+    rollback_mode: Literal["legacy"] = "legacy"
+    requires_data_migration: Literal[False] = False
+
+    @model_validator(mode="after")
+    def validate_initial_read_scope(self) -> Self:
+        if len(self.tool_ids) != len(set(self.tool_ids)):
+            raise ValueError("enforced tool ids must be unique")
+        if any(not tool_id for tool_id in self.tool_ids):
+            raise ValueError("enforced tool ids cannot be empty")
+        if len(self.authority_surfaces) != len(set(self.authority_surfaces)):
+            raise ValueError("authority surfaces must be unique")
+        return self
+
+
 ToolRegistryShadowCheckType = Literal[
     "route_allowlist",
     "constructed_tools",

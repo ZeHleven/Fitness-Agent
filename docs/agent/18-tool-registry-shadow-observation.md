@@ -136,3 +136,7 @@ ORDER BY status;
 适配器或日志链路单独异常时先关闭 `EMIT_METRICS`；comparator、权限或行为出现异常时关闭
 `SHADOW_ENABLED`。只有 1% 窗口满足退出条件后，才能另开变更讨论 5% 档位；Registry
 catalog authority 仍需要独立决策与回滚方案。
+
+内部 100% shadow 与故障注入结果已经形成独立的只读研发切换决策，见
+[Registry 只读 Enforce 切换契约](19-tool-registry-read-enforce-transition.md)。该决策不跳过本节的
+生产第一档要求。

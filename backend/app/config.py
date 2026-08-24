@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     )
     AGENT_TOOL_REGISTRY_SHADOW_PERSIST_TRACE: bool = False
     AGENT_TOOL_REGISTRY_SHADOW_EMIT_METRICS: bool = False
+    # Reserved for the separately gated read-only authority transition.
+    # No runtime path consumes this switch until enforce is implemented.
+    AGENT_TOOL_REGISTRY_ENFORCE_READS_ENABLED: bool = False
 
 
 settings = Settings()

@@ -157,7 +157,7 @@ report 投影为受模型约束的指标样本。运行时通过可替换的同�
 3. 生产：1% → 5% → 25% → 100%，每档单独观察；
 4. 只有 shadow 通过后，才能另开提交讨论 Registry 接管目录或边界校验。
 
-升级到 Registry authority 前必须满足：
+升级到生产 Registry authority 前必须满足：
 
 - `permission_expansion=0`；
 - 路由、工具身份、参数 schema、并行和条件证据匹配率均为 100%；
@@ -166,6 +166,10 @@ report 投影为受模型约束的指标样本。运行时通过可替换的同�
 - shadow 开关前后模型调用、工具调用、终止动作和回复夹具完全一致；
 - comparator P95 本地开销不高于 5ms；
 - 至少完成 7 天观测并达到预先设定的最小采样数。
+
+内部研发环境可以在前述本地、CI 和受控 100% shadow 门禁通过后，先实现只读、权限交集式
+enforce；这不构成生产 authority 放量，也不能继承到写工具。对应切换边界见
+[Registry 只读 Enforce 切换契约](19-tool-registry-read-enforce-transition.md)。
 
 ## 实现提交顺序
 

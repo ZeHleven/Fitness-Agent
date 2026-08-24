@@ -14,6 +14,7 @@ from app.schemas.agent_tool_registry import (
     ToolFreshnessContract,
     ToolObservationContract,
     ToolRegistryEntry,
+    ToolRegistryReadEnforcementContract,
     ToolRegistryV2,
 )
 
@@ -333,3 +334,29 @@ TOOL_REGISTRY_V2 = ToolRegistryV2(
 TOOL_REGISTRY_V2_BY_ID = {
     item.tool_id: item for item in TOOL_REGISTRY_V2.tools
 }
+
+
+# This list is intentionally explicit: a future registered tool must not enter
+# the first enforce cohort without a reviewed contract change.
+TOOL_REGISTRY_V2_INITIAL_READ_TOOL_IDS = (
+    "profile.get_summary",
+    "health.get_screening_summary",
+    "plan.get_active",
+    "workout.get_next",
+    "workout.get_active_session",
+    "workout.list_history",
+    "workout.get_progress",
+)
+
+
+TOOL_REGISTRY_V2_READ_ENFORCEMENT = ToolRegistryReadEnforcementContract(
+    contract_version="1.0.0",
+    tool_ids=TOOL_REGISTRY_V2_INITIAL_READ_TOOL_IDS,
+    authority_surfaces=(
+        "route_allowlist",
+        "constructed_tools",
+        "argument_schema",
+        "parallel_policy",
+        "conditional_evidence",
+    ),
+)

@@ -122,7 +122,9 @@ result_storage = summary_and_fingerprint
 
 1. **design_only（已完成）**：Registry 只被契约测试导入，CI 校验它与 v1 工具、路由、参数 schema 和条件证据组完全一致。
 2. **shadow（当前）**：运行时继续使用 v1，但可在默认关闭的开关下旁路比较 Registry 推导结果；任何差异不影响调用。详细边界见 [Tool Calling v2：Registry Shadow 设计](17-tool-calling-v2-shadow.md)。
-3. **registry catalog**：在功能开关下由 Registry 生成模型目录和并行/权限校验，v1 仍可回退。
+3. **registry catalog**：在功能开关下由 Registry 生成模型目录和并行/权限校验，v1 仍可回退；
+   内部只读首批的交集权限、开关与回滚边界见
+   [Registry 只读 Enforce 切换契约](19-tool-registry-read-enforce-transition.md)。
 4. **normalized observation**：逐工具增加严格输出模型，再统一 envelope；不能一次性包裹后假装内部数据已经强类型。
 5. **per-run evidence state**：只复用满足 freshness、参数指纹和失效版本的同 run 观察。
 

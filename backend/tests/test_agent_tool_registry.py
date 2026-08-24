@@ -3,11 +3,17 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from app.schemas.agent_tool_registry import ToolRegistryV2
+from app.config import Settings
+from app.schemas.agent_tool_registry import (
+    ToolRegistryReadEnforcementContract,
+    ToolRegistryV2,
+)
 from app.services.agent_intent import INTENT_TOOL_ALLOWLIST, MAX_ROUTED_TOOLS
 from app.services.agent_tool_registry import (
     TOOL_REGISTRY_V2,
     TOOL_REGISTRY_V2_BY_ID,
+    TOOL_REGISTRY_V2_INITIAL_READ_TOOL_IDS,
+    TOOL_REGISTRY_V2_READ_ENFORCEMENT,
 )
 from app.services.agent_tools import (
     CONDITIONAL_READ_EVIDENCE_GROUPS,
@@ -124,6 +130,57 @@ def test_registry_v2_declares_run_local_freshness_without_enabling_it():
         and item.freshness.invalidation_events
         for item in TOOL_REGISTRY_V2.tools
     )
+
+
+def test_initial_registry_enforcement_is_disabled_and_read_only():
+    contract = TOOL_REGISTRY_V2_READ_ENFORCEMENT
+
+    assert Settings.model_fields[
+        "AGENT_TOOL_REGISTRY_ENFORCE_READS_ENABLED"
+    ].default is False
+    assert contract.from_mode == "shadow"
+    assert contract.to_mode == "enforce"
+    assert contract.enabled_by_default is False
+    assert contract.scope == "read_only"
+    assert contract.tool_ids == TOOL_REGISTRY_V2_INITIAL_READ_TOOL_IDS
+    assert contract.tool_ids == READ_TOOL_IDS
+    assert all(
+        TOOL_REGISTRY_V2_BY_ID[tool_id].availability == "active"
+        and TOOL_REGISTRY_V2_BY_ID[tool_id].mode == "read"
+        and TOOL_REGISTRY_V2_BY_ID[tool_id].side_effects == "none"
+        for tool_id in contract.tool_ids
+    )
+
+
+def test_initial_registry_enforcement_is_intersection_only_and_reversible():
+    contract = TOOL_REGISTRY_V2_READ_ENFORCEMENT
+
+    assert contract.authority_surfaces == (
+        "route_allowlist",
+        "constructed_tools",
+        "argument_schema",
+        "parallel_policy",
+        "conditional_evidence",
+    )
+    assert contract.effective_allowlist_policy == (
+        "legacy_registry_intersection"
+    )
+    assert contract.fallback_on_registry_error == "legacy_read_runtime"
+    assert contract.shadow_observation_during_enforce is True
+    assert contract.rollback_mode == "legacy"
+    assert contract.requires_data_migration is False
+
+
+def test_registry_enforcement_contract_rejects_duplicate_scope_entries():
+    payload = TOOL_REGISTRY_V2_READ_ENFORCEMENT.model_dump(mode="python")
+    payload["tool_ids"] = [payload["tool_ids"][0]] * 2
+    with pytest.raises(ValidationError, match="enforced tool ids must be unique"):
+        ToolRegistryReadEnforcementContract.model_validate(payload)
+
+    payload = TOOL_REGISTRY_V2_READ_ENFORCEMENT.model_dump(mode="python")
+    payload["authority_surfaces"] = ["route_allowlist"] * 2
+    with pytest.raises(ValidationError, match="authority surfaces must be unique"):
+        ToolRegistryReadEnforcementContract.model_validate(payload)
 
 
 def test_registry_v2_rejects_duplicate_tools_and_unknown_group_references():
