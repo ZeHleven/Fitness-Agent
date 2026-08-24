@@ -118,7 +118,7 @@ def test_completed_run_preserves_privacy_safe_stage_timing_diagnostics():
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST":
             return httpx.Response(
-                200,
+                202,
                 request=request,
                 json={
                     "run_id": "run-completed",
@@ -155,6 +155,7 @@ def test_completed_run_preserves_privacy_safe_stage_timing_diagnostics():
         "finish_reason": "stop",
     }
     assert "raw_prompt" not in json.dumps(item)
+    assert item["run_poll_count"] == 1
     assert item["business_failures"] == []
 
 
@@ -179,10 +180,10 @@ def test_http_failure_records_phase_status_and_safe_error_code_only():
         )
 
     assert item["status"] == "request_failed"
-    assert item["request_phase"] == "agent_chat"
+    assert item["request_phase"] == "agent_run_create"
     assert item["error_category"] == "unexpected_http_status"
     assert item["http_method"] == "POST"
-    assert item["http_path"] == "/api/v1/agent/chat"
+    assert item["http_path"] == "/api/v1/agent/runs"
     assert item["http_status_code"] == 504
     assert item["response_error_code"] == "UPSTREAM_TIMEOUT"
     assert item["http_elapsed_ms"] >= 0
@@ -209,8 +210,56 @@ def test_transport_timeout_records_phase_without_exception_message():
         )
 
     assert item["status"] == "request_failed"
-    assert item["request_phase"] == "agent_chat"
+    assert item["request_phase"] == "agent_run_create"
     assert item["error_category"] == "request_timeout"
     assert item["http_status_code"] is None
     assert item["response_error_code"] is None
     assert "upstream hostname" not in json.dumps(item)
+
+
+def test_durable_run_lifecycle_polls_until_terminal(monkeypatch):
+    poll_statuses = [
+        {
+            "id": "run-completed",
+            "status": "queued",
+            "poll_after_ms": 800,
+        },
+        _completed_run(),
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            payload = json.loads(request.content)
+            assert payload["client_request_id"].startswith(
+                "registry-observe-"
+            )
+            return httpx.Response(
+                202,
+                request=request,
+                json={
+                    "run_id": "run-completed",
+                    "conversation_id": "conversation-1",
+                    "status": "queued",
+                    "poll_after_ms": 800,
+                },
+            )
+        return httpx.Response(
+            200,
+            request=request,
+            json=poll_statuses.pop(0),
+        )
+
+    monkeypatch.setattr(observer.time, "sleep", lambda _seconds: None)
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        item = observer._run_scenario(
+            client,
+            api_url="https://example.test/api/v1",
+            headers={"Authorization": "Bearer secret"},
+            scenario=observer.SCENARIOS[1],
+            ordinal=1,
+        )
+
+    assert item["run_id"] == "run-completed"
+    assert item["status"] == "completed"
+    assert item["run_poll_count"] == 2
+    assert item["business_failures"] == []

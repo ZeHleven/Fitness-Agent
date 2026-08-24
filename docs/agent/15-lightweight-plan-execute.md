@@ -57,7 +57,7 @@ Executor 每次只看到当前步骤、已有真实 observation、当前步骤�
 
 `parallel_read` 不先调用 Executor。Controller 同时发出 Planner 已确定的动作；生产运行时为每个动作创建独立短生命周期数据库会话。全部成功后直接完成步骤，因此这一成功路径只有 Planner 与 Finalizer 两次运行时模型调用。主证据命中固定条件替代契约时，Controller 在预算内直接发起替代批次并完整记录 action、observation、`tool_batch` timing 与逐工具审计；替代成功仍保持零 Executor。其他失败或替代失败再且仅再调用一次 Executor，该次只能基于已有证据完成或请求重规划，不能自行追加工具调用。
 
-为避免相同计划适配请求偶发拆成“两项并行 + 一项 direct”并唤醒 Executor，Controller 对该固定只读路由提供保守的计划形状归一化。只有模型计划本身已经覆盖资料、计划和聚合进度，且没有显式历史动作或下降/趋势语义时，才合并为单个三动作 `parallel_read`；条件历史不预取。缺少任一主证据、显式要求历史分析或使用其他白名单时保持模型原计划。归一化只稳定执行形状，不决定最终是否调整。
+为避免相同计划适配请求偶发拆成多步骤并在首次工具调用前唤醒 Executor，Controller 对固定只读路由提供保守的计划形状归一化。四工具白名单下，只有模型计划本身已经覆盖资料、计划和聚合进度，且没有显式历史动作或下降/趋势语义时，才合并为三动作 `parallel_read`。三工具白名单仅含计划、聚合进度与条件历史时，模型已选择计划和进度、没有把历史安排成独立读取，且不要求趋势/长期变化分析，才合并为两动作 `parallel_read`；条件历史仍不预取。缺少任一主证据、显式要求独立历史分析或使用其他白名单时保持模型原计划。归一化只稳定执行形状，不决定最终是否调整。
 
 当前服务端证据组为：`workout.get_progress --on_error--> workout.list_history` 和 `workout.get_active_session --on_not_found--> workout.get_next`。两端都必须已在动态白名单中；触发条件、方向和默认参数都不是模型输出。主证据成功且未触发条件时，替代工具被逻辑关闭；主证据触发条件且替代成功时，整组视为覆盖。若这些证据组与其他成功观察已覆盖全部动态白名单，Controller 才把后续步骤标为 `skipped`，记录 `termination_reason=agent_completed_evidence_covered`。替代失败、预算不足或仍有独立未读工具时不会提前停止。该判断不注入评测 fact ID，也不做开放式语义推断。
 

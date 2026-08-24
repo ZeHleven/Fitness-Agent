@@ -47,6 +47,22 @@ Planner Prompt、工具实现或数据库访问。`AGENT_TOOL_REGISTRY_ENFORCE_R
 
 这些结果只证明内部只读 enforce 的进入条件，不替代未来生产 7 天或生产 SLO 观测。
 
+### 0.5.6 内部观测诊断
+
+部署 `0.5.6`（CloudBase deployment `015`）的 30 Run 窗口中，Registry authority 30/30 为
+`enforce`，无拒绝、权限扩张、工具数漂移或 legacy 回退；27 个可取得 Run trace 的 shadow
+检查也无 mismatch/error。严格整轮门禁仍未通过：同步兼容端点 `/agent/chat` 有 3 次在 Run
+已经创建并完成 authority 选择后返回 503，响应没有 `run_id`，观测器无法继续读取已落库的失败
+trace；另有 1 次进度备用场景在首次工具前命中 20 秒 Executor deadline。
+
+该窗口暴露的是请求生命周期与计划形状缺口，不是 Registry authority 差异。后续观测脚本改用
+生产小程序相同的 durable `/agent/runs` 创建与轮询路径，报告 schema 升为 `1.1`；即使 worker
+失败也保留 `run_id`、终态、error code 和阶段 trace。运行观测前必须确认
+`AGENT_ASYNC_WORKER_ENABLED=true`。Controller 同时把“活动计划 + 聚合进度 + 条件历史”合法
+模型计划保守归一为两动作 `parallel_read`，进度失败后才调用历史；Planner、Executor 或
+Replanner deadline 后若 Finalizer 再失败，则固定安全收口而不再升级为同步 503。上述修复仍需
+部署新内部版本并重跑 3+3 canary 与 30 Run，不能用本地测试结果替代真实模型门禁。
+
 ## 切换状态
 
 ```text

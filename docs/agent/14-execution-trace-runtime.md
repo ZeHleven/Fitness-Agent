@@ -33,7 +33,7 @@ finalization_contract
 
 Finalizer 在调用模型前会构造最小证据包：步骤只保留 `id/objective/status/summary`，观察移除 `call_id` 等执行标识并合并完全相同的重复项。工具结果原样保留，结构化调用原有的整体输入安全上限不变。本阶段不新增证据截断，也不降低模型输出上限，回答详细度与终止动作契约保持不变。
 
-Planner、Replanner 与 Executor 的 deadline 由 Controller 包裹实际策略调用，因此模型客户端的内部重试不能越过角色级墙钟预算。初始 Planner 默认 15 秒，Replanner 通过独立配置保持 30 秒，两者结构化输出最多 1200 tokens；Executor 每次决策默认 20 秒。初始 Planner deadline 会记录失败 timing、`planner_deadline_fallback` 原因和受限降级计划；参数已知、彼此独立的 2 至 3 个主证据合并为一个显式 `parallel_read`，聚合进度的历史替代证据只在失败后使用。Replanner deadline 不生成通用替代计划：Controller 冻结已有 action/observation，当前步骤失败、后续步骤跳过，本次尝试计入模型和重规划预算，并记录 `termination_reason=replanner_deadline_exceeded` 后交由 Finalizer 基于部分证据收口；若 Finalizer 同时失败则返回固定的只读安全说明。Executor deadline 同样把当前步骤标为失败、剩余步骤标为跳过，并记录 `termination_reason=executor_deadline_exceeded`；Finalizer 只能基于 deadline 前已经持久化的观察透明收口。
+Planner、Replanner 与 Executor 的 deadline 由 Controller 包裹实际策略调用，因此模型客户端的内部重试不能越过角色级墙钟预算。初始 Planner 默认 15 秒，Replanner 通过独立配置保持 30 秒，两者结构化输出最多 1200 tokens；Executor 每次决策默认 20 秒。初始 Planner deadline 会记录失败 timing、`planner_deadline_fallback` 原因和受限降级计划；参数已知、彼此独立的 2 至 3 个主证据合并为一个显式 `parallel_read`，聚合进度的历史替代证据只在失败后使用。Replanner deadline 不生成通用替代计划：Controller 冻结已有 action/observation，当前步骤失败、后续步骤跳过，本次尝试计入模型和重规划预算，并记录 `termination_reason=replanner_deadline_exceeded` 后交由 Finalizer 基于部分证据收口。Executor deadline 同样把当前步骤标为失败、剩余步骤标为跳过，并记录 `termination_reason=executor_deadline_exceeded`；Finalizer 只能基于 deadline 前已经持久化的观察透明收口。Planner、Executor 或 Replanner 已命中 deadline 后，若 Finalizer 再失败，Controller 会把最终契约收窄为 `insufficient_evidence`，记录 `deadline_finalizer_safe_fallback` 与 Finalizer error timing，并返回固定的只读安全说明，避免同步兼容端点升级为不可诊断的 503。
 
 ## Finalization Contract
 
@@ -65,7 +65,7 @@ Finalizer 根据真实观察选择语义结果；Controller 唯一映射：`adju
 
 每个真实规划步骤包含 `objective`、步骤级 `candidate_tools`、`success_signal`、显式的 `execution_strategy=direct|parallel_read|bounded_react` 和 `completion_policy=executor_decides|after_successful_observation|after_all_observations`。`parallel_read` 还必须包含 2 至 3 个参数完整的 `planned_actions`；其他策略该字段为空。`intent_subtasks_v1` 与 `agent_loop` 仅为已持久化历史 trace 保留兼容解析，新运行时不再生成。
 
-计划适配路由的动态白名单固定为资料、活动计划、聚合进度和条件历史四项。合法模型计划已经覆盖前三项主证据、没有显式安排历史，且用户目标不要求下降、趋势或历史分析时，Controller 会把拆分的多步骤形状归一为一个三动作 `parallel_read`；历史仍只在聚合进度失败时按条件证据组调用。该规则不添加 Planner 未选择的主证据、不扩展白名单，也不覆盖显式趋势分析。trace 继续标记 `planner_source=model_micro_plan_v1`，并追加 `mode_reasons=planner_fast_path_normalized`；原计划已规范时不追加该标记。Registry shadow 比较归一化后的有效计划，非法原始计划仍在拒绝前留下失败检查。
+计划适配路由支持两种保守归一化。动态白名单为资料、活动计划、聚合进度和条件历史四项时，合法模型计划已经覆盖前三项主证据、没有显式安排历史，且用户目标不要求下降、趋势或历史分析，Controller 会合并成三动作 `parallel_read`。动态白名单仅为活动计划、聚合进度和条件历史三项时，模型计划已经覆盖前两项主证据、没有把历史安排成独立动作或步骤，且不要求趋势/长期变化分析，Controller 会合并成两动作 `parallel_read`；历史仍只在聚合进度失败时按条件证据组调用。两种规则都不添加 Planner 未选择的主证据、不扩展白名单，也不覆盖显式趋势分析。trace 继续标记 `planner_source=model_micro_plan_v1`，并追加 `mode_reasons=planner_fast_path_normalized`；原计划已规范时不追加该标记。Registry shadow 比较归一化后的有效计划，非法原始计划仍在拒绝前留下失败检查。
 
 `after_successful_observation` 只允许用于 `direct`。工具成功返回后，Controller 直接把步骤标为完成，省去一次只输出 `complete_step` 的 Executor 调用；`found=false` 等仍属于成功 observation。工具异常不会自动完成，仍交由 Executor 基于错误观察收口或请求重规划。旧 trace 缺少该字段时按 `executor_decides` 解析。
 

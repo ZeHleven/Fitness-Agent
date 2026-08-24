@@ -104,11 +104,30 @@ class SlowPlannerPolicy:
         )
 
 
+class SlowPlannerFailingFinalizerPolicy(SlowPlannerPolicy):
+    async def finalize(self, **_kwargs: Any) -> FinalResponse:
+        raise PlanningModelError(
+            "finalizer failed after planner deadline",
+            stage="finalizer",
+            category="finalizer_provider_error",
+        )
+
+
 class SlowExecutorPolicy(ScriptedPolicy):
     async def decide_step(self, **kwargs: Any) -> ExecutorDecision:
         self.decision_inputs.append(kwargs)
         await asyncio.sleep(1)
         raise AssertionError("executor deadline did not cancel the call")
+
+
+class SlowExecutorFailingFinalizerPolicy(SlowExecutorPolicy):
+    async def finalize(self, **kwargs: Any) -> FinalResponse:
+        self.finalize_inputs.append(kwargs)
+        raise PlanningModelError(
+            "finalizer failed after executor deadline",
+            stage="finalizer",
+            category="finalizer_provider_error",
+        )
 
 
 class SlowReplannerPolicy(ScriptedPolicy):
@@ -1395,6 +1414,61 @@ def test_plan_fit_fast_path_does_not_inject_missing_primary_evidence():
     assert normalized is plan
 
 
+def test_plan_progress_fast_path_normalizes_conditional_history_route():
+    plan = MicroPlan(
+        goal="进度失败时使用历史作为替代证据",
+        steps=[
+            MicroPlanStep(
+                objective="读取活动计划",
+                candidate_tools=["plan.get_active"],
+                execution_strategy="direct",
+                completion_policy="after_successful_observation",
+                success_signal="活动计划已返回",
+            ),
+            MicroPlanStep(
+                objective="读取进度，失败时查询历史",
+                candidate_tools=[
+                    "workout.get_progress",
+                    "workout.list_history",
+                ],
+                execution_strategy="bounded_react",
+                completion_policy="executor_decides",
+                success_signal="取得进度或历史替代证据",
+            ),
+        ],
+    )
+    tool_catalog = [
+        item
+        for item in _plan_fit_tool_catalog()
+        if item["tool_id"] != "profile.get_summary"
+    ]
+
+    normalized, changed = _normalize_plan_fit_fast_path(
+        plan,
+        goal=(
+            "结合最近四周训练情况判断当前计划是否需要调整；"
+            "如果进度统计不可用，"
+            "请基于最近训练历史给出保守建议"
+        ),
+        subtasks=["读取计划和四周进度"],
+        tool_catalog=tool_catalog,
+    )
+
+    assert changed is True
+    assert len(normalized.steps) == 1
+    step = normalized.steps[0]
+    assert step.execution_strategy == "parallel_read"
+    assert step.candidate_tools == [
+        "plan.get_active",
+        "workout.get_progress",
+    ]
+    assert [item.tool_id for item in step.planned_actions] == [
+        "plan.get_active",
+        "workout.get_progress",
+    ]
+    assert step.planned_actions[1].arguments == {"weeks": 4}
+
+
 def test_plan_fit_fast_path_does_not_remark_canonical_plan():
     plan = MicroPlan(
         goal="判断计划适配度",
@@ -1514,6 +1588,51 @@ async def test_planner_has_independent_hard_deadline(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_planner_deadline_finalizer_failure_uses_safe_reply(monkeypatch):
+    monkeypatch.setattr(settings, "AGENT_PLANNER_TIMEOUT_SECONDS", 0.01)
+
+    @tool(
+        "workout_get_progress",
+        args_schema=WorkoutProgressArguments,
+        description="读取训练进度",
+    )
+    async def progress(weeks: int = 8):
+        return {"weeks": weeks, "total_sessions": 2}
+
+    allowlist = ["workout.get_progress"]
+    result = await execute_planned_agent(
+        db=None,
+        user_id="user-planner-finalizer-deadline",
+        run_id="planner-finalizer-deadline",
+        model=None,
+        goal="读取最近四周训练进度",
+        subtasks=["读取训练进度"],
+        tool_allowlist=allowlist,
+        initial_trace=_planned_trace(allowlist),
+        summarize_observation=_audit_result_summary,
+        policy=SlowPlannerFailingFinalizerPolicy(),
+        tools=[progress],
+    )
+
+    trace = result.execution_trace
+    assert trace.status == "completed"
+    assert trace.terminal_action == "answer"
+    assert trace.termination_reason == "planner_deadline_exceeded"
+    assert trace.finalization_contract is not None
+    assert trace.finalization_contract.allowed_outcomes == [
+        "insufficient_evidence"
+    ]
+    assert "deadline_finalizer_safe_fallback" in trace.mode_reasons
+    finalizer_timing = next(
+        item for item in trace.stage_timings
+        if item.stage == "finalizer"
+    )
+    assert finalizer_timing.status == "error"
+    assert finalizer_timing.error_category == "finalizer_provider_error"
+    assert "没有修改" in result.reply
+
+
+@pytest.mark.asyncio
 async def test_executor_deadline_finishes_with_partial_evidence(monkeypatch):
     monkeypatch.setattr(settings, "AGENT_EXECUTOR_TIMEOUT_SECONDS", 0.01)
     allowlist = ["workout.get_progress"]
@@ -1558,6 +1677,49 @@ async def test_executor_deadline_finishes_with_partial_evidence(monkeypatch):
     assert executor_timing.status == "error"
     assert executor_timing.error_category == "executor_deadline_exceeded"
     assert trace.budget_usage.model_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_executor_deadline_finalizer_failure_uses_safe_reply(monkeypatch):
+    monkeypatch.setattr(settings, "AGENT_EXECUTOR_TIMEOUT_SECONDS", 0.01)
+    allowlist = ["workout.get_progress"]
+    policy = SlowExecutorFailingFinalizerPolicy(
+        plan=MicroPlan(
+            goal="读取训练进度",
+            steps=[MicroPlanStep(
+                objective="读取训练进度",
+                candidate_tools=allowlist,
+                execution_strategy="direct",
+                success_signal="获得进度观察",
+            )],
+        ),
+        decisions=[],
+    )
+
+    result = await execute_planned_agent(
+        db=None,
+        user_id="user-executor-finalizer-deadline",
+        run_id="executor-finalizer-deadline",
+        model=None,
+        goal="读取最近训练进度",
+        subtasks=["读取进度"],
+        tool_allowlist=allowlist,
+        initial_trace=_planned_trace(allowlist),
+        summarize_observation=_audit_result_summary,
+        policy=policy,
+        tools=[],
+    )
+
+    trace = result.execution_trace
+    assert trace.status == "completed"
+    assert trace.termination_reason == "executor_deadline_exceeded"
+    assert trace.terminal_action == "answer"
+    assert trace.finalization_contract is not None
+    assert trace.finalization_contract.allowed_outcomes == [
+        "insufficient_evidence"
+    ]
+    assert "deadline_finalizer_safe_fallback" in trace.mode_reasons
+    assert "没有修改" in result.reply
 
 
 @pytest.mark.asyncio
@@ -1918,6 +2080,102 @@ async def test_plan_fit_fast_path_normalizes_split_three_evidence_plan():
     )
     assert "planner_fast_path_normalized" in trace.mode_reasons
     assert shadow_session.checks["parallel_policy"].status == "match"
+
+
+@pytest.mark.asyncio
+async def test_plan_progress_fast_path_avoids_executor_before_primary_reads():
+    @tool(
+        "plan_get_active",
+        args_schema=NoArguments,
+        description="读取活动计划",
+    )
+    async def plan():
+        return {
+            "found": True,
+            "plan": {"name": "三日计划", "days_per_week": 3},
+        }
+
+    @tool(
+        "workout_get_progress",
+        args_schema=WorkoutProgressArguments,
+        description="读取训练进度",
+    )
+    async def progress(weeks: int = 8):
+        return {"weeks": weeks, "total_sessions": 8}
+
+    @tool(
+        "workout_list_history",
+        args_schema=WorkoutHistoryArguments,
+        description="读取训练历史备用证据",
+    )
+    async def history(limit: int = 20):
+        return {"count": 0, "sessions": [], "limit": limit}
+
+    allowlist = [
+        "plan.get_active",
+        "workout.get_progress",
+        "workout.list_history",
+    ]
+    policy = ScriptedPolicy(
+        plan=MicroPlan(
+            goal="判断计划适配度，进度失败时使用历史替代",
+            steps=[
+                MicroPlanStep(
+                    objective="读取活动计划",
+                    candidate_tools=["plan.get_active"],
+                    execution_strategy="direct",
+                    completion_policy="after_successful_observation",
+                    success_signal="活动计划已返回",
+                ),
+                MicroPlanStep(
+                    objective="读取进度，失败时查询历史",
+                    candidate_tools=[
+                        "workout.get_progress",
+                        "workout.list_history",
+                    ],
+                    execution_strategy="bounded_react",
+                    completion_policy="executor_decides",
+                    success_signal="取得进度或历史替代证据",
+                ),
+            ],
+        ),
+        decisions=[],
+        final_response=FinalResponse(
+            terminal_action="answer",
+            reply="当前证据支持继续观察。",
+            outcome="no_change_needed",
+        ),
+    )
+
+    result = await execute_planned_agent(
+        db=None,
+        user_id="user-progress-fast-path",
+        run_id="progress-fast-path",
+        model=None,
+        goal=(
+            "结合最近四周训练情况判断当前计划是否需要调整；"
+            "如果进度统计不可用，"
+            "请基于最近训练历史给出保守建议"
+        ),
+        subtasks=["读取计划和四周进度", "判断计划适配度"],
+        tool_allowlist=allowlist,
+        initial_trace=_planned_trace(allowlist),
+        summarize_observation=_audit_result_summary,
+        policy=policy,
+        tools=[plan, progress, history],
+    )
+
+    trace = result.execution_trace
+    assert [item.tool_id for item in trace.actions] == [
+        "plan.get_active",
+        "workout.get_progress",
+    ]
+    assert not any(
+        item.stage == "executor" for item in trace.stage_timings
+    )
+    assert "planner_fast_path_normalized" in trace.mode_reasons
+    assert trace.budget_usage.model_calls == 2
+    assert trace.budget_usage.tool_calls == 2
 
 
 @pytest.mark.asyncio

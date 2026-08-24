@@ -115,15 +115,18 @@ async def test_injected_progress_timeout_recovers_through_controller():
 
     trace = result.execution_trace
     assert [item.tool_id for item in trace.actions] == [
-        "workout.get_progress",
         "plan.get_active",
+        "workout.get_progress",
         "workout.list_history",
     ]
     assert [item.status for item in trace.observations] == [
+        "success",
         "error",
         "success",
-        "success",
     ]
+    assert trace.actions[0].batch_id == trace.actions[1].batch_id
+    assert trace.actions[0].batch_id is not None
+    assert trace.actions[0].batch_id.startswith("batch-")
     assert trace.actions[-1].batch_id is not None
     assert trace.actions[-1].batch_id.startswith("fallback-")
     assert trace.budget_usage.tool_calls == 3

@@ -165,6 +165,15 @@ _PLAN_FIT_PRIMARY_TOOL_IDS = (
     "plan.get_active",
     "workout.get_progress",
 )
+_PLAN_PROGRESS_FAST_PATH_TOOL_IDS = frozenset({
+    "plan.get_active",
+    "workout.get_progress",
+    "workout.list_history",
+})
+_PLAN_PROGRESS_PRIMARY_TOOL_IDS = (
+    "plan.get_active",
+    "workout.get_progress",
+)
 _PLAN_FIT_HISTORY_REQUIRED_MARKERS = (
     "越来越少",
     "下降",
@@ -174,7 +183,7 @@ _PLAN_FIT_HISTORY_REQUIRED_MARKERS = (
     "持续减少",
 )
 
-_REPLANNER_DEADLINE_SAFE_REPLY = (
+_DEADLINE_SAFE_REPLY = (
     "我已经取得了部分训练数据，但本轮未能完成可靠分析。"
     "我没有修改你的计划或训练记录，请稍后重试。"
 )
@@ -395,19 +404,33 @@ def _normalize_plan_fit_fast_path(
     subtasks: list[str],
     tool_catalog: list[dict[str, Any]],
 ) -> tuple[MicroPlan, bool]:
-    """Canonicalize only an already-planned three-primary read route."""
+    """Canonicalize already-planned plan-fit primary read routes."""
     available_tool_ids = {
         item["tool_id"]
         for item in tool_catalog
         if isinstance(item.get("tool_id"), str)
     }
-    if available_tool_ids != _PLAN_FIT_FAST_PATH_TOOL_IDS:
+    if available_tool_ids == _PLAN_FIT_FAST_PATH_TOOL_IDS:
+        primary_tool_ids = _PLAN_FIT_PRIMARY_TOOL_IDS
+        history_required_markers = _PLAN_FIT_HISTORY_REQUIRED_MARKERS
+    elif available_tool_ids == _PLAN_PROGRESS_FAST_PATH_TOOL_IDS:
+        primary_tool_ids = _PLAN_PROGRESS_PRIMARY_TOOL_IDS
+        # This route explicitly exposes history as the server-owned fallback
+        # for a failed aggregate progress read. The bare word "历史" therefore
+        # does not make it an independent primary evidence request; trend and
+        # longitudinal language still does.
+        history_required_markers = tuple(
+            marker
+            for marker in _PLAN_FIT_HISTORY_REQUIRED_MARKERS
+            if marker != "历史"
+        )
+    else:
         return plan, False
 
     semantic_scope = "\n".join([goal, *subtasks])
     if any(
         marker in semantic_scope
-        for marker in _PLAN_FIT_HISTORY_REQUIRED_MARKERS
+        for marker in history_required_markers
     ):
         return plan, False
 
@@ -416,7 +439,7 @@ def _normalize_plan_fit_fast_path(
         for step in plan.steps
         for tool_id in step.candidate_tools
     }
-    if not set(_PLAN_FIT_PRIMARY_TOOL_IDS).issubset(candidate_tool_ids):
+    if not set(primary_tool_ids).issubset(candidate_tool_ids):
         return plan, False
 
     planned_tool_ids = {
@@ -445,27 +468,34 @@ def _normalize_plan_fit_fast_path(
                 else {}
             ),
         )
-        for tool_id in _PLAN_FIT_PRIMARY_TOOL_IDS
+        for tool_id in primary_tool_ids
     ]
     if len(plan.steps) == 1:
         step = plan.steps[0]
         if (
             step.execution_strategy == "parallel_read"
             and step.completion_policy == "after_all_observations"
-            and step.candidate_tools == list(_PLAN_FIT_PRIMARY_TOOL_IDS)
+            and step.candidate_tools == list(primary_tool_ids)
             and step.planned_actions == canonical_actions
         ):
             return plan, False
 
+    evidence_label = (
+        "三项" if len(primary_tool_ids) == 3 else "两项"
+    )
     return MicroPlan(
         goal=goal,
         steps=[MicroPlanStep(
-            objective="并行取得计划适配所需三项主证据",
-            candidate_tools=list(_PLAN_FIT_PRIMARY_TOOL_IDS),
+            objective=f"并行取得计划适配所需{evidence_label}主证据",
+            candidate_tools=list(primary_tool_ids),
             execution_strategy="parallel_read",
             completion_policy="after_all_observations",
             planned_actions=canonical_actions,
-            success_signal="偏好、计划和聚合进度均已返回",
+            success_signal=(
+                "偏好、计划和聚合进度均已返回"
+                if len(primary_tool_ids) == 3
+                else "计划和聚合进度均已返回"
+            ),
         )],
     ), True
 
@@ -1870,6 +1900,7 @@ async def execute_planned_agent(
     })
     await sink(trace, None)
 
+    deadline_finalizer_fallback = False
     if trace.budget_usage.model_calls >= settings.AGENT_MAX_MODEL_CALLS:
         response = FinalResponse(
             terminal_action="answer",
@@ -1929,12 +1960,27 @@ async def execute_planned_agent(
                     if finalizer_metrics is not None else None
                 ),
             )
-            if not replanner_deadline_hit:
+            if not (
+                planner_deadline_fallback
+                or executor_deadline_hit
+                or replanner_deadline_hit
+            ):
                 await sink(trace, None)
                 raise
+            deadline_finalizer_fallback = True
+            allowed_outcomes = ["insufficient_evidence"]
+            trace = trace.model_copy(update={
+                "finalization_contract": AgentFinalizationContractTrace(
+                    allowed_outcomes=allowed_outcomes,
+                ),
+                "mode_reasons": [
+                    *trace.mode_reasons,
+                    "deadline_finalizer_safe_fallback",
+                ][:8],
+            })
             response = FinalResponse(
                 terminal_action="answer",
-                reply=_REPLANNER_DEADLINE_SAFE_REPLY,
+                reply=_DEADLINE_SAFE_REPLY,
                 outcome="insufficient_evidence",
             )
         else:
@@ -1996,12 +2042,19 @@ async def execute_planned_agent(
                 "executor_deadline_exceeded"
                 if executor_deadline_hit
                 else (
-                    "agent_completed_evidence_covered"
-                    if routed_evidence_covered
+                    "planner_deadline_exceeded"
+                    if (
+                        planner_deadline_fallback
+                        and deadline_finalizer_fallback
+                    )
                     else (
-                        "agent_completed_with_partial_evidence"
-                        if partial
-                        else "agent_completed"
+                        "agent_completed_evidence_covered"
+                        if routed_evidence_covered
+                        else (
+                            "agent_completed_with_partial_evidence"
+                            if partial
+                            else "agent_completed"
+                        )
                     )
                 )
             )

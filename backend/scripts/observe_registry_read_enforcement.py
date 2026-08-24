@@ -264,6 +264,63 @@ def _request_json(
     return content, elapsed_ms
 
 
+def _poll_agent_run(
+    client: httpx.Client,
+    *,
+    api_url: str,
+    headers: dict[str, str],
+    run_id: str,
+    timeout_seconds: int = 240,
+) -> tuple[dict[str, Any], int, int]:
+    started = time.perf_counter()
+    total_http_elapsed_ms = 0
+    poll_count = 0
+    path = f"/api/v1/agent/runs/{run_id}"
+    while True:
+        run, elapsed_ms = _request_json(
+            client,
+            phase="run_poll",
+            method="GET",
+            url=f"{api_url}/agent/runs/{run_id}",
+            headers=headers,
+            expected_status=200,
+            timeout=120,
+        )
+        total_http_elapsed_ms += elapsed_ms
+        poll_count += 1
+        status = run.get("status")
+        if status in {"completed", "failed"}:
+            return run, total_http_elapsed_ms, poll_count
+        if status not in {"queued", "running"}:
+            raise ObservationRequestFailure(
+                phase="run_poll",
+                category="unexpected_run_status",
+                method="GET",
+                path=path,
+                elapsed_ms=round(
+                    (time.perf_counter() - started) * 1000
+                ),
+                status_code=200,
+            )
+        elapsed_seconds = time.perf_counter() - started
+        if elapsed_seconds >= timeout_seconds:
+            raise ObservationRequestFailure(
+                phase="run_poll",
+                category="run_terminal_timeout",
+                method="GET",
+                path=path,
+                elapsed_ms=round(elapsed_seconds * 1000),
+            )
+        poll_after_ms = run.get("poll_after_ms")
+        delay_seconds = (
+            float(poll_after_ms) / 1000
+            if isinstance(poll_after_ms, (int, float))
+            and not isinstance(poll_after_ms, bool)
+            else 0.8
+        )
+        time.sleep(max(0.1, min(delay_seconds, 2.0)))
+
+
 def _target_reps(value: str | None) -> int:
     numbers = [int(item) for item in re.findall(r"\d+", value or "")]
     return max(numbers) if numbers else 12
@@ -506,17 +563,23 @@ def _run_scenario(
     ordinal: int,
 ) -> dict[str, Any]:
     started_at = _utc_now()
-    chat_path = "/api/v1/agent/chat"
+    lifecycle_started = time.perf_counter()
+    create_path = "/api/v1/agent/runs"
     try:
-        chat, chat_elapsed_ms = _request_json(
+        created, create_elapsed_ms = _request_json(
             client,
-            phase="agent_chat",
+            phase="agent_run_create",
             method="POST",
-            url=f"{api_url}/agent/chat",
+            url=f"{api_url}/agent/runs",
             headers=headers,
-            payload={"message": scenario.message},
-            expected_status=200,
-            timeout=240,
+            payload={
+                "message": scenario.message,
+                "client_request_id": (
+                    f"registry-observe-{uuid.uuid4().hex}"
+                ),
+            },
+            expected_status=202,
+            timeout=120,
         )
     except ObservationRequestFailure as failure:
         return _request_failure_item(
@@ -526,17 +589,17 @@ def _run_scenario(
             request_started_at_utc=started_at,
         )
 
-    run_id = chat.get("run_id")
-    conversation_id = chat.get("conversation_id")
+    run_id = created.get("run_id")
+    conversation_id = created.get("conversation_id")
     if not isinstance(run_id, str) or not run_id:
         return _request_failure_item(
             ObservationRequestFailure(
-                phase="agent_chat",
+                phase="agent_run_create",
                 category="unexpected_response_shape",
                 method="POST",
-                path=chat_path,
-                elapsed_ms=chat_elapsed_ms,
-                status_code=200,
+                path=create_path,
+                elapsed_ms=create_elapsed_ms,
+                status_code=202,
             ),
             ordinal=ordinal,
             scenario=scenario,
@@ -547,14 +610,11 @@ def _run_scenario(
         )
 
     try:
-        run, run_fetch_elapsed_ms = _request_json(
+        run, run_poll_http_elapsed_ms, run_poll_count = _poll_agent_run(
             client,
-            phase="run_fetch",
-            method="GET",
-            url=f"{api_url}/agent/runs/{run_id}",
+            api_url=api_url,
             headers=headers,
-            expected_status=200,
-            timeout=120,
+            run_id=run_id,
         )
     except ObservationRequestFailure as failure:
         return _request_failure_item(
@@ -578,9 +638,12 @@ def _run_scenario(
         "conversation_id": conversation_id,
         "request_started_at_utc": started_at,
         "request_completed_at_utc": _utc_now(),
-        "http_elapsed_ms": chat_elapsed_ms,
-        "chat_http_elapsed_ms": chat_elapsed_ms,
-        "run_fetch_http_elapsed_ms": run_fetch_elapsed_ms,
+        "http_elapsed_ms": round(
+            (time.perf_counter() - lifecycle_started) * 1000
+        ),
+        "create_http_elapsed_ms": create_elapsed_ms,
+        "run_poll_http_elapsed_ms": run_poll_http_elapsed_ms,
+        "run_poll_count": run_poll_count,
         "status": run.get("status"),
         "duration_ms": run.get("duration_ms"),
         "primary_intent": run.get("primary_intent"),
@@ -621,7 +684,7 @@ def run_observation(
     base_url = base_url.rstrip("/")
     api_url = f"{base_url}/api/v1"
     report: dict[str, Any] = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "base_url": base_url,
         "deployment_id": deployment_id,
         "app_version": app_version,
