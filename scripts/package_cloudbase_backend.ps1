@@ -1,5 +1,7 @@
 param(
-    [string]$Version = "0.5.2"
+    [string]$Version = "0.5.2",
+    [ValidateRange(0.01, 1024)]
+    [double]$MaxPackageSizeMB = 25
 )
 
 $ErrorActionPreference = "Stop"
@@ -8,27 +10,76 @@ $backendPath = (Resolve-Path (Join-Path $repoRoot "backend")).Path
 $outputDirectory = Join-Path $repoRoot "deploy\cloudbase"
 $outputPath = Join-Path $outputDirectory "fitness-agent-backend-$Version.zip"
 
+$excludedDirectoryNames = @(
+    ".git",
+    ".venv",
+    "venv",
+    "tests",
+    ".uv-cache",
+    ".cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
+    ".tox",
+    ".nox",
+    ".hypothesis",
+    "__pycache__",
+    "htmlcov",
+    "dist",
+    "build",
+    "node_modules",
+    ".pnpm-store"
+)
+$excludedFilePatterns = @(
+    ".env",
+    ".env.*",
+    "*.pyc",
+    "*.pyo",
+    "*.log",
+    "*.db",
+    "*.sqlite3",
+    ".coverage",
+    ".coverage.*",
+    "coverage.xml",
+    ".DS_Store",
+    "Thumbs.db"
+)
+$tarExcludePatterns = @($excludedDirectoryNames) + @($excludedFilePatterns) + @("*.egg-info")
+
 New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
 if (Test-Path -LiteralPath $outputPath) {
     Remove-Item -LiteralPath $outputPath -Force
 }
 
-& tar -a -c -f $outputPath `
-    --exclude=.env `
-    --exclude=.venv `
-    --exclude=tests `
-    --exclude=.pytest_cache `
-    --exclude=__pycache__ `
-    --exclude='*.pyc' `
-    -C $backendPath .
+$tarArguments = @("-a", "-c", "-f", $outputPath)
+foreach ($pattern in $tarExcludePatterns) {
+    $tarArguments += "--exclude=$pattern"
+}
+$tarArguments += @("-C", $backendPath, ".")
+
+& tar @tarArguments
 if ($LASTEXITCODE -ne 0) {
     throw "Failed to create CloudBase package."
 }
 
 $entries = @(& tar -tf $outputPath)
 $forbidden = $entries | Where-Object {
-    $_ -match '(^|/)(\.env($|\.)|\.venv|tests|\.pytest_cache|__pycache__)' -or
-    $_ -match '\.pyc$'
+    $normalizedEntry = $_ -replace '\\', '/'
+    $normalizedEntry = $normalizedEntry -replace '^\./', ''
+    $segments = @($normalizedEntry.Split('/', [System.StringSplitOptions]::RemoveEmptyEntries))
+    $leafName = if ($segments.Count -gt 0) { $segments[-1] } else { "" }
+
+    $containsExcludedDirectory = @(
+        $segments | Where-Object { $excludedDirectoryNames -contains $_ }
+    ).Count -gt 0
+    $containsEggInfo = @(
+        $segments | Where-Object { $_ -like "*.egg-info" }
+    ).Count -gt 0
+    $matchesExcludedFile = @(
+        $excludedFilePatterns | Where-Object { $leafName -like $_ }
+    ).Count -gt 0
+
+    $containsExcludedDirectory -or $containsEggInfo -or $matchesExcludedFile
 }
 if ($forbidden) {
     Remove-Item -LiteralPath $outputPath -Force
@@ -69,4 +120,11 @@ foreach ($entry in $required) {
 }
 
 $file = Get-Item -LiteralPath $outputPath
-Write-Host "Created $($file.FullName) ($($file.Length) bytes)"
+$maxPackageSizeBytes = $MaxPackageSizeMB * 1MB
+if ($file.Length -gt $maxPackageSizeBytes) {
+    $actualSizeMB = [math]::Round($file.Length / 1MB, 2)
+    Remove-Item -LiteralPath $outputPath -Force
+    throw "Package size $actualSizeMB MiB exceeds the configured limit of $MaxPackageSizeMB MiB."
+}
+
+Write-Host "Created $($file.FullName) ($($file.Length) bytes, $($entries.Count) entries)"
