@@ -154,6 +154,26 @@ _PROPOSAL_CAPABLE_MARKERS = (
     "提案",
 )
 
+_PLAN_FIT_FAST_PATH_TOOL_IDS = frozenset({
+    "profile.get_summary",
+    "plan.get_active",
+    "workout.get_progress",
+    "workout.list_history",
+})
+_PLAN_FIT_PRIMARY_TOOL_IDS = (
+    "profile.get_summary",
+    "plan.get_active",
+    "workout.get_progress",
+)
+_PLAN_FIT_HISTORY_REQUIRED_MARKERS = (
+    "越来越少",
+    "下降",
+    "趋势",
+    "历史",
+    "长期变化",
+    "持续减少",
+)
+
 _REPLANNER_DEADLINE_SAFE_REPLY = (
     "我已经取得了部分训练数据，但本轮未能完成可靠分析。"
     "我没有修改你的计划或训练记录，请稍后重试。"
@@ -366,6 +386,88 @@ def _finalization_outcomes_for_observations(
     ):
         return ["no_change_needed"]
     return allowed_outcomes
+
+
+def _normalize_plan_fit_fast_path(
+    plan: MicroPlan,
+    *,
+    goal: str,
+    subtasks: list[str],
+    tool_catalog: list[dict[str, Any]],
+) -> tuple[MicroPlan, bool]:
+    """Canonicalize only an already-planned three-primary read route."""
+    available_tool_ids = {
+        item["tool_id"]
+        for item in tool_catalog
+        if isinstance(item.get("tool_id"), str)
+    }
+    if available_tool_ids != _PLAN_FIT_FAST_PATH_TOOL_IDS:
+        return plan, False
+
+    semantic_scope = "\n".join([goal, *subtasks])
+    if any(
+        marker in semantic_scope
+        for marker in _PLAN_FIT_HISTORY_REQUIRED_MARKERS
+    ):
+        return plan, False
+
+    candidate_tool_ids = {
+        tool_id
+        for step in plan.steps
+        for tool_id in step.candidate_tools
+    }
+    if not set(_PLAN_FIT_PRIMARY_TOOL_IDS).issubset(candidate_tool_ids):
+        return plan, False
+
+    planned_tool_ids = {
+        action.tool_id
+        for step in plan.steps
+        for action in step.planned_actions
+    }
+    if "workout.list_history" in planned_tool_ids:
+        return plan, False
+    if any(
+        step.candidate_tools == ["workout.list_history"]
+        for step in plan.steps
+    ):
+        return plan, False
+
+    progress_arguments = _deadline_fallback_arguments(
+        "workout.get_progress",
+        goal,
+    )
+    canonical_actions = [
+        PlannedToolAction(
+            tool_id=tool_id,
+            arguments=(
+                progress_arguments
+                if tool_id == "workout.get_progress"
+                else {}
+            ),
+        )
+        for tool_id in _PLAN_FIT_PRIMARY_TOOL_IDS
+    ]
+    if len(plan.steps) == 1:
+        step = plan.steps[0]
+        if (
+            step.execution_strategy == "parallel_read"
+            and step.completion_policy == "after_all_observations"
+            and step.candidate_tools == list(_PLAN_FIT_PRIMARY_TOOL_IDS)
+            and step.planned_actions == canonical_actions
+        ):
+            return plan, False
+
+    return MicroPlan(
+        goal=goal,
+        steps=[MicroPlanStep(
+            objective="并行取得计划适配所需三项主证据",
+            candidate_tools=list(_PLAN_FIT_PRIMARY_TOOL_IDS),
+            execution_strategy="parallel_read",
+            completion_policy="after_all_observations",
+            planned_actions=canonical_actions,
+            success_signal="偏好、计划和聚合进度均已返回",
+        )],
+    ), True
 
 
 def _validate_final_response_contract(
@@ -987,6 +1089,7 @@ async def execute_planned_agent(
 
     planner_started = time.perf_counter()
     planner_deadline_fallback = False
+    planner_fast_path_normalized = False
     try:
         plan = await _await_policy_stage(
             planning_policy.create_plan(
@@ -997,19 +1100,44 @@ async def execute_planned_agent(
             stage="planner",
             timeout_seconds=settings.AGENT_PLANNER_TIMEOUT_SECONDS,
         )
+        try:
+            _validate_plan_boundary(
+                plan,
+                allowlist=global_allowlist,
+                min_steps=1,
+                max_steps=settings.AGENT_MAX_PLAN_STEPS,
+                tool_map=tools_by_id,
+                max_parallel_actions=settings.AGENT_MAX_TOOL_CALLS,
+            )
+        except Exception:
+            if shadow_session is not None:
+                shadow_session.record_parallel_policy(
+                    tool_allowlist,
+                    plan_steps=plan.steps,
+                )
+            raise
+        plan, planner_fast_path_normalized = (
+            _normalize_plan_fit_fast_path(
+                plan,
+                goal=goal,
+                subtasks=subtasks,
+                tool_catalog=tool_catalog,
+            )
+        )
+        if planner_fast_path_normalized:
+            _validate_plan_boundary(
+                plan,
+                allowlist=global_allowlist,
+                min_steps=1,
+                max_steps=settings.AGENT_MAX_PLAN_STEPS,
+                tool_map=tools_by_id,
+                max_parallel_actions=settings.AGENT_MAX_TOOL_CALLS,
+            )
         if shadow_session is not None:
             shadow_session.record_parallel_policy(
                 tool_allowlist,
                 plan_steps=plan.steps,
             )
-        _validate_plan_boundary(
-            plan,
-            allowlist=global_allowlist,
-            min_steps=1,
-            max_steps=settings.AGENT_MAX_PLAN_STEPS,
-            tool_map=tools_by_id,
-            max_parallel_actions=settings.AGENT_MAX_TOOL_CALLS,
-        )
     except Exception as exc:
         if (
             isinstance(exc, PlanningModelError)
@@ -1082,6 +1210,13 @@ async def execute_planned_agent(
             "mode_reasons": [
                 *trace.mode_reasons,
                 "planner_deadline_fallback",
+            ][:8],
+        })
+    if planner_fast_path_normalized:
+        trace = trace.model_copy(update={
+            "mode_reasons": [
+                *trace.mode_reasons,
+                "planner_fast_path_normalized",
             ][:8],
         })
     await sink(trace, None)

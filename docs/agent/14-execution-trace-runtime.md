@@ -65,6 +65,8 @@ Finalizer 根据真实观察选择语义结果；Controller 唯一映射：`adju
 
 每个真实规划步骤包含 `objective`、步骤级 `candidate_tools`、`success_signal`、显式的 `execution_strategy=direct|parallel_read|bounded_react` 和 `completion_policy=executor_decides|after_successful_observation|after_all_observations`。`parallel_read` 还必须包含 2 至 3 个参数完整的 `planned_actions`；其他策略该字段为空。`intent_subtasks_v1` 与 `agent_loop` 仅为已持久化历史 trace 保留兼容解析，新运行时不再生成。
 
+计划适配路由的动态白名单固定为资料、活动计划、聚合进度和条件历史四项。合法模型计划已经覆盖前三项主证据、没有显式安排历史，且用户目标不要求下降、趋势或历史分析时，Controller 会把拆分的多步骤形状归一为一个三动作 `parallel_read`；历史仍只在聚合进度失败时按条件证据组调用。该规则不添加 Planner 未选择的主证据、不扩展白名单，也不覆盖显式趋势分析。trace 继续标记 `planner_source=model_micro_plan_v1`，并追加 `mode_reasons=planner_fast_path_normalized`；原计划已规范时不追加该标记。Registry shadow 比较归一化后的有效计划，非法原始计划仍在拒绝前留下失败检查。
+
 `after_successful_observation` 只允许用于 `direct`。工具成功返回后，Controller 直接把步骤标为完成，省去一次只输出 `complete_step` 的 Executor 调用；`found=false` 等仍属于成功 observation。工具异常不会自动完成，仍交由 Executor 基于错误观察收口或请求重规划。旧 trace 缺少该字段时按 `executor_decides` 解析。
 
 `after_all_observations` 只允许用于 `parallel_read`。Controller 在启动前一次性校验只读并行安全集合、全局白名单、参数 schema、动作唯一性、条件替代关系和剩余预算。主动作全部成功时步骤自动完成，Executor 调用数为 0。主证据命中服务端条件替代契约时，Controller 可以在原批次后发起一次受限替代批次；除此之外，任一工具失败只允许一次 Executor 在“基于部分证据完成”与“请求一次重规划”之间决策，模型不能自行向失败批次追加调用。
