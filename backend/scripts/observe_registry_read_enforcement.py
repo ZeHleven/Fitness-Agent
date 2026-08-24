@@ -126,15 +126,142 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+_SAFE_ERROR_CODE_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,100}$")
+_STAGE_TIMING_FIELDS = (
+    "stage",
+    "attempt",
+    "source",
+    "status",
+    "latency_ms",
+    "error_category",
+    "input_chars",
+    "output_chars",
+    "input_tokens",
+    "output_tokens",
+    "finish_reason",
+)
+
+
+class ObservationRequestFailure(RuntimeError):
+    """Privacy-safe structured failure for one observation HTTP phase."""
+
+    def __init__(
+        self,
+        *,
+        phase: str,
+        category: str,
+        method: str,
+        path: str,
+        elapsed_ms: int,
+        status_code: int | None = None,
+        response_error_code: str | None = None,
+    ) -> None:
+        super().__init__(f"{category} during {phase}")
+        self.phase = phase
+        self.category = category
+        self.method = method
+        self.path = path
+        self.elapsed_ms = elapsed_ms
+        self.status_code = status_code
+        self.response_error_code = response_error_code
+
+
+def _response_error_code(response: httpx.Response) -> str | None:
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    for key in ("error_code", "code"):
+        value = payload.get(key)
+        if isinstance(value, str) and _SAFE_ERROR_CODE_PATTERN.fullmatch(value):
+            return value
+    return None
+
+
 def _require(response: httpx.Response, expected: int) -> Any:
     if response.status_code != expected:
+        error_code = _response_error_code(response) or "unknown"
         raise RuntimeError(
             f"{response.request.method} {response.request.url.path} returned "
-            f"{response.status_code}: {response.text[:300]}"
+            f"{response.status_code}; error_code={error_code}"
         )
     if not response.content:
         return None
     return response.json()
+
+
+def _request_json(
+    client: httpx.Client,
+    *,
+    phase: str,
+    method: str,
+    url: str,
+    expected_status: int,
+    timeout: int,
+    headers: dict[str, str] | None = None,
+    payload: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], int]:
+    timer = time.perf_counter()
+    path = httpx.URL(url).path
+    try:
+        response = client.request(
+            method,
+            url,
+            headers=headers,
+            json=payload,
+            timeout=timeout,
+        )
+    except httpx.TimeoutException as exc:
+        raise ObservationRequestFailure(
+            phase=phase,
+            category="request_timeout",
+            method=method,
+            path=path,
+            elapsed_ms=round((time.perf_counter() - timer) * 1000),
+        ) from exc
+    except httpx.RequestError as exc:
+        raise ObservationRequestFailure(
+            phase=phase,
+            category="request_transport_error",
+            method=method,
+            path=path,
+            elapsed_ms=round((time.perf_counter() - timer) * 1000),
+        ) from exc
+
+    elapsed_ms = round((time.perf_counter() - timer) * 1000)
+    if response.status_code != expected_status:
+        raise ObservationRequestFailure(
+            phase=phase,
+            category="unexpected_http_status",
+            method=method,
+            path=response.request.url.path,
+            elapsed_ms=elapsed_ms,
+            status_code=response.status_code,
+            response_error_code=_response_error_code(response),
+        )
+    try:
+        content = response.json()
+    except ValueError as exc:
+        raise ObservationRequestFailure(
+            phase=phase,
+            category="invalid_json_response",
+            method=method,
+            path=response.request.url.path,
+            elapsed_ms=elapsed_ms,
+            status_code=response.status_code,
+        ) from exc
+    if not isinstance(content, dict):
+        raise ObservationRequestFailure(
+            phase=phase,
+            category="unexpected_response_shape",
+            method=method,
+            path=response.request.url.path,
+            elapsed_ms=elapsed_ms,
+            status_code=response.status_code,
+        )
+    return content, elapsed_ms
 
 
 def _target_reps(value: str | None) -> int:
@@ -271,6 +398,62 @@ def _shadow_summary(trace: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _stage_timing_summary(trace: dict[str, Any]) -> list[dict[str, Any]]:
+    timings = trace.get("stage_timings", [])
+    if not isinstance(timings, list):
+        return []
+    return [
+        {field: timing.get(field) for field in _STAGE_TIMING_FIELDS}
+        for timing in timings
+        if isinstance(timing, dict)
+    ]
+
+
+def _stage_latency_summary(
+    timings: list[dict[str, Any]],
+) -> dict[str, int]:
+    totals: dict[str, int] = {}
+    for timing in timings:
+        stage = timing.get("stage")
+        latency_ms = timing.get("latency_ms")
+        if (
+            isinstance(stage, str)
+            and isinstance(latency_ms, int)
+            and not isinstance(latency_ms, bool)
+            and latency_ms >= 0
+        ):
+            totals[stage] = totals.get(stage, 0) + latency_ms
+    return totals
+
+
+def _request_failure_item(
+    failure: ObservationRequestFailure,
+    *,
+    ordinal: int,
+    scenario: Scenario,
+    request_started_at_utc: str,
+    run_id: str | None = None,
+    conversation_id: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "ordinal": ordinal,
+        "scenario": scenario.key,
+        "run_id": run_id,
+        "conversation_id": conversation_id,
+        "request_started_at_utc": request_started_at_utc,
+        "request_completed_at_utc": _utc_now(),
+        "status": "request_failed",
+        "request_phase": failure.phase,
+        "error_category": failure.category,
+        "http_method": failure.method,
+        "http_path": failure.path,
+        "http_status_code": failure.status_code,
+        "response_error_code": failure.response_error_code,
+        "http_elapsed_ms": failure.elapsed_ms,
+        "business_failures": ["runner_request_failed"],
+    }
+
+
 def _business_failures(item: dict[str, Any], scenario: Scenario) -> list[str]:
     failures: list[str] = []
     if item.get("status") != "completed":
@@ -323,36 +506,81 @@ def _run_scenario(
     ordinal: int,
 ) -> dict[str, Any]:
     started_at = _utc_now()
-    timer = time.perf_counter()
-    chat = _require(
-        client.post(
-            f"{api_url}/agent/chat",
+    chat_path = "/api/v1/agent/chat"
+    try:
+        chat, chat_elapsed_ms = _request_json(
+            client,
+            phase="agent_chat",
+            method="POST",
+            url=f"{api_url}/agent/chat",
             headers=headers,
-            json={"message": scenario.message},
+            payload={"message": scenario.message},
+            expected_status=200,
             timeout=240,
-        ),
-        200,
-    )
-    elapsed_ms = round((time.perf_counter() - timer) * 1000)
-    run = _require(
-        client.get(
-            f"{api_url}/agent/runs/{chat['run_id']}",
+        )
+    except ObservationRequestFailure as failure:
+        return _request_failure_item(
+            failure,
+            ordinal=ordinal,
+            scenario=scenario,
+            request_started_at_utc=started_at,
+        )
+
+    run_id = chat.get("run_id")
+    conversation_id = chat.get("conversation_id")
+    if not isinstance(run_id, str) or not run_id:
+        return _request_failure_item(
+            ObservationRequestFailure(
+                phase="agent_chat",
+                category="unexpected_response_shape",
+                method="POST",
+                path=chat_path,
+                elapsed_ms=chat_elapsed_ms,
+                status_code=200,
+            ),
+            ordinal=ordinal,
+            scenario=scenario,
+            request_started_at_utc=started_at,
+            conversation_id=(
+                conversation_id if isinstance(conversation_id, str) else None
+            ),
+        )
+
+    try:
+        run, run_fetch_elapsed_ms = _request_json(
+            client,
+            phase="run_fetch",
+            method="GET",
+            url=f"{api_url}/agent/runs/{run_id}",
             headers=headers,
+            expected_status=200,
             timeout=120,
-        ),
-        200,
-    )
+        )
+    except ObservationRequestFailure as failure:
+        return _request_failure_item(
+            failure,
+            ordinal=ordinal,
+            scenario=scenario,
+            request_started_at_utc=started_at,
+            run_id=run_id,
+            conversation_id=(
+                conversation_id if isinstance(conversation_id, str) else None
+            ),
+        )
     trace = run.get("execution_trace") or {}
     actions = trace.get("actions", [])
     observations = trace.get("observations", [])
+    stage_timings = _stage_timing_summary(trace)
     item = {
         "ordinal": ordinal,
         "scenario": scenario.key,
         "run_id": run.get("id"),
-        "conversation_id": chat.get("conversation_id"),
+        "conversation_id": conversation_id,
         "request_started_at_utc": started_at,
         "request_completed_at_utc": _utc_now(),
-        "http_elapsed_ms": elapsed_ms,
+        "http_elapsed_ms": chat_elapsed_ms,
+        "chat_http_elapsed_ms": chat_elapsed_ms,
+        "run_fetch_http_elapsed_ms": run_fetch_elapsed_ms,
         "status": run.get("status"),
         "duration_ms": run.get("duration_ms"),
         "primary_intent": run.get("primary_intent"),
@@ -371,6 +599,8 @@ def _run_scenario(
         "observation_statuses": [
             observation.get("status") for observation in observations
         ],
+        "stage_timings": stage_timings,
+        "stage_latency_ms": _stage_latency_summary(stage_timings),
         "reply_present": bool(run.get("reply")),
         "card_types": [card.get("type") for card in run.get("cards", [])],
         "shadow": _shadow_summary(trace),
@@ -459,6 +689,7 @@ def run_observation(
                 )
             for _ in range(runs_per_scenario):
                 ordinal += 1
+                attempt_started_at = _utc_now()
                 try:
                     item = _run_scenario(
                         client,
@@ -472,9 +703,17 @@ def run_observation(
                         "ordinal": ordinal,
                         "scenario": scenario.key,
                         "run_id": None,
+                        "request_started_at_utc": attempt_started_at,
                         "request_completed_at_utc": _utc_now(),
                         "status": "request_failed",
-                        "error_category": type(exc).__name__,
+                        "request_phase": "runner",
+                        "error_category": "unexpected_runner_error",
+                        "exception_type": type(exc).__name__,
+                        "http_method": None,
+                        "http_path": None,
+                        "http_status_code": None,
+                        "response_error_code": None,
+                        "http_elapsed_ms": None,
                         "business_failures": ["runner_request_failed"],
                     }
                 report["runs"].append(item)
