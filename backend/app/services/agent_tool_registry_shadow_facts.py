@@ -16,6 +16,7 @@ from app.services.agent_intent import IntentResolution
 from app.services.agent_tool_registry import (
     TOOL_REGISTRY_V2,
     TOOL_REGISTRY_V2_BY_ID,
+    route_registry_read_tool_ids,
 )
 from app.services.agent_tools import (
     CONDITIONAL_READ_EVIDENCE_GROUPS,
@@ -31,19 +32,7 @@ def legacy_route_allowlist_fact(tool_ids: Sequence[str]) -> dict[str, Any]:
 def registry_route_allowlist_fact(
     resolution: IntentResolution,
 ) -> dict[str, Any]:
-    if resolution.clarification_required or resolution.risk_level == "high":
-        return {"tool_ids": []}
-
-    routed: list[str] = []
-    for intent in [resolution.primary_intent, *resolution.expanded_intents]:
-        for entry in TOOL_REGISTRY_V2.tools:
-            if intent not in entry.supported_intents:
-                continue
-            if entry.tool_id not in routed:
-                routed.append(entry.tool_id)
-                if len(routed) >= TOOL_REGISTRY_V2.max_routed_tools:
-                    return {"tool_ids": routed}
-    return {"tool_ids": routed}
+    return {"tool_ids": list(route_registry_read_tool_ids(resolution))}
 
 
 def _legacy_tool_id(tool: BaseTool) -> str:

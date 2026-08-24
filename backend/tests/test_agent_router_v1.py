@@ -116,6 +116,45 @@ async def test_agent_chat_persists_conversation_run_messages_and_tool_audit(
 
 
 @pytest.mark.asyncio
+async def test_optional_read_enforcement_keeps_matching_runtime_allowlist(
+    client,
+):
+    token = await _token(client, "agent-read-enforce@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    mocked_result = {"messages": [AIMessage(content="已读取资料。")]}
+    invoke = AsyncMock(return_value=mocked_result)
+
+    with (
+        patch.object(
+            settings,
+            "AGENT_TOOL_REGISTRY_ENFORCE_READS_ENABLED",
+            True,
+        ),
+        patch(
+            "app.services.agent_runtime.invoke_langchain_agent",
+            new=invoke,
+        ),
+    ):
+        response = await client.post(
+            "/api/v1/agent/chat",
+            json={"message": "我的训练目标是什么？"},
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    assert invoke.await_args.kwargs["tool_allowlist"] == [
+        "profile.get_summary"
+    ]
+    run_response = await client.get(
+        f"/api/v1/agent/runs/{response.json()['run_id']}",
+        headers=headers,
+    )
+    assert run_response.json()["tool_allowlist"] == [
+        "profile.get_summary"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_sampled_shadow_report_is_optional_and_privacy_safe(client):
     token = await _token(client, "agent-shadow-trace@example.com")
     headers = {"Authorization": f"Bearer {token}"}

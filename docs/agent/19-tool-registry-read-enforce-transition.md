@@ -1,15 +1,16 @@
 # Tool Calling v2：Registry 只读 Enforce 切换契约
 
-状态：切换契约与纯 selector 已定义、运行时尚未接线、默认关闭，2026-08-24。
+状态：只读 enforce 已在默认关闭开关后接线，尚未启用，2026-08-24。
 
 ## 决策
 
 内部 shadow 与故障注入门禁已经支持进入“只读受控 enforce”的实现阶段，但不支持写工具、
 跨 run 观察复用或生产放量。第一批只覆盖当前 7 个已注册、已启用、无副作用的认证用户读取工具。
 
-本批只定义配置、数据模型、权限交集和回滚契约，不改变 Planner Prompt、路由、工具构建、
-执行结果或用户回复。`AGENT_TOOL_REGISTRY_ENFORCE_READS_ENABLED` 在运行时接线完成并通过独立
-评测前必须保持 `false`。
+运行时先保留 v1 路由供 shadow 比较，再把 Registry 本轮候选与 v1 allowlist、显式只读 cohort
+取交集。有效结果统一进入 Trace、direct、planned、并行与条件替代的既有下游路径；不改变
+Planner Prompt、工具实现或数据库访问。`AGENT_TOOL_REGISTRY_ENFORCE_READS_ENABLED` 在独立
+行为一致性和内部真实模型评测通过前必须保持 `false`。
 
 ## 已通过的内部门禁
 
@@ -52,7 +53,7 @@ flag=false
   legacy v1 是唯一 authority
   shadow 可独立开关并继续观测
 
-flag=true（后续实现）
+flag=true
   effective read tools = legacy allowlist ∩ registry read cohort
   Registry 可以收窄，不能扩大 v1 权限
   callable 实现和数据库访问仍复用 v1 read runtime
@@ -62,6 +63,10 @@ registry internal error
   记录低基数 fallback 事件并停止继续放量
   关闭 flag 后恢复纯 legacy authority
 ```
+
+每个开启 enforce 的 Run 都写入 `agent_tool_registry_read_authority` 结构化日志，只包含 run ID、
+authority mode、稳定原因码和工具数量，不包含用户、Prompt、参数或结果。投影或 selector 异常
+只记录 `registry_internal_error`，当前 Run 使用 legacy allowlist。
 
 唯一主开关：
 
@@ -140,6 +145,6 @@ AGENT_TOOL_REGISTRY_ENFORCE_READS_ENABLED=false
 
 1. `test: define registry read authority selector cases`（已完成）
 2. `feat: add registry read authority selector`（已完成，纯函数未接运行时）
-3. `feat: enable optional registry read enforcement`
+3. `feat: enable optional registry read enforcement`（已完成，默认关闭）
 4. `test: verify registry read enforcement parity and rollback`
 5. 内部 100% enforce reads 真实模型观测；通过后再讨论更大范围。

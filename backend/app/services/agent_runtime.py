@@ -32,6 +32,9 @@ from app.services.agent_structured_errors import safe_error_category
 from app.services.agent_tool_registry_shadow_metric_adapter import (
     emit_registry_shadow_metrics,
 )
+from app.services.agent_tool_registry_read_enforcement import (
+    apply_optional_registry_read_enforcement,
+)
 from app.services.agent_tool_registry_shadow_trace import (
     ToolRegistryShadowSession,
     attach_registry_shadow_report,
@@ -524,9 +527,16 @@ async def execute_agent_run(
             pending_clarification=(conversation.pending_clarification or None),
         )
         resolution = intent_outcome.resolution
-        tool_allowlist = route_tools(resolution)
+        legacy_tool_allowlist = route_tools(resolution)
         if shadow_session is not None:
-            shadow_session.record_route(resolution, tool_allowlist)
+            shadow_session.record_route(resolution, legacy_tool_allowlist)
+        enforcement = apply_optional_registry_read_enforcement(
+            resolution=resolution,
+            legacy_tool_ids=legacy_tool_allowlist,
+            enabled=settings.AGENT_TOOL_REGISTRY_ENFORCE_READS_ENABLED,
+            run_id=run.id,
+        )
+        tool_allowlist = list(enforcement.tool_allowlist)
         execution_trace = build_initial_execution_trace(
             resolution,
             tool_allowlist,

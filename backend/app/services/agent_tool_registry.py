@@ -17,6 +17,7 @@ from app.schemas.agent_tool_registry import (
     ToolRegistryReadEnforcementContract,
     ToolRegistryV2,
 )
+from app.services.agent_intent import IntentResolution
 
 
 _SUMMARY_AND_FINGERPRINT_AUDIT = ToolAuditContract()
@@ -360,3 +361,23 @@ TOOL_REGISTRY_V2_READ_ENFORCEMENT = ToolRegistryReadEnforcementContract(
         "conditional_evidence",
     ),
 )
+
+
+def route_registry_read_tool_ids(
+    resolution: IntentResolution,
+) -> tuple[str, ...]:
+    """Project Registry entries to ordered candidates for one resolved route."""
+
+    if resolution.clarification_required or resolution.risk_level == "high":
+        return ()
+
+    routed: list[str] = []
+    for intent in [resolution.primary_intent, *resolution.expanded_intents]:
+        for entry in TOOL_REGISTRY_V2.tools:
+            if intent not in entry.supported_intents:
+                continue
+            if entry.tool_id not in routed:
+                routed.append(entry.tool_id)
+                if len(routed) >= TOOL_REGISTRY_V2.max_routed_tools:
+                    return tuple(routed)
+    return tuple(routed)

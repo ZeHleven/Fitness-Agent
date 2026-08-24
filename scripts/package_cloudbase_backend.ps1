@@ -99,6 +99,8 @@ $required = @(
     "./app/services/agent_controller.py",
     "./app/services/agent_planner.py",
     "./app/services/agent_tool_registry.py",
+    "./app/services/agent_tool_registry_read_authority.py",
+    "./app/services/agent_tool_registry_read_enforcement.py",
     "./app/services/agent_tool_registry_shadow.py",
     "./app/services/agent_tool_registry_shadow_facts.py",
     "./app/services/agent_tool_registry_shadow_trace.py",

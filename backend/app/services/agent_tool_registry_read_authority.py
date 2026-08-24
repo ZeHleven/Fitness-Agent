@@ -1,7 +1,4 @@
-"""Pure Tool Registry v2 read-authority selector.
-
-This module does not read settings and is not imported by the Agent runtime.
-"""
+"""Pure, settings-agnostic Tool Registry v2 read-authority selector."""
 
 from __future__ import annotations
 
