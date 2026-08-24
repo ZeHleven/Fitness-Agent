@@ -1,6 +1,7 @@
 # Tool Calling v2：Registry 只读 Enforce 切换契约
 
-状态：只读 enforce 已在默认关闭开关后接线，尚未启用，2026-08-24。
+状态：只读 enforce 已在默认关闭开关后接线，固定行为一致性与回退测试已定义，尚未启用，
+2026-08-24。
 
 ## 决策
 
@@ -146,5 +147,5 @@ AGENT_TOOL_REGISTRY_ENFORCE_READS_ENABLED=false
 1. `test: define registry read authority selector cases`（已完成）
 2. `feat: add registry read authority selector`（已完成，纯函数未接运行时）
 3. `feat: enable optional registry read enforcement`（已完成，默认关闭）
-4. `test: verify registry read enforcement parity and rollback`
+4. `test: verify registry read enforcement parity and rollback`（已完成）
 5. 内部 100% enforce reads 真实模型观测；通过后再讨论更大范围。

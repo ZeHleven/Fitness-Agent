@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from contextlib import ExitStack
 from types import SimpleNamespace
 from typing import Any
@@ -25,9 +26,14 @@ from app.schemas.agent_planning import (
 from app.services.agent_controller import ToolAuditEvent, execute_planned_agent
 from app.services.agent_intent import (
     IntentResolution,
+    resolve_intent,
     route_tools,
 )
 from app.services.agent_runtime import _audit_result_summary
+from app.services.agent_tool_registry_read_enforcement import (
+    REGISTRY_READ_AUTHORITY_LOG_PREFIX,
+    apply_optional_registry_read_enforcement,
+)
 from app.services.agent_tool_registry_shadow_trace import (
     ToolRegistryShadowSession,
 )
@@ -47,6 +53,45 @@ class ToolAwareFakeChatModel(FakeMessagesListChatModel):
         return self
 
 
+_READ_TOOL_DIRECT_CASES = (
+    (
+        "profile.get_summary",
+        "profile_get_summary",
+        "我的训练目标是什么？",
+    ),
+    (
+        "health.get_screening_summary",
+        "health_get_screening_summary",
+        "我的伤病情况是什么？",
+    ),
+    (
+        "plan.get_active",
+        "plan_get_active",
+        "我的训练计划是什么？",
+    ),
+    (
+        "workout.get_next",
+        "workout_get_next",
+        "我的下一练是什么？",
+    ),
+    (
+        "workout.get_active_session",
+        "workout_get_active_session",
+        "查看我进行中的训练。",
+    ),
+    (
+        "workout.list_history",
+        "workout_list_history",
+        "查看我的训练历史。",
+    ),
+    (
+        "workout.get_progress",
+        "workout_get_progress",
+        "查看我的训练进度。",
+    ),
+)
+
+
 async def _token(client, email: str) -> str:
     response = await client.post(
         "/api/v1/auth/register",
@@ -56,19 +101,30 @@ async def _token(client, email: str) -> str:
     return response.json()["access_token"]
 
 
-def _direct_model() -> ToolAwareFakeChatModel:
+def _direct_read_model(
+    tool_name: str,
+    *,
+    reply: str = "读取完成。",
+) -> ToolAwareFakeChatModel:
     return ToolAwareFakeChatModel(responses=[
         AIMessage(
             content="",
             tool_calls=[{
-                "name": "profile_get_summary",
+                "name": tool_name,
                 "args": {},
-                "id": "shadow-parity-profile-call",
+                "id": f"registry-parity-{tool_name}-call",
                 "type": "tool_call",
             }],
         ),
-        AIMessage(content="当前还没有保存训练资料。"),
+        AIMessage(content=reply),
     ])
+
+
+def _direct_model() -> ToolAwareFakeChatModel:
+    return _direct_read_model(
+        "profile_get_summary",
+        reply="当前还没有保存训练资料。",
+    )
 
 
 def _policy(plan: MicroPlan, reply: str) -> SimpleNamespace:
@@ -96,6 +152,7 @@ async def _run_chat(
     policy: SimpleNamespace | None = None,
     access_token: str | None = None,
     parallel_session_factory=None,
+    registry_enforcement_enabled: bool = False,
 ) -> dict[str, Any]:
     token = access_token or await _token(client, email)
     headers = {"Authorization": f"Bearer {token}"}
@@ -115,6 +172,11 @@ async def _run_chat(
             settings,
             "AGENT_TOOL_REGISTRY_SHADOW_PERSIST_TRACE",
             persist_trace,
+        ))
+        stack.enter_context(patch.object(
+            settings,
+            "AGENT_TOOL_REGISTRY_ENFORCE_READS_ENABLED",
+            registry_enforcement_enabled,
         ))
         stack.enter_context(patch(
             "app.services.agent_runtime._build_model",
@@ -365,6 +427,64 @@ async def test_direct_run_behavior_is_identical_across_shadow_modes(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_id", "tool_name", "message"),
+    _READ_TOOL_DIRECT_CASES,
+)
+async def test_each_read_tool_direct_behavior_is_identical_when_enforced(
+    client,
+    db_session,
+    tool_id: str,
+    tool_name: str,
+    message: str,
+):
+    email_key = tool_id.replace(".", "-")
+    token = await _token(client, f"registry-parity-{email_key}@example.com")
+    baseline = await _run_chat(
+        client,
+        db_session,
+        email=f"registry-parity-{email_key}-baseline@example.com",
+        message=message,
+        shadow_enabled=False,
+        sample_rate=0.0,
+        persist_trace=False,
+        model=_direct_read_model(tool_name),
+        access_token=token,
+    )
+    enforced = await _run_chat(
+        client,
+        db_session,
+        email=f"registry-parity-{email_key}-enforced@example.com",
+        message=message,
+        shadow_enabled=False,
+        sample_rate=0.0,
+        persist_trace=False,
+        model=_direct_read_model(tool_name),
+        access_token=token,
+        registry_enforcement_enabled=True,
+    )
+
+    assert _behavior_snapshot(enforced) == _behavior_snapshot(baseline)
+    snapshot = _behavior_snapshot(enforced)
+    assert snapshot["run"]["tool_allowlist"] == [tool_id]
+    assert [item["tool_id"] for item in snapshot["trace"]["actions"]] == [
+        tool_id
+    ]
+    assert snapshot["trace"]["budget_usage"] == {
+        "model_calls": 2,
+        "tool_calls": 1,
+        "plan_steps": 1,
+        "replans": 0,
+    }
+    assert enforced["run"]["execution_trace"]["trace_version"] == "1.0"
+
+
+def test_read_tool_direct_cases_route_to_single_expected_tool():
+    for tool_id, _tool_name, message in _READ_TOOL_DIRECT_CASES:
+        assert route_tools(resolve_intent(message)) == [tool_id]
+
+
+@pytest.mark.asyncio
 async def test_parallel_planned_run_behavior_is_unchanged_by_shadow(
     client,
     db_session,
@@ -391,6 +511,7 @@ async def test_parallel_planned_run_behavior_is_unchanged_by_shadow(
     reply = "你目前没有活动计划，也没有保存完整训练资料。"
     baseline_policy = _policy(plan, reply)
     shadow_policy = _policy(plan, reply)
+    enforced_policy = _policy(plan, reply)
     token = await _token(client, "shadow-parity-parallel@example.com")
 
     baseline = await _run_chat(
@@ -417,8 +538,22 @@ async def test_parallel_planned_run_behavior_is_unchanged_by_shadow(
         access_token=token,
         parallel_session_factory=session_factory,
     )
+    enforced = await _run_chat(
+        client,
+        db_session,
+        email="registry-parity-parallel-enforced@example.com",
+        message=message,
+        shadow_enabled=True,
+        sample_rate=1.0,
+        persist_trace=True,
+        policy=enforced_policy,
+        access_token=token,
+        parallel_session_factory=session_factory,
+        registry_enforcement_enabled=True,
+    )
 
     assert _behavior_snapshot(shadowed) == _behavior_snapshot(baseline)
+    assert _behavior_snapshot(enforced) == _behavior_snapshot(baseline)
     snapshot = _behavior_snapshot(shadowed)
     assert [item["tool_id"] for item in snapshot["trace"]["actions"]] == [
         "plan.get_active",
@@ -437,7 +572,11 @@ async def test_parallel_planned_run_behavior_is_unchanged_by_shadow(
         "finalizer": 1,
     }
     _assert_persisted_shadow_report(shadowed)
+    _assert_persisted_shadow_report(enforced)
     assert shadowed["run"]["execution_trace"][
+        "tool_registry_shadow"
+    ]["status"] == "match"
+    assert enforced["run"]["execution_trace"][
         "tool_registry_shadow"
     ]["status"] == "match"
 
@@ -509,9 +648,17 @@ async def test_conditional_fallback_behavior_is_unchanged_by_shadow():
     )
     reply = "当前没有进行中的训练，也没有可用的下一练。"
 
-    async def run(shadow_session=None):
+    async def run(shadow_session=None, *, enforcement_enabled=False):
         policy = _policy(plan, reply)
         audits: list[ToolAuditEvent] = []
+        effective_allowlist = list(
+            apply_optional_registry_read_enforcement(
+                resolution=resolution,
+                legacy_tool_ids=allowlist,
+                enabled=enforcement_enabled,
+                run_id="registry-parity-fallback-run",
+            ).tool_allowlist
+        )
 
         async def sink(_trace, audit):
             if audit is not None:
@@ -524,10 +671,10 @@ async def test_conditional_fallback_behavior_is_unchanged_by_shadow():
             model=None,
             goal=resolution.resolved_query,
             subtasks=resolution.subtasks,
-            tool_allowlist=allowlist,
+            tool_allowlist=effective_allowlist,
             initial_trace=build_initial_execution_trace(
                 resolution,
-                allowlist,
+                effective_allowlist,
             ),
             summarize_observation=_audit_result_summary,
             event_sink=sink,
@@ -545,6 +692,11 @@ async def test_conditional_fallback_behavior_is_unchanged_by_shadow():
     session = ToolRegistryShadowSession(sample_bucket=37)
     session.record_route(resolution, allowlist)
     shadowed, shadow_policy, shadow_audits = await run(session)
+    shadow_calls = list(calls)
+    calls.clear()
+    enforced, enforced_policy, enforced_audits = await run(
+        enforcement_enabled=True,
+    )
 
     assert _controller_behavior_snapshot(
         shadowed,
@@ -555,7 +707,16 @@ async def test_conditional_fallback_behavior_is_unchanged_by_shadow():
         baseline_policy,
         baseline_audits,
     )
-    assert calls == baseline_calls == [
+    assert _controller_behavior_snapshot(
+        enforced,
+        enforced_policy,
+        enforced_audits,
+    ) == _controller_behavior_snapshot(
+        baseline,
+        baseline_policy,
+        baseline_audits,
+    )
+    assert calls == shadow_calls == baseline_calls == [
         "workout.get_active_session",
         "profile.get_summary",
         "workout.get_next",
@@ -661,9 +822,17 @@ async def test_tool_error_fallback_behavior_is_unchanged_by_shadow():
     )
     reply = "训练进度暂不可用，已使用训练历史完成回答。"
 
-    async def run(shadow_session=None):
+    async def run(shadow_session=None, *, enforcement_enabled=False):
         policy = _policy(plan, reply)
         audits: list[ToolAuditEvent] = []
+        effective_allowlist = list(
+            apply_optional_registry_read_enforcement(
+                resolution=resolution,
+                legacy_tool_ids=allowlist,
+                enabled=enforcement_enabled,
+                run_id="registry-parity-tool-error-run",
+            ).tool_allowlist
+        )
 
         async def sink(_trace, audit):
             if audit is not None:
@@ -676,10 +845,10 @@ async def test_tool_error_fallback_behavior_is_unchanged_by_shadow():
             model=None,
             goal=resolution.resolved_query,
             subtasks=resolution.subtasks,
-            tool_allowlist=allowlist,
+            tool_allowlist=effective_allowlist,
             initial_trace=build_initial_execution_trace(
                 resolution,
-                allowlist,
+                effective_allowlist,
             ),
             summarize_observation=_audit_result_summary,
             event_sink=sink,
@@ -697,6 +866,11 @@ async def test_tool_error_fallback_behavior_is_unchanged_by_shadow():
     session = ToolRegistryShadowSession(sample_bucket=41)
     session.record_route(resolution, allowlist)
     shadowed, shadow_policy, shadow_audits = await run(session)
+    shadow_calls = list(calls)
+    calls.clear()
+    enforced, enforced_policy, enforced_audits = await run(
+        enforcement_enabled=True,
+    )
 
     assert _controller_behavior_snapshot(
         shadowed,
@@ -707,7 +881,16 @@ async def test_tool_error_fallback_behavior_is_unchanged_by_shadow():
         baseline_policy,
         baseline_audits,
     )
-    assert calls == baseline_calls == [
+    assert _controller_behavior_snapshot(
+        enforced,
+        enforced_policy,
+        enforced_audits,
+    ) == _controller_behavior_snapshot(
+        baseline,
+        baseline_policy,
+        baseline_audits,
+    )
+    assert calls == shadow_calls == baseline_calls == [
         "plan.get_active",
         "workout.get_progress",
         "profile.get_summary",
@@ -782,3 +965,79 @@ async def test_shadow_comparator_error_does_not_change_run_behavior(
     assert error_check["mismatch_codes"] == ["shadow_internal_error"]
     assert error_check["error_category"] == "shadow_fact_builder_error"
     assert "private comparator detail" not in str(report)
+
+
+@pytest.mark.asyncio
+async def test_enforcement_failure_and_flag_rollback_preserve_run_behavior(
+    client,
+    db_session,
+    caplog,
+):
+    caplog.set_level(
+        logging.WARNING,
+        logger="app.services.agent_tool_registry_read_enforcement",
+    )
+    token = await _token(client, "registry-rollback@example.com")
+    baseline = await _run_chat(
+        client,
+        db_session,
+        email="registry-rollback-baseline@example.com",
+        message="我的训练目标是什么？",
+        shadow_enabled=False,
+        sample_rate=0.0,
+        persist_trace=False,
+        model=_direct_model(),
+        access_token=token,
+    )
+
+    with patch(
+        "app.services.agent_tool_registry_read_enforcement."
+        "route_registry_read_tool_ids",
+        side_effect=RuntimeError("private registry projection detail"),
+    ):
+        fallback = await _run_chat(
+            client,
+            db_session,
+            email="registry-rollback-fallback@example.com",
+            message="我的训练目标是什么？",
+            shadow_enabled=False,
+            sample_rate=0.0,
+            persist_trace=False,
+            model=_direct_model(),
+            access_token=token,
+            registry_enforcement_enabled=True,
+        )
+        rolled_back = await _run_chat(
+            client,
+            db_session,
+            email="registry-rollback-disabled@example.com",
+            message="我的训练目标是什么？",
+            shadow_enabled=False,
+            sample_rate=0.0,
+            persist_trace=False,
+            model=_direct_model(),
+            access_token=token,
+            registry_enforcement_enabled=False,
+        )
+
+    baseline_snapshot = _behavior_snapshot(baseline)
+    assert _behavior_snapshot(fallback) == baseline_snapshot
+    assert _behavior_snapshot(rolled_back) == baseline_snapshot
+    assert baseline_snapshot["run"]["status"] == "completed"
+    assert baseline_snapshot["trace"]["budget_usage"] == {
+        "model_calls": 2,
+        "tool_calls": 1,
+        "plan_steps": 1,
+        "replans": 0,
+    }
+    decision_logs = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith(
+            REGISTRY_READ_AUTHORITY_LOG_PREFIX
+        )
+    ]
+    assert len(decision_logs) == 1
+    assert '"authority_mode":"legacy_fallback"' in decision_logs[0]
+    assert '"reason_codes":["registry_internal_error"]' in decision_logs[0]
+    assert "private registry projection detail" not in decision_logs[0]
