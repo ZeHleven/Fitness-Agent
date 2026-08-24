@@ -212,6 +212,88 @@ def _allowed_finalization_outcomes(
     return ["informational_answer", "insufficient_evidence"]
 
 
+def _latest_successful_observation_result(
+    observations: list[dict[str, Any]],
+    tool_id: str,
+) -> dict[str, Any] | None:
+    for observation in reversed(observations):
+        result = observation.get("result")
+        if (
+            observation.get("tool_id") == tool_id
+            and observation.get("status") == "success"
+            and isinstance(result, dict)
+        ):
+            return result
+    return None
+
+
+def _valid_non_negative_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if number < 0:
+        return None
+    return number
+
+
+def _has_clear_low_plan_adherence(
+    observations: list[dict[str, Any]],
+) -> bool:
+    """Use complete aggregate evidence only; limited history can undercount."""
+    plan_result = _latest_successful_observation_result(
+        observations,
+        "plan.get_active",
+    )
+    progress_result = _latest_successful_observation_result(
+        observations,
+        "workout.get_progress",
+    )
+    if plan_result is None or progress_result is None:
+        return False
+    if plan_result.get("found") is not True:
+        return False
+    plan = plan_result.get("plan")
+    if not isinstance(plan, dict):
+        return False
+
+    scheduled_days = _valid_non_negative_number(
+        plan.get("days_per_week", plan.get("scheduled_days_per_week"))
+    )
+    weeks = _valid_non_negative_number(progress_result.get("weeks"))
+    completed_sessions = _valid_non_negative_number(
+        progress_result.get("total_sessions")
+    )
+    if (
+        scheduled_days is None
+        or not 1 <= scheduled_days <= 7
+        or weeks is None
+        or weeks < 2
+        or completed_sessions is None
+    ):
+        return False
+
+    expected_sessions = scheduled_days * weeks
+    return (
+        expected_sessions >= 4
+        and completed_sessions / expected_sessions <= 0.5
+    )
+
+
+def _finalization_outcomes_for_observations(
+    *,
+    goal: str,
+    subtasks: list[str],
+    observations: list[dict[str, Any]],
+) -> list[FinalizationOutcome]:
+    allowed_outcomes = _allowed_finalization_outcomes(goal, subtasks)
+    if (
+        "adjustment_proposal" in allowed_outcomes
+        and _has_clear_low_plan_adherence(observations)
+    ):
+        return ["adjustment_proposal"]
+    return allowed_outcomes
+
+
 def _validate_final_response_contract(
     response: FinalResponse,
     *,
@@ -1558,7 +1640,20 @@ async def execute_planned_agent(
             await sink(trace, None)
         step_index += 1
 
-    allowed_outcomes = _allowed_finalization_outcomes(goal, subtasks)
+    safe_fallback_required = (
+        executor_deadline_hit
+        or replanner_deadline_hit
+        or trace.budget_usage.model_calls >= settings.AGENT_MAX_MODEL_CALLS
+    )
+    allowed_outcomes = (
+        _allowed_finalization_outcomes(goal, subtasks)
+        if safe_fallback_required
+        else _finalization_outcomes_for_observations(
+            goal=goal,
+            subtasks=subtasks,
+            observations=raw_observations,
+        )
+    )
     trace = trace.model_copy(update={
         "finalization_contract": AgentFinalizationContractTrace(
             allowed_outcomes=allowed_outcomes,

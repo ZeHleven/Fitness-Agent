@@ -1,5 +1,18 @@
+from typing import Any
+
 import pytest
 
+from app.schemas.agent_planning import (
+    ExecutorDecision,
+    FinalResponse,
+    MicroPlan,
+    MicroPlanStep,
+    PlannedToolAction,
+)
+from app.services.agent_controller import execute_planned_agent
+from app.services.agent_intent import IntentResolution
+from app.services.agent_runtime import _audit_result_summary
+from app.services.agent_trace import build_initial_execution_trace
 from evals.multistep_schema import load_multistep_dataset
 from scripts.evaluate_agent_multistep_real import (
     _fast_path_gate_failures,
@@ -17,6 +30,50 @@ def _case(case_id: str):
     return next(item for item in dataset.cases if item.id == case_id)
 
 
+class _FaultInjectionPolicy:
+    def __init__(self):
+        self.finalize_inputs: list[dict[str, Any]] = []
+
+    async def create_plan(self, **kwargs: Any) -> MicroPlan:
+        return MicroPlan(
+            goal=kwargs["goal"],
+            steps=[MicroPlanStep(
+                objective="并行读取计划与聚合进度，失败时使用条件替代证据",
+                candidate_tools=[
+                    "workout.get_progress",
+                    "plan.get_active",
+                ],
+                execution_strategy="parallel_read",
+                completion_policy="after_all_observations",
+                planned_actions=[
+                    PlannedToolAction(
+                        tool_id="workout.get_progress",
+                        arguments={"weeks": 4},
+                    ),
+                    PlannedToolAction(
+                        tool_id="plan.get_active",
+                        arguments={},
+                    ),
+                ],
+                success_signal="取得计划以及进度或历史替代证据",
+            )],
+        )
+
+    async def decide_step(self, **_kwargs: Any) -> ExecutorDecision:
+        raise AssertionError("fault recovery should not wake Executor")
+
+    async def revise_plan(self, **_kwargs: Any) -> MicroPlan:
+        raise AssertionError("fault recovery should not wake Replanner")
+
+    async def finalize(self, **kwargs: Any) -> FinalResponse:
+        self.finalize_inputs.append(kwargs)
+        return FinalResponse(
+            terminal_action="proposal",
+            outcome="adjustment_proposal",
+            reply="根据可用历史建议保守降频；该提案尚未保存，需你确认。",
+        )
+
+
 @pytest.mark.asyncio
 async def test_retryable_tool_fixture_reaches_controller_as_timeout():
     case = _case("progress_timeout_falls_back_to_history")
@@ -24,6 +81,77 @@ async def test_retryable_tool_fixture_reaches_controller_as_timeout():
 
     with pytest.raises(TimeoutError, match="tool_timeout"):
         await tools[0].ainvoke({})
+
+
+@pytest.mark.asyncio
+async def test_injected_progress_timeout_recovers_through_controller():
+    case = _case("progress_timeout_falls_back_to_history")
+    allowlist = list(case.candidate_tools)
+    resolution = IntentResolution(
+        primary_intent="plan_query",
+        resolved_query=case.message,
+        expanded_intents=[
+            "workout_progress_query",
+            "workout_history_query",
+        ],
+        subtasks=["读取当前计划", "读取最近四周训练证据", "判断是否调整"],
+        confidence=1.0,
+    )
+    policy = _FaultInjectionPolicy()
+
+    result = await execute_planned_agent(
+        db=None,
+        user_id="fault-injection-user",
+        run_id="fault-injection-progress-timeout",
+        model=None,
+        goal=case.message,
+        subtasks=resolution.subtasks,
+        tool_allowlist=allowlist,
+        initial_trace=build_initial_execution_trace(resolution, allowlist),
+        summarize_observation=_audit_result_summary,
+        policy=policy,
+        tools=build_fixture_tools(case, allowlist),
+    )
+
+    trace = result.execution_trace
+    assert [item.tool_id for item in trace.actions] == [
+        "workout.get_progress",
+        "plan.get_active",
+        "workout.list_history",
+    ]
+    assert [item.status for item in trace.observations] == [
+        "error",
+        "success",
+        "success",
+    ]
+    assert trace.actions[-1].batch_id is not None
+    assert trace.actions[-1].batch_id.startswith("fallback-")
+    assert trace.budget_usage.tool_calls == 3
+    assert trace.budget_usage.model_calls == 2
+    assert trace.budget_usage.replans == 0
+    assert trace.terminal_action == "proposal"
+    assert trace.termination_reason == "agent_completed"
+    assert [item.stage for item in trace.stage_timings] == [
+        "planner",
+        "tool_batch",
+        "tool_batch",
+        "finalizer",
+    ]
+    assert policy.finalize_inputs[0]["allowed_outcomes"] == [
+        "adjustment_proposal",
+        "no_change_needed",
+        "insufficient_evidence",
+    ]
+    finalizer_observations = policy.finalize_inputs[0]["observations"]
+    progress = next(
+        item
+        for item in finalizer_observations
+        if item["tool_id"] == "workout.get_progress"
+    )
+    assert progress["status"] == "error"
+    assert progress["result"] == {
+        "error": {"code": "TimeoutError", "retryable": True}
+    }
 
 
 def test_latency_summary_uses_interpolated_p50_and_p95():

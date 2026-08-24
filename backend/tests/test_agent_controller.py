@@ -17,6 +17,7 @@ from app.schemas.agent_planning import (
 )
 from app.services.agent_controller import (
     ToolAuditEvent,
+    _finalization_outcomes_for_observations,
     _planner_deadline_fallback_plan,
     execute_planned_agent,
 )
@@ -180,6 +181,58 @@ def test_planning_deadline_defaults_are_role_specific():
         Settings.model_fields["AGENT_REPLANNER_TIMEOUT_SECONDS"].default
         == 30.0
     )
+
+
+def test_clear_low_adherence_requires_adjustment_proposal():
+    observations = [
+        {
+            "tool_id": "plan.get_active",
+            "status": "success",
+            "result": {
+                "found": True,
+                "plan": {"scheduled_days_per_week": 5},
+            },
+        },
+        {
+            "tool_id": "workout.get_progress",
+            "status": "success",
+            "result": {"weeks": 4, "total_sessions": 4},
+        },
+    ]
+
+    assert _finalization_outcomes_for_observations(
+        goal="看看当前计划是不是太激进，并给调整建议",
+        subtasks=["判断计划适配度"],
+        observations=observations,
+    ) == ["adjustment_proposal"]
+
+
+def test_high_adherence_keeps_no_change_and_insufficient_evidence_options():
+    observations = [
+        {
+            "tool_id": "plan.get_active",
+            "status": "success",
+            "result": {
+                "found": True,
+                "plan": {"days_per_week": 4},
+            },
+        },
+        {
+            "tool_id": "workout.get_progress",
+            "status": "success",
+            "result": {"weeks": 4, "total_sessions": 15},
+        },
+    ]
+
+    assert _finalization_outcomes_for_observations(
+        goal="判断当前计划是否需要调整",
+        subtasks=["判断计划适配度"],
+        observations=observations,
+    ) == [
+        "adjustment_proposal",
+        "no_change_needed",
+        "insufficient_evidence",
+    ]
 
 
 @pytest.mark.asyncio
@@ -1344,6 +1397,81 @@ async def test_finalizer_contract_maps_adjustment_outcome_to_proposal():
     assert timing.input_tokens == 800
     assert timing.output_tokens == 120
     assert timing.finish_reason == "stop"
+
+
+@pytest.mark.asyncio
+async def test_low_adherence_narrows_runtime_finalizer_to_proposal():
+    @tool(
+        "plan_get_active",
+        args_schema=NoArguments,
+        description="读取活动计划",
+    )
+    async def plan():
+        return {
+            "found": True,
+            "plan": {"name": "三日入门计划", "days_per_week": 3},
+        }
+
+    @tool(
+        "workout_get_progress",
+        args_schema=WorkoutProgressArguments,
+        description="读取训练进度",
+    )
+    async def progress(weeks: int = 8):
+        return {"weeks": weeks, "total_sessions": 1}
+
+    allowlist = ["plan.get_active", "workout.get_progress"]
+    policy = ScriptedPolicy(
+        plan=MicroPlan(
+            goal="判断低完成率是否需要调整",
+            steps=[MicroPlanStep(
+                objective="读取计划频率与四周完成情况",
+                candidate_tools=allowlist,
+                execution_strategy="parallel_read",
+                completion_policy="after_all_observations",
+                planned_actions=[
+                    PlannedToolAction(
+                        tool_id="plan.get_active",
+                        arguments={},
+                    ),
+                    PlannedToolAction(
+                        tool_id="workout.get_progress",
+                        arguments={"weeks": 4},
+                    ),
+                ],
+                success_signal="取得计划与聚合进度",
+            )],
+        ),
+        decisions=[],
+        final_response=FinalResponse(
+            terminal_action="proposal",
+            reply="建议先降为每周一至两练；提案尚未执行，需确认。",
+            outcome="adjustment_proposal",
+        ),
+    )
+
+    result = await execute_planned_agent(
+        db=None,
+        user_id="user-low-adherence",
+        run_id="low-adherence-contract",
+        model=None,
+        goal="最近四周只完成一次，当前计划是否太激进，请给调整建议",
+        subtasks=["判断计划适配度"],
+        tool_allowlist=allowlist,
+        initial_trace=_planned_trace(allowlist),
+        summarize_observation=_audit_result_summary,
+        policy=policy,
+        tools=[plan, progress],
+    )
+
+    contract = result.execution_trace.finalization_contract
+    assert contract is not None
+    assert contract.allowed_outcomes == ["adjustment_proposal"]
+    assert contract.selected_outcome == "adjustment_proposal"
+    assert policy.finalize_inputs[0]["allowed_outcomes"] == [
+        "adjustment_proposal"
+    ]
+    assert result.execution_trace.terminal_action == "proposal"
 
 
 @pytest.mark.asyncio
