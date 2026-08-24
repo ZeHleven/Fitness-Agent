@@ -1,8 +1,16 @@
 from __future__ import annotations
 
 import json
+from itertools import combinations
 from pathlib import Path
 from typing import Any
+
+from app.schemas.agent_tool_registry import (
+    ToolRegistryReadAuthorityEntryFact,
+)
+from app.services.agent_tool_registry_read_authority import (
+    select_registry_read_authority,
+)
 
 
 _CASES_PATH = (
@@ -192,6 +200,22 @@ def test_read_authority_case_expectations_follow_the_intersection_contract():
         assert case["expected"] == _reference_expected(case)
 
 
+def test_read_authority_selector_matches_every_fixed_case():
+    for case in _load_cases():
+        entries = tuple(
+            ToolRegistryReadAuthorityEntryFact.model_validate(entry)
+            for entry in case["registry_entries"]
+        )
+        decision = select_registry_read_authority(
+            legacy_tool_ids=case["legacy_tool_ids"],
+            cohort_tool_ids=case["cohort_tool_ids"],
+            registry_entries=entries,
+            registry_error=case["registry_error"] is not None,
+        )
+
+        assert decision.model_dump(mode="json") == case["expected"]
+
+
 def test_enforce_case_outputs_never_expand_legacy_or_cohort_authority():
     for case in _load_cases():
         expected = case["expected"]
@@ -234,3 +258,61 @@ def test_registry_error_fixture_falls_back_to_stable_legacy_read_order():
     assert case["expected"]["reason_codes"] == [
         "registry_internal_error"
     ]
+
+
+def test_duplicate_registry_facts_fail_safe_to_legacy_read_runtime():
+    entry = ToolRegistryReadAuthorityEntryFact(
+        tool_id="profile.get_summary",
+        availability="active",
+        mode="read",
+        side_effects="none",
+    )
+
+    decision = select_registry_read_authority(
+        legacy_tool_ids=["profile.get_summary"],
+        cohort_tool_ids=["profile.get_summary"],
+        registry_entries=[entry, entry],
+    )
+
+    assert decision.authority_mode == "legacy_fallback"
+    assert decision.effective_tool_ids == ("profile.get_summary",)
+    assert decision.denied_tool_ids == ()
+    assert decision.reason_codes == ("registry_internal_error",)
+
+
+def test_selector_intersection_invariant_for_all_small_authority_subsets():
+    tool_ids = (
+        "profile.get_summary",
+        "plan.get_active",
+        "recovery.get_summary",
+    )
+    entries = tuple(
+        ToolRegistryReadAuthorityEntryFact(
+            tool_id=tool_id,
+            availability="active",
+            mode="read",
+            side_effects="none",
+        )
+        for tool_id in tool_ids
+    )
+    subsets = [
+        subset
+        for size in range(len(tool_ids) + 1)
+        for subset in combinations(tool_ids, size)
+    ]
+
+    for legacy_tool_ids in subsets:
+        for cohort_tool_ids in subsets:
+            decision = select_registry_read_authority(
+                legacy_tool_ids=legacy_tool_ids,
+                cohort_tool_ids=cohort_tool_ids,
+                registry_entries=entries,
+            )
+
+            assert decision.effective_tool_ids == tuple(
+                tool_id
+                for tool_id in legacy_tool_ids
+                if tool_id in cohort_tool_ids
+            )
+            assert set(decision.effective_tool_ids) <= set(legacy_tool_ids)
+            assert set(decision.effective_tool_ids) <= set(cohort_tool_ids)

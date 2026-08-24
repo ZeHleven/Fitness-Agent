@@ -284,6 +284,68 @@ class ToolRegistryReadEnforcementContract(BaseModel):
         return self
 
 
+ToolRegistryReadAuthorityReasonCode = Literal[
+    "permission_expansion",
+    "outside_enforce_cohort",
+    "unregistered_tool",
+    "inactive_tool",
+    "non_read_tool",
+    "side_effecting_tool",
+    "registry_internal_error",
+]
+
+
+class ToolRegistryReadAuthorityEntryFact(BaseModel):
+    """Minimal privacy-safe Registry fact consumed by the pure selector."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    tool_id: str = Field(
+        pattern=r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$",
+        max_length=100,
+    )
+    availability: Literal["active", "hidden", "planned"]
+    mode: Literal["read", "proposal", "execute"]
+    side_effects: Literal["none", "proposal_only", "writes_data"]
+
+
+class ToolRegistryReadAuthorityDecision(BaseModel):
+    """Deterministic read-authority decision without user or tool payloads."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    authority_mode: Literal["enforce", "legacy_fallback"]
+    effective_tool_ids: tuple[str, ...] = Field(default=(), max_length=100)
+    denied_tool_ids: tuple[str, ...] = Field(default=(), max_length=100)
+    reason_codes: tuple[ToolRegistryReadAuthorityReasonCode, ...] = Field(
+        default=(),
+        max_length=7,
+    )
+
+    @model_validator(mode="after")
+    def validate_decision(self) -> Self:
+        if len(self.effective_tool_ids) != len(set(self.effective_tool_ids)):
+            raise ValueError("effective tool ids must be unique")
+        if len(self.denied_tool_ids) != len(set(self.denied_tool_ids)):
+            raise ValueError("denied tool ids must be unique")
+        if set(self.effective_tool_ids) & set(self.denied_tool_ids):
+            raise ValueError("effective and denied tool ids must be disjoint")
+        if len(self.reason_codes) != len(set(self.reason_codes)):
+            raise ValueError("read authority reason codes must be unique")
+        if self.authority_mode == "legacy_fallback":
+            if self.denied_tool_ids:
+                raise ValueError("legacy fallback cannot deny legacy tools")
+            if self.reason_codes != ("registry_internal_error",):
+                raise ValueError(
+                    "legacy fallback requires registry_internal_error"
+                )
+        elif "registry_internal_error" in self.reason_codes:
+            raise ValueError(
+                "enforce decisions cannot contain registry_internal_error"
+            )
+        return self
+
+
 ToolRegistryShadowCheckType = Literal[
     "route_allowlist",
     "constructed_tools",

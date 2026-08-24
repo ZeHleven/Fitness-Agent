@@ -1,6 +1,6 @@
 # Tool Calling v2：Registry 只读 Enforce 切换契约
 
-状态：切换契约已定义、运行时尚未接线、默认关闭，2026-08-24。
+状态：切换契约与纯 selector 已定义、运行时尚未接线、默认关闭，2026-08-24。
 
 ## 决策
 
@@ -86,6 +86,10 @@ AGENT_TOOL_REGISTRY_ENFORCE_READS_ENABLED=false
 
 新工具即使被加入 Registry，也不得自动进入这一 cohort，必须另改显式列表并重新执行门禁。
 
+纯 selector 接收的是“本轮 Registry 推导出的候选工具事实”，不是完整静态目录；完整目录先按
+结构化意图投影成本轮候选，再进入权限交集。这样不会把与当前意图无关的已注册工具误报为
+`permission_expansion`。
+
 首批 Registry authority 只覆盖：
 
 - `route_allowlist`
@@ -134,8 +138,8 @@ AGENT_TOOL_REGISTRY_ENFORCE_READS_ENABLED=false
 
 ## 后续实现顺序
 
-1. `test: define registry read authority selector cases`
-2. `feat: add registry read authority selector`
+1. `test: define registry read authority selector cases`（已完成）
+2. `feat: add registry read authority selector`（已完成，纯函数未接运行时）
 3. `feat: enable optional registry read enforcement`
 4. `test: verify registry read enforcement parity and rollback`
 5. 内部 100% enforce reads 真实模型观测；通过后再讨论更大范围。
