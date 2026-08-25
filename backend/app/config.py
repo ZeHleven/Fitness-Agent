@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     # Reserved for the separately gated read-only authority transition.
     # No runtime path consumes this switch until enforce is implemented.
     AGENT_TOOL_REGISTRY_ENFORCE_READS_ENABLED: bool = False
+    # Independent from read-tool Registry enforcement. No Controller path
+    # consumes this switch until optional proposal persistence is wired.
+    AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED: bool = False
 
 
 settings = Settings()
