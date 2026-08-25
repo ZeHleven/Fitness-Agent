@@ -217,6 +217,100 @@ class AgentToolCall(Base):
 
 class AgentProposal(Base):
     __tablename__ = "agent_proposals"
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id",
+            "proposal_type",
+            name="uq_agent_proposals_run_type",
+        ),
+        UniqueConstraint(
+            "user_id",
+            "decision_client_request_id",
+            name="uq_agent_proposals_user_decision_request",
+        ),
+        Index(
+            "ix_agent_proposals_pending_expiry",
+            "expires_at",
+            postgresql_where=text("status = 'pending_confirmation'"),
+        ),
+        CheckConstraint(
+            "status IN ('pending_confirmation', 'applied', 'rejected', "
+            "'expired', 'stale', 'failed')",
+            name="ck_agent_proposals_status",
+        ),
+        CheckConstraint(
+            "version >= 1",
+            name="ck_agent_proposals_version_positive",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(payload_data) = 'object'",
+            name="ck_agent_proposals_payload_object",
+        ),
+        CheckConstraint(
+            "(payload_fingerprint IS NULL OR "
+            "payload_fingerprint ~ '^[0-9a-f]{64}$') AND "
+            "(base_plan_fingerprint IS NULL OR "
+            "base_plan_fingerprint ~ '^[0-9a-f]{64}$') AND "
+            "(result_plan_fingerprint IS NULL OR "
+            "result_plan_fingerprint ~ '^[0-9a-f]{64}$')",
+            name="ck_agent_proposals_fingerprints",
+        ),
+        CheckConstraint(
+            "expires_at IS NULL OR "
+            "(expires_at > created_at AND "
+            "expires_at <= created_at + INTERVAL '72 hours')",
+            name="ck_agent_proposals_expiry_window",
+        ),
+        CheckConstraint(
+            "(decision_action IS NULL AND "
+            "decision_client_request_id IS NULL AND "
+            "confirmed_at IS NULL AND rejected_at IS NULL) OR "
+            "(decision_action = 'confirm' AND "
+            "decision_client_request_id IS NOT NULL AND "
+            "confirmed_at IS NOT NULL AND rejected_at IS NULL) OR "
+            "(decision_action = 'reject' AND "
+            "decision_client_request_id IS NOT NULL AND "
+            "confirmed_at IS NULL AND rejected_at IS NOT NULL)",
+            name="ck_agent_proposals_decision_fields",
+        ),
+        CheckConstraint(
+            "status <> 'pending_confirmation' OR "
+            "(decision_action IS NULL AND applied_at IS NULL AND "
+            "result_plan_id IS NULL AND result_plan_fingerprint IS NULL AND "
+            "last_error_code IS NULL)",
+            name="ck_agent_proposals_pending_clean",
+        ),
+        CheckConstraint(
+            "(status = 'applied' AND decision_action = 'confirm' AND "
+            "applied_at IS NOT NULL AND result_plan_id IS NOT NULL AND "
+            "result_plan_fingerprint IS NOT NULL AND "
+            "last_error_code IS NULL) OR "
+            "(status <> 'applied' AND applied_at IS NULL AND "
+            "result_plan_id IS NULL AND result_plan_fingerprint IS NULL)",
+            name="ck_agent_proposals_applied_result",
+        ),
+        CheckConstraint(
+            "(status = 'rejected' AND decision_action = 'reject') OR "
+            "(status <> 'rejected' AND "
+            "(decision_action IS NULL OR decision_action <> 'reject'))",
+            name="ck_agent_proposals_rejection_state",
+        ),
+        CheckConstraint(
+            "proposal_type <> 'plan_adjustment_v1' OR ("
+            "payload_fingerprint IS NOT NULL AND "
+            "base_plan_id IS NOT NULL AND "
+            "base_plan_fingerprint IS NOT NULL AND "
+            "expires_at IS NOT NULL AND "
+            "payload_data ->> 'schema_version' IS NOT DISTINCT FROM '1.0.0' "
+            "AND payload_data ->> 'proposal_type' "
+            "IS NOT DISTINCT FROM proposal_type AND "
+            "payload_data #>> '{target,base_plan_id}' "
+            "IS NOT DISTINCT FROM base_plan_id AND "
+            "payload_data #>> '{target,base_plan_fingerprint}' "
+            "IS NOT DISTINCT FROM base_plan_fingerprint)",
+            name="ck_agent_proposals_plan_adjustment_fields",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
     user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), index=True)
@@ -228,12 +322,48 @@ class AgentProposal(Base):
     )
     proposal_type: Mapped[str] = mapped_column(String(60), index=True)
     payload_data: Mapped[dict] = mapped_column(JSONB)
+    payload_fingerprint: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    base_plan_id: Mapped[str | None] = mapped_column(
+        String, nullable=True, index=True
+    )
+    base_plan_fingerprint: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
     status: Mapped[str] = mapped_column(
-        String(20), default="pending", server_default="pending", index=True
+        String(20),
+        default="pending_confirmation",
+        server_default="pending_confirmation",
+        index=True,
     )
     version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    decision_action: Mapped[str | None] = mapped_column(
+        String(20), nullable=True
+    )
+    decision_client_request_id: Mapped[str | None] = mapped_column(
+        String(120), nullable=True
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    rejected_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    applied_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    result_plan_id: Mapped[str | None] = mapped_column(
+        String, nullable=True, index=True
+    )
+    result_plan_fingerprint: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    last_error_code: Mapped[str | None] = mapped_column(
+        String(80), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
