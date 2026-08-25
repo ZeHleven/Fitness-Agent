@@ -16,6 +16,7 @@
     "build:h5": "taro build --type h5",
     "dev:weapp": "taro build --type weapp --watch",
     "dev:h5": "taro build --type h5 --watch",
+    "test:proposal-contract": "node --test tests/plan-adjustment-proposal-interaction-contract.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "browserslist": [

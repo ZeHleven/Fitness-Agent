@@ -88,6 +88,10 @@ jobs:
         working-directory: miniapp
         run: pnpm install --frozen-lockfile
 
+      - name: Run proposal interaction contract
+        working-directory: miniapp
+        run: pnpm test:proposal-contract
+
       - name: Typecheck mini program
         working-directory: miniapp
         run: pnpm typecheck
