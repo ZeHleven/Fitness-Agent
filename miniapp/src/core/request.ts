@@ -27,8 +27,28 @@ interface RequestOptions {
   timeout?: number
 }
 
-interface ErrorPayload {
-  detail?: string
+export interface ApiErrorPayload {
+  code?: unknown
+  message?: unknown
+  detail?: unknown
+}
+
+export class ApiRequestError extends Error {
+  readonly statusCode: number
+  readonly code?: string
+  readonly payload: ApiErrorPayload
+
+  constructor (
+    message: string,
+    statusCode: number,
+    payload: ApiErrorPayload
+  ) {
+    super(message)
+    this.name = 'ApiRequestError'
+    this.statusCode = statusCode
+    this.code = typeof payload.code === 'string' ? payload.code : undefined
+    this.payload = payload
+  }
 }
 
 interface TransportResponse<T> {
@@ -113,7 +133,7 @@ async function refreshAccessToken(): Promise<string> {
   const refreshToken = getRefreshToken()
   if (!refreshToken) throw new Error('登录状态已失效，请重新登录')
 
-  const response = await transportRequest<TokenResponse | ErrorPayload>(
+  const response = await transportRequest<TokenResponse | ApiErrorPayload>(
     '/auth/refresh',
     'POST',
     { refresh_token: refreshToken },
@@ -121,7 +141,12 @@ async function refreshAccessToken(): Promise<string> {
   )
 
   if (response.statusCode < 200 || response.statusCode >= 300) {
-    throw new Error((response.data as ErrorPayload).detail || '登录状态已失效，请重新登录')
+    const payload = response.data as ApiErrorPayload
+    throw new ApiRequestError(
+      apiErrorPayloadMessage(payload, '登录状态已失效，请重新登录'),
+      response.statusCode,
+      payload
+    )
   }
 
   const tokens = response.data as TokenResponse
@@ -145,7 +170,7 @@ export async function apiRequest<T>(
 ): Promise<T> {
   const authenticated = options.authenticated !== false
   const accessToken = authenticated ? getAccessToken() : ''
-  const response = await transportRequest<T | ErrorPayload>(
+  const response = await transportRequest<T | ApiErrorPayload>(
     withQuery(path, options.query),
     options.method || 'GET',
     options.data,
@@ -173,11 +198,28 @@ export async function apiRequest<T>(
   }
 
   if (response.statusCode < 200 || response.statusCode >= 300) {
-    const payload = response.data as ErrorPayload
-    throw new Error((payload && payload.detail) || `请求失败（${response.statusCode}）`)
+    const payload = response.data as ApiErrorPayload
+    throw new ApiRequestError(
+      apiErrorPayloadMessage(payload, `请求失败（${response.statusCode}）`),
+      response.statusCode,
+      payload
+    )
   }
 
   return response.data as T
+}
+
+function apiErrorPayloadMessage (
+  payload: ApiErrorPayload | null | undefined,
+  fallback: string
+): string {
+  if (payload && typeof payload.message === 'string' && payload.message) {
+    return payload.message
+  }
+  if (payload && typeof payload.detail === 'string' && payload.detail) {
+    return payload.detail
+  }
+  return fallback
 }
 
 export function errorMessage(error: unknown, fallback: string): string {

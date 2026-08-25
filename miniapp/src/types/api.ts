@@ -1,3 +1,6 @@
+import type { PlanAdjustmentProposalReference } from './plan-adjustment-proposal'
+
+
 export interface TokenResponse {
   access_token: string
   refresh_token: string
@@ -201,6 +204,7 @@ export interface AgentChatResponse {
   conversation_id: string
   run_id: string
   cards: AgentCard[]
+  proposal?: PlanAdjustmentProposalReference | null
 }
 
 export type AgentRunState = 'queued' | 'running' | 'completed' | 'failed'
@@ -217,6 +221,7 @@ export interface AgentRunStatus {
   status: AgentRunState
   reply?: string | null
   cards: AgentCard[]
+  proposal?: PlanAdjustmentProposalReference | null
   error_code?: string | null
   error_message?: string | null
   poll_after_ms?: number | null
