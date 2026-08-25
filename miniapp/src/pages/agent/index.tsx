@@ -2,6 +2,10 @@ import { useEffect, useRef, useState } from 'react'
 import { Button, ScrollView, Text, Textarea, View } from '@tarojs/components'
 import Taro, { useLoad } from '@tarojs/taro'
 
+import {
+  projectProposalStatus,
+  proposalLocalExpiryState
+} from '../../core/proposal-interaction'
 import { errorMessage } from '../../core/request'
 import {
   clearAgentConversationId,
@@ -14,6 +18,7 @@ import {
 import type { PendingAgentRequest } from '../../core/storage'
 import { agentApi } from '../../services/agent'
 import type { AgentCard, AgentMessage } from '../../types/api'
+import type { PlanAdjustmentProposalReference } from '../../types/plan-adjustment-proposal'
 import './index.scss'
 
 
@@ -22,6 +27,7 @@ interface DisplayMessage {
   role: 'user' | 'assistant'
   content: string
   cards: AgentCard[]
+  proposal: PlanAdjustmentProposalReference | null
 }
 
 
@@ -35,7 +41,8 @@ const welcomeMessage: DisplayMessage = {
   id: 'welcome',
   role: 'assistant',
   content: '你好，我是训练搭子。现在可以帮你查询训练计划、下一练、进行中的训练、历史和进度，也可以回答一般健身问题。涉及修改数据时，我会先说明，目前不会直接执行。',
-  cards: []
+  cards: [],
+  proposal: null
 }
 
 const MAX_AGENT_WAIT_MS = 180000
@@ -110,7 +117,8 @@ export default function AgentPage () {
       id: `local-${pending.client_request_id}`,
       role: 'user',
       content: pending.message,
-      cards: []
+      cards: [],
+      proposal: null
     }
     setMessages(current => {
       if (current.some(item => item.id === localMessage.id)) return current
@@ -152,7 +160,8 @@ export default function AgentPage () {
                   id: run.id,
                   role: 'assistant',
                   content: run.reply || '',
-                  cards: run.cards || []
+                  cards: run.cards || [],
+                  proposal: run.proposal || null
                 }
               ])
           clearPendingAgentRequest()
@@ -264,6 +273,9 @@ export default function AgentPage () {
               {message.cards.map((card, index) => (
                 <AgentDataCard card={card} key={`${message.id}-${card.type}-${index}`} />
               ))}
+              {message.proposal && (
+                <ProposalReferenceCard proposal={message.proposal} />
+              )}
             </View>
           </View>
         ))}
@@ -319,8 +331,69 @@ function toDisplayMessage (message: AgentMessage): DisplayMessage {
         : message.id,
     role: message.role === 'user' ? 'user' : 'assistant',
     content: message.content,
-    cards: cardsFromContentData(message.content_data)
+    cards: cardsFromContentData(message.content_data),
+    proposal: proposalFromContentData(message.content_data)
   }
+}
+
+function proposalFromContentData (
+  contentData: Record<string, unknown>
+): PlanAdjustmentProposalReference | null {
+  const value = contentData.proposal
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const proposal = value as Record<string, unknown>
+  if (
+    typeof proposal.id !== 'string' ||
+    proposal.proposal_type !== 'plan_adjustment_v1' ||
+    proposal.status !== 'pending_confirmation' ||
+    typeof proposal.version !== 'number' ||
+    !Number.isInteger(proposal.version) ||
+    proposal.version < 1 ||
+    typeof proposal.expires_at !== 'string' ||
+    typeof proposal.payload_fingerprint !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(proposal.payload_fingerprint)
+  ) return null
+  return proposal as unknown as PlanAdjustmentProposalReference
+}
+
+function ProposalReferenceCard ({
+  proposal
+}: {
+  proposal: PlanAdjustmentProposalReference
+}) {
+  const presentation = projectProposalStatus(
+    proposal.status,
+    proposalLocalExpiryState(proposal.status, proposal.expires_at)
+  )
+  const open = () => Taro.navigateTo({
+    url: `/pages/proposal-detail/index?id=${encodeURIComponent(proposal.id)}`
+  })
+  return (
+    <View className='proposal-reference-card' onClick={open}>
+      <View className='proposal-reference-heading'>
+        <Text className='proposal-reference-title'>训练计划调整提案</Text>
+        <Text className={`proposal-reference-status ${presentation.tone}`}>
+          {presentation.label}
+        </Text>
+      </View>
+      <Text className='proposal-reference-copy'>
+        查看完整调整前后计划、调整理由与安全提示
+      </Text>
+      <View className='proposal-reference-footer'>
+        <Text className='proposal-reference-expiry'>
+          有效期至 {formatProposalDate(proposal.expires_at)}
+        </Text>
+        <Text className='proposal-reference-action'>查看详情 →</Text>
+      </View>
+    </View>
+  )
+}
+
+function formatProposalDate (value: string): string {
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return value
+  const pad = (part: number) => String(part).padStart(2, '0')
+  return `${date.getMonth() + 1}月${date.getDate()}日 ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
 function cardsFromContentData (contentData: Record<string, unknown>): AgentCard[] {

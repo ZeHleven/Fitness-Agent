@@ -2,6 +2,7 @@ import type {
   PendingPlanAdjustmentProposalDecision,
   PlanAdjustmentProposalBusinessErrorCode,
   PlanAdjustmentProposalDecisionAction,
+  PlanAdjustmentProposalStatus,
   ProposalDecisionRecovery
 } from '../types/plan-adjustment-proposal'
 
@@ -36,6 +37,107 @@ export interface ProposalDecisionRecoveryInput {
 export interface ProposalDecisionJournalResolution {
   outcome: 'created' | 'reused' | 'conflict'
   record: PendingPlanAdjustmentProposalDecision | null
+}
+
+export type ProposalStatusTone =
+  | 'attention'
+  | 'success'
+  | 'neutral'
+  | 'warning'
+
+export type ProposalLocalExpiryState =
+  | 'before'
+  | 'at_or_after'
+  | 'irrelevant'
+
+export interface ProposalStatusPresentation {
+  label: string
+  tone: ProposalStatusTone
+  terminal: boolean
+  actions: PlanAdjustmentProposalDecisionAction[]
+  detail_required: boolean
+  refresh_required: boolean
+  may_claim_applied: boolean
+}
+
+export function projectProposalStatus (
+  serverStatus: PlanAdjustmentProposalStatus | 'missing',
+  localExpiryState: ProposalLocalExpiryState
+): ProposalStatusPresentation {
+  if (serverStatus === 'pending_confirmation') {
+    if (localExpiryState === 'at_or_after') {
+      return {
+        label: '正在核实提案状态',
+        tone: 'neutral',
+        terminal: false,
+        actions: [],
+        detail_required: true,
+        refresh_required: true,
+        may_claim_applied: false
+      }
+    }
+    return {
+      label: '待你确认',
+      tone: 'attention',
+      terminal: false,
+      actions: ['confirm', 'reject'],
+      detail_required: true,
+      refresh_required: false,
+      may_claim_applied: false
+    }
+  }
+
+  const terminal: Record<
+    Exclude<PlanAdjustmentProposalStatus, 'pending_confirmation'>,
+    Pick<ProposalStatusPresentation, 'label' | 'tone' | 'may_claim_applied'>
+  > = {
+    applied: {
+      label: '已应用',
+      tone: 'success',
+      may_claim_applied: true
+    },
+    rejected: {
+      label: '已拒绝',
+      tone: 'neutral',
+      may_claim_applied: false
+    },
+    expired: {
+      label: '已过期',
+      tone: 'neutral',
+      may_claim_applied: false
+    },
+    stale: {
+      label: '计划情况已变化',
+      tone: 'warning',
+      may_claim_applied: false
+    },
+    failed: {
+      label: '调整未完成',
+      tone: 'warning',
+      may_claim_applied: false
+    }
+  }
+  const value = serverStatus === 'missing'
+    ? { label: '提案不可用', tone: 'neutral' as const, may_claim_applied: false }
+    : terminal[serverStatus]
+  return {
+    ...value,
+    terminal: true,
+    actions: [],
+    detail_required: serverStatus !== 'missing',
+    refresh_required: false
+  }
+}
+
+export function proposalLocalExpiryState (
+  status: PlanAdjustmentProposalStatus,
+  expiresAt: string,
+  now: number = Date.now()
+): ProposalLocalExpiryState {
+  if (status !== 'pending_confirmation') return 'irrelevant'
+  const expiresAtMilliseconds = Date.parse(expiresAt)
+  if (!Number.isFinite(expiresAtMilliseconds)) return 'at_or_after'
+  return now < expiresAtMilliseconds ? 'before' : 'at_or_after'
 }
 
 export function isPlanAdjustmentProposalBusinessErrorCode (

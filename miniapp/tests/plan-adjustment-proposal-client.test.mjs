@@ -86,6 +86,44 @@ test('runtime recovery projector satisfies every fixed interaction case', () => 
   }
 })
 
+test('runtime status projector satisfies every fixed presentation case', () => {
+  for (const item of fixture.status_projection_cases) {
+    const actual = interaction.projectProposalStatus(
+      item.server_status,
+      item.local_expiry_state
+    )
+    assert.deepEqual(actual, item.expected, item.case_id)
+  }
+})
+
+test('local expiry is only a conservative guard for pending proposals', () => {
+  const expiry = '2026-08-25T12:00:00Z'
+  assert.equal(
+    interaction.proposalLocalExpiryState(
+      'pending_confirmation',
+      expiry,
+      Date.parse('2026-08-25T11:59:59Z')
+    ),
+    'before'
+  )
+  assert.equal(
+    interaction.proposalLocalExpiryState(
+      'pending_confirmation',
+      expiry,
+      Date.parse(expiry)
+    ),
+    'at_or_after'
+  )
+  assert.equal(
+    interaction.proposalLocalExpiryState(
+      'applied',
+      expiry,
+      Date.parse('2026-08-26T00:00:00Z')
+    ),
+    'irrelevant'
+  )
+})
+
 test('decision journal creates the request id before the first attempt', () => {
   const resolved = interaction.resolveProposalDecisionJournal(
     null,

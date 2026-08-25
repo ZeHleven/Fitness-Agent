@@ -5,6 +5,7 @@ export default defineAppConfig({
     'pages/onboarding/index',
     'pages/plan-builder/index',
     'pages/agent/index',
+    'pages/proposal-detail/index',
     'pages/workouts/index',
     'pages/workout-active/index',
     'pages/history/index'
