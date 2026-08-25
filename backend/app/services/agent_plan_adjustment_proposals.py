@@ -329,7 +329,9 @@ def _plan_snapshot_from_observation(
     return plan_id, snapshot
 
 
-def _plan_snapshot_fingerprint(snapshot: PlanAdjustmentPlanSnapshot) -> str:
+def plan_adjustment_plan_snapshot_fingerprint(
+    snapshot: PlanAdjustmentPlanSnapshot,
+) -> str:
     canonical = json.dumps(
         snapshot.model_dump(mode="json"),
         ensure_ascii=True,
@@ -340,7 +342,7 @@ def _plan_snapshot_fingerprint(snapshot: PlanAdjustmentPlanSnapshot) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _apply_runtime_draft(
+def apply_plan_adjustment_proposal_draft(
     before: PlanAdjustmentPlanSnapshot,
     draft: PlanAdjustmentProposalDraft,
 ) -> PlanAdjustmentPlanSnapshot:
@@ -473,8 +475,8 @@ def build_runtime_plan_adjustment_proposal(
         )
     try:
         plan_id, before = _plan_snapshot_from_observation(plan_observation)
-        after = _apply_runtime_draft(before, parsed_draft)
-        base_fingerprint = _plan_snapshot_fingerprint(before)
+        after = apply_plan_adjustment_proposal_draft(before, parsed_draft)
+        base_fingerprint = plan_adjustment_plan_snapshot_fingerprint(before)
         evidence = _runtime_evidence(
             observations,
             observed_at=created_at,

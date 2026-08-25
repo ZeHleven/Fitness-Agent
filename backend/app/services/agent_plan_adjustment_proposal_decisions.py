@@ -107,7 +107,7 @@ def proposal_business_error_http_status(
     return _ERROR_HTTP_STATUS[code]
 
 
-def _error_result(
+def proposal_business_error_result(
     code: PlanAdjustmentProposalBusinessErrorCode,
     *,
     state_changed: bool = False,
@@ -163,7 +163,7 @@ def _validated_payload(
     return payload
 
 
-def _proposal_decision_response(
+def build_plan_adjustment_proposal_decision_response(
     proposal: AgentProposal,
 ) -> PlanAdjustmentProposalDecisionResponse:
     if proposal.payload_fingerprint is None:
@@ -305,9 +305,9 @@ async def decide_plan_adjustment_proposal(
         for_update=True,
     )
     if proposal is None:
-        return _error_result("proposal_not_found")
+        return proposal_business_error_result("proposal_not_found")
     if not enabled:
-        return _error_result("proposal_feature_disabled")
+        return proposal_business_error_result("proposal_feature_disabled")
 
     if await _request_id_belongs_to_other_proposal(
         db,
@@ -315,7 +315,7 @@ async def decide_plan_adjustment_proposal(
         proposal_id=proposal.id,
         client_request_id=request.client_request_id,
     ):
-        return _error_result("proposal_idempotency_conflict")
+        return proposal_business_error_result("proposal_idempotency_conflict")
 
     same_request_replay = (
         proposal.decision_client_request_id == request.client_request_id
@@ -328,23 +328,26 @@ async def decide_plan_adjustment_proposal(
     if same_request_replay:
         return PlanAdjustmentProposalDecisionServiceResult(
             outcome="replayed",
-            response=_proposal_decision_response(proposal),
+            response=build_plan_adjustment_proposal_decision_response(proposal),
         )
     if proposal.status == "applied" and action == "confirm":
         return PlanAdjustmentProposalDecisionServiceResult(
             outcome="replayed",
-            response=_proposal_decision_response(proposal),
+            response=build_plan_adjustment_proposal_decision_response(proposal),
         )
     if proposal.status != "pending_confirmation":
-        return _error_result("proposal_not_pending")
+        return proposal_business_error_result("proposal_not_pending")
     if request.expected_version != proposal.version:
-        return _error_result("proposal_version_conflict")
+        return proposal_business_error_result("proposal_version_conflict")
     if proposal.expires_at is None or now >= proposal.expires_at:
         proposal.status = "expired"
         proposal.version += 1
         proposal.last_error_code = "proposal_expired"
         await db.flush()
-        return _error_result("proposal_expired", state_changed=True)
+        return proposal_business_error_result(
+            "proposal_expired",
+            state_changed=True,
+        )
 
     if action == "reject":
         proposal.status = "rejected"
@@ -356,7 +359,7 @@ async def decide_plan_adjustment_proposal(
         await db.flush()
         return PlanAdjustmentProposalDecisionServiceResult(
             outcome="completed",
-            response=_proposal_decision_response(proposal),
+            response=build_plan_adjustment_proposal_decision_response(proposal),
             state_changed=True,
         )
 
@@ -367,7 +370,7 @@ async def decide_plan_adjustment_proposal(
         proposal.version += 1
         proposal.last_error_code = "proposal_payload_invalid"
         await db.flush()
-        return _error_result(
+        return proposal_business_error_result(
             "proposal_payload_invalid",
             state_changed=True,
         )
