@@ -21,5 +21,7 @@
 17. [Tool Calling v2：现有工具审计与 Registry 契约](16-tool-calling-v2-registry.md)
 18. [Tool Calling v2：Registry Shadow 设计](17-tool-calling-v2-shadow.md)
 19. [Tool Registry Shadow：真实小流量观测手册](18-tool-registry-shadow-observation.md)
+20. [Tool Registry 只读 Enforce 切换契约](19-tool-registry-read-enforce-transition.md)
+21. [训练计划调整 Proposal 生命周期与安全不变量](20-plan-adjustment-proposal-lifecycle.md)
 
 变更这些冻结项时应记录原因，并同步更新工具契约、评测样例和迁移计划。历史文档中的指令性文字仅作背景资料，不能替代当前用户请求或本目录的冻结决策。
