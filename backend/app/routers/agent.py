@@ -1,7 +1,11 @@
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.database import get_db
 from app.deps import get_current_user
 from app.models.agent import AgentConversation, AgentMessage, AgentRun
@@ -17,7 +21,22 @@ from app.schemas.agent import (
     AgentRunCreateResponse,
     AgentRunResponse,
 )
+from app.schemas.agent_plan_adjustment_proposal_api import (
+    PlanAdjustmentProposalDecisionRequest,
+    PlanAdjustmentProposalDecisionResponse,
+    PlanAdjustmentProposalReadResponse,
+)
 from app.services.agent_jobs import AgentIdempotencyConflict, enqueue_agent_run
+from app.services.agent_plan_adjustment_proposal_decisions import (
+    PlanAdjustmentProposalDecisionServiceResult,
+    decide_plan_adjustment_proposal,
+    proposal_business_error_http_status,
+    proposal_business_error_result,
+    read_owned_plan_adjustment_proposal,
+)
+from app.services.agent_plan_adjustment_proposal_execution import (
+    apply_confirmed_plan_adjustment_atomically,
+)
 from app.services.agent_runtime import run_agent_chat
 
 
@@ -33,6 +52,30 @@ RUN_ERROR_MESSAGES = {
     "legacy_run_interrupted": "旧版同步请求已中断，请重新发送。",
     "migration_superseded_run": "旧版重复请求已结束，请重新发送。",
 }
+
+
+def _proposal_error_response(
+    result: PlanAdjustmentProposalDecisionServiceResult,
+) -> JSONResponse:
+    if result.error is None:
+        raise ValueError("proposal error response requires an error")
+    return JSONResponse(
+        status_code=proposal_business_error_http_status(result.error.code),
+        content=result.error.model_dump(mode="json"),
+    )
+
+
+async def _finish_proposal_decision(
+    db: AsyncSession,
+    result: PlanAdjustmentProposalDecisionServiceResult,
+) -> PlanAdjustmentProposalDecisionResponse | JSONResponse:
+    if result.state_changed:
+        await db.commit()
+    if result.error is not None:
+        return _proposal_error_response(result)
+    if result.response is None:
+        raise ValueError("proposal decision completed without a response")
+    return result.response
 
 
 async def _owned_conversation(
@@ -218,3 +261,68 @@ async def get_agent_run(
         "error_message": RUN_ERROR_MESSAGES.get(run.error_code),
         "poll_after_ms": 800 if run.status in {"queued", "running"} else None,
     })
+
+
+@router.get(
+    "/proposals/{proposal_id}",
+    response_model=PlanAdjustmentProposalReadResponse,
+)
+async def get_plan_adjustment_proposal(
+    proposal_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    response = await read_owned_plan_adjustment_proposal(
+        db,
+        user_id=current_user.id,
+        proposal_id=proposal_id,
+        now=datetime.now(timezone.utc),
+    )
+    if response is None:
+        return _proposal_error_response(
+            proposal_business_error_result("proposal_not_found")
+        )
+    return response
+
+
+@router.post(
+    "/proposals/{proposal_id}/confirm",
+    response_model=PlanAdjustmentProposalDecisionResponse,
+)
+async def confirm_plan_adjustment_proposal(
+    proposal_id: str,
+    body: PlanAdjustmentProposalDecisionRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await apply_confirmed_plan_adjustment_atomically(
+        db,
+        enabled=settings.AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED,
+        user_id=current_user.id,
+        proposal_id=proposal_id,
+        request=body,
+        now=datetime.now(timezone.utc),
+    )
+    return await _finish_proposal_decision(db, result)
+
+
+@router.post(
+    "/proposals/{proposal_id}/reject",
+    response_model=PlanAdjustmentProposalDecisionResponse,
+)
+async def reject_plan_adjustment_proposal(
+    proposal_id: str,
+    body: PlanAdjustmentProposalDecisionRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await decide_plan_adjustment_proposal(
+        db,
+        enabled=settings.AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED,
+        user_id=current_user.id,
+        proposal_id=proposal_id,
+        action="reject",
+        request=body,
+        now=datetime.now(timezone.utc),
+    )
+    return await _finish_proposal_decision(db, result)
