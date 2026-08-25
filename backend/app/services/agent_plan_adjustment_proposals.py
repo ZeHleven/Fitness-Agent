@@ -436,6 +436,12 @@ def build_runtime_plan_adjustment_proposal(
     """Build a server-owned full payload from one compact Finalizer draft."""
 
     parsed_draft: PlanAdjustmentProposalDraft | None = None
+    expects_draft = (
+        feature_enabled
+        and selected_outcome == "adjustment_proposal"
+        and terminal_action == "proposal"
+    )
+    draft_rejection_reason: PlanAdjustmentProposalCreationReasonCode | None = None
     if feature_enabled and isinstance(proposal_draft, Mapping):
         try:
             parsed_draft = PlanAdjustmentProposalDraft.model_validate(
@@ -443,6 +449,10 @@ def build_runtime_plan_adjustment_proposal(
             )
         except ValidationError:
             parsed_draft = None
+            if expects_draft:
+                draft_rejection_reason = "proposal_draft_schema_invalid"
+    elif expects_draft:
+        draft_rejection_reason = "proposal_draft_missing"
 
     proposal_type = (
         parsed_draft.proposal_type if parsed_draft is not None else ""
@@ -465,8 +475,17 @@ def build_runtime_plan_adjustment_proposal(
         proposal_type=proposal_type,
         requested_ttl_hours=requested_ttl_hours,
     )
-    if not decision.eligible or parsed_draft is None:
+    if not decision.eligible:
+        if (
+            decision.reason_code == "proposal_draft_invalid"
+            and draft_rejection_reason is not None
+        ):
+            decision = _rejected(draft_rejection_reason)
         return RuntimePlanAdjustmentProposalBuildResult(decision=decision)
+    if parsed_draft is None:  # pragma: no cover - gate/draft parity
+        return RuntimePlanAdjustmentProposalBuildResult(
+            decision=_rejected("proposal_draft_invalid")
+        )
 
     plan_observation = _active_plan_observation(observations)
     if plan_observation is None:  # pragma: no cover - decision parity
@@ -475,7 +494,17 @@ def build_runtime_plan_adjustment_proposal(
         )
     try:
         plan_id, before = _plan_snapshot_from_observation(plan_observation)
+    except (KeyError, ValidationError, TypeError, ValueError):
+        return RuntimePlanAdjustmentProposalBuildResult(
+            decision=_rejected("proposal_candidate_build_invalid")
+        )
+    try:
         after = apply_plan_adjustment_proposal_draft(before, parsed_draft)
+    except (ValidationError, TypeError, ValueError):
+        return RuntimePlanAdjustmentProposalBuildResult(
+            decision=_rejected("proposal_target_mismatch")
+        )
+    try:
         base_fingerprint = plan_adjustment_plan_snapshot_fingerprint(before)
         evidence = _runtime_evidence(
             observations,
@@ -511,7 +540,7 @@ def build_runtime_plan_adjustment_proposal(
         ValueError,
     ):
         return RuntimePlanAdjustmentProposalBuildResult(
-            decision=_rejected("proposal_draft_invalid")
+            decision=_rejected("proposal_candidate_build_invalid")
         )
     return RuntimePlanAdjustmentProposalBuildResult(
         decision=decision,

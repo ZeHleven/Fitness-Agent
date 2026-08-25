@@ -307,6 +307,68 @@ def test_runtime_builder_derives_full_snapshots_target_and_evidence():
     }
 
 
+@pytest.mark.parametrize(
+    ("failure_stage", "expected_reason"),
+    [
+        ("missing", "proposal_draft_missing"),
+        ("schema", "proposal_draft_schema_invalid"),
+        ("target", "proposal_target_mismatch"),
+        ("candidate", "proposal_candidate_build_invalid"),
+    ],
+)
+def test_runtime_builder_reports_privacy_safe_stage_specific_reasons(
+    failure_stage,
+    expected_reason,
+):
+    observations = _runtime_observations()
+    draft = _runtime_draft()
+    if failure_stage == "missing":
+        draft = None
+    elif failure_stage == "schema":
+        draft["changes"] = []
+    elif failure_stage == "target":
+        draft["changes"][0]["stable_display_key"] = "private-unknown-slot"
+    else:
+        del observations[0]["result"]["plan"]["exercises"][0][
+            "exercise_name"
+        ]
+
+    result = build_runtime_plan_adjustment_proposal(
+        feature_enabled=True,
+        run_owned=True,
+        selected_outcome="adjustment_proposal",
+        terminal_action="proposal",
+        intent_allows_adjustment=True,
+        risk_level="low",
+        clarification_required=False,
+        observations=observations,
+        proposal_draft=draft,
+        created_at=_CREATED_AT,
+    )
+
+    assert result.built is None
+    assert result.decision.reason_code == expected_reason
+    assert "private-unknown-slot" not in str(result.decision)
+
+
+def test_runtime_builder_does_not_require_draft_for_nonproposal_outcome():
+    result = build_runtime_plan_adjustment_proposal(
+        feature_enabled=True,
+        run_owned=True,
+        selected_outcome="informational_answer",
+        terminal_action="answer",
+        intent_allows_adjustment=True,
+        risk_level="low",
+        clarification_required=False,
+        observations=_runtime_observations(),
+        proposal_draft=None,
+        created_at=_CREATED_AT,
+    )
+
+    assert result.built is None
+    assert result.decision.reason_code == "outcome_not_adjustment_proposal"
+
+
 @pytest.mark.parametrize("unsafe_change", ["replacement", "frequency"])
 def test_runtime_builder_rejects_changes_outside_the_first_cohort(
     unsafe_change,
@@ -340,4 +402,4 @@ def test_runtime_builder_rejects_changes_outside_the_first_cohort(
     )
 
     assert result.built is None
-    assert result.decision.reason_code == "proposal_draft_invalid"
+    assert result.decision.reason_code == "proposal_target_mismatch"

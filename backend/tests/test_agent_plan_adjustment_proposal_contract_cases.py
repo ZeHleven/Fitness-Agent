@@ -98,7 +98,7 @@ _PAYLOAD_ERROR_CODES = {
     "invalid_plan_bounds",
     "invalid_target",
 }
-_CREATION_REASON_CODES = {
+_CREATION_GATE_REASON_CODES = {
     "feature_disabled",
     "run_ownership_lost",
     "health_red_flag",
@@ -530,7 +530,7 @@ def test_creation_gate_cases_define_every_rejection_reason_and_ttl_boundary():
         case["expected"]["reason_code"]
         for case in cases
         if case["expected"]["reason_code"] is not None
-    } == _CREATION_REASON_CODES
+    } == _CREATION_GATE_REASON_CODES
     assert {
         case["expected"]["ttl_hours"]
         for case in cases

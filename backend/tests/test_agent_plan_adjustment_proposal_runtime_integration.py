@@ -565,7 +565,7 @@ async def test_flag_on_invalid_draft_keeps_text_response_without_proposal(
     assert run_response.json()["execution_trace"]["trace_version"] == "1.2"
     assert run_response.json()["execution_trace"]["proposal_creation"] == {
         "eligible": False,
-        "reason_code": "proposal_draft_invalid",
+        "reason_code": "proposal_target_mismatch",
         "persisted": False,
         "persistence_status": "not_attempted",
         "persistence_reason_code": None,
