@@ -6,6 +6,14 @@ import re
 from pathlib import Path
 from typing import Any
 
+import pytest
+from pydantic import ValidationError
+
+from app.schemas.agent_plan_adjustment_proposal import (
+    PlanAdjustmentProposalPayload,
+    plan_adjustment_proposal_payload_error_codes,
+)
+
 
 _CASES_PATH = (
     Path(__file__).parent
@@ -481,6 +489,32 @@ def test_payload_cases_define_strict_schema_and_safety_failures():
         for case in fixture["payload_cases"]
         for code in case["expected_error_codes"]
     } == _PAYLOAD_ERROR_CODES
+
+
+def test_payload_schema_matches_every_fixed_contract_case():
+    fixture = _load_fixture()
+    canonical_payloads = fixture["canonical_payloads"]
+
+    for case in fixture["payload_cases"]:
+        payload = _apply_mutations(
+            canonical_payloads[case["base_payload"]],
+            case["mutations"],
+        )
+        assert list(plan_adjustment_proposal_payload_error_codes(payload)) == (
+            case["expected_error_codes"]
+        )
+
+
+def test_canonical_payload_schemas_are_strict_immutable_and_json_safe():
+    for payload in _load_fixture()["canonical_payloads"].values():
+        validated = PlanAdjustmentProposalPayload.model_validate(payload)
+
+        assert validated.model_dump(mode="json", exclude_unset=True) == payload
+        assert validated.target.resource_type == "workout_plan"
+        assert validated.proposal_type == "plan_adjustment_v1"
+        assert validated.before != validated.after
+        with pytest.raises(ValidationError, match="Instance is frozen"):
+            validated.proposal_type = "plan_adjustment_v1"
 
 
 def test_creation_gate_cases_define_every_rejection_reason_and_ttl_boundary():
