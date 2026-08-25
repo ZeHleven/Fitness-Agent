@@ -1,7 +1,8 @@
 # Tool Calling v2：Registry 只读 Enforce 切换契约
 
-状态：只读 enforce 已在默认关闭开关后接线，固定行为一致性与回退测试已定义，尚未启用，
-2026-08-24。
+状态：只读 enforce 已在默认关闭开关后接线；固定行为一致性、回退测试及内部 `0.5.7`
+真实模型 30 Run 门禁均已通过。该结论只关闭内部只读 enforce 验证，不授权生产放量或写工具，
+2026-08-25。
 
 ## 决策
 
@@ -10,8 +11,8 @@
 
 运行时先保留 v1 路由供 shadow 比较，再把 Registry 本轮候选与 v1 allowlist、显式只读 cohort
 取交集。有效结果统一进入 Trace、direct、planned、并行与条件替代的既有下游路径；不改变
-Planner Prompt、工具实现或数据库访问。`AGENT_TOOL_REGISTRY_ENFORCE_READS_ENABLED` 在独立
-行为一致性和内部真实模型评测通过前必须保持 `false`。
+Planner Prompt、工具实现或数据库访问。`AGENT_TOOL_REGISTRY_ENFORCE_READS_ENABLED` 只在
+受控内部观测 revision 中开启；生产及未单独批准的环境继续保持 `false`。
 
 ## 已通过的内部门禁
 
@@ -62,6 +63,42 @@ trace；另有 1 次进度备用场景在首次工具前命中 20 秒 Executor d
 模型计划保守归一为两动作 `parallel_read`，进度失败后才调用历史；Planner、Executor 或
 Replanner deadline 后若 Finalizer 再失败，则固定安全收口而不再升级为同步 503。上述修复仍需
 部署新内部版本并重跑 3+3 canary 与 30 Run，不能用本地测试结果替代真实模型门禁。
+
+### 0.5.7 内部 30 Run 最终结论
+
+部署 `0.5.7`（CloudBase deployment `016`）后，观测器沿用与小程序一致的 durable Run 创建与
+轮询生命周期，在 100% shadow、100% enforce reads 的受控内部配置下完成最终 30 Run：
+
+| 指标 | 结果 | 门禁结论 |
+| --- | ---: | --- |
+| attempted / completed / run ID | 30 / 30 / 30 | 全部 Run 可追踪并进入终态 |
+| business gate / business failures | passed / 0 | 业务门禁通过 |
+| shadow match / 合法 partial | 20 / 10 | partial 仅来自未到达全部接点的 direct、澄清或安全停止 |
+| shadow mismatch / error | 0 / 0 | 无 Registry 行为差异 |
+| Executor deadline | 0 | `0.5.6` 的执行前超时未复现 |
+| Planner 调用 / deadline fallback | 20 / 14 | 安全降级完成，作为独立性能遗留 |
+
+authority 结论采用连续两个窗口的组合证据：`0.5.6` 已记录 30/30 `authority_mode=enforce`，且无
+拒绝、权限扩张、工具数漂移或 legacy 回退；`0.5.7` 在相同受控开关配置下补齐 durable 请求
+生命周期，30/30 业务完成且已执行 shadow check 全部匹配。没有证据表明 Registry enforce 导致
+完成率下降、权限变化或调用预算漂移，因此内部只读 enforce 门禁通过，本阶段可以收口。
+
+该结论不继承到生产流量、写工具、proposal/execute、freshness、跨 run 复用或缓存；这些能力仍
+必须另立契约、门禁与回滚方案。
+
+### 两个非阻塞遗留
+
+1. **窗口外 `403` 请求来源**：最终窗口后观察到 11 次 `403`，涉及 10 个唯一 Run ID。现场鉴权
+   探针确认缺少或不可解析的 Bearer 在 `HTTPBearer` 层返回 `403`，无效或过期 Bearer 返回
+   `401`；因此这不是 Registry 拒绝或 token 过期，也没有形成越权。主观测器始终复用认证 header
+   且同步退出，后端没有自调用该 Run 查询端点；现有 CloudBase 访问日志缺少请求 ID、客户端类别
+   和安全的鉴权状态字段，尚不能唯一归因迟发客户端。该项转入独立的请求来源与鉴权可观测性任务，
+   不阻塞内部只读 enforce 收口。
+2. **Planner deadline fallback 比例**：20 次 Planner 调用中 14 次在 15,001 至 15,003 ms 命中
+   15 秒 Controller deadline；所有 Run 随后通过受限 fallback 完成，工具批次不是主要耗时，且
+   Registry shadow/authority 未出现差异。这是既有 Planner 延迟与分段遥测缺口，不是 Registry
+   回归。后续应在独立性能任务中记录请求次数、响应头等待、生成/解析与取消阶段，再决定是否调整
+   prompt、重试或 deadline；不得用本批 30 个场景直接调参。
 
 ## 切换状态
 
@@ -164,4 +201,4 @@ AGENT_TOOL_REGISTRY_ENFORCE_READS_ENABLED=false
 2. `feat: add registry read authority selector`（已完成，纯函数未接运行时）
 3. `feat: enable optional registry read enforcement`（已完成，默认关闭）
 4. `test: verify registry read enforcement parity and rollback`（已完成）
-5. 内部 100% enforce reads 真实模型观测；通过后再讨论更大范围。
+5. 内部 100% enforce reads 真实模型观测（已由 `0.5.7` 30 Run 完成并通过）；更大范围另立决策。
