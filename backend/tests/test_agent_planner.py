@@ -11,6 +11,7 @@ from app.schemas.agent_planning import (
     MicroPlanStep,
     ModelInvocationMetrics,
     PlannedToolAction,
+    ProposalFinalizationDecision,
 )
 from app.services.agent_planner import (
     ModelPlanningPolicy,
@@ -269,6 +270,41 @@ async def test_finalizer_maps_semantic_outcome_to_terminal_action():
         output_tokens=40,
         finish_reason="stop",
     )
+
+
+@pytest.mark.asyncio
+async def test_enabled_proposal_finalizer_uses_opt_in_draft_schema():
+    draft = {
+        "proposal_type": "plan_adjustment_v1",
+        "changes": [{
+            "change_type": "adjust_exercise_target",
+            "stable_display_key": "day-1-order-0",
+            "before": {"sets": 4},
+            "after": {"sets": 3},
+            "reason": "降低单次训练量。",
+            "safety_priority": False,
+        }],
+        "rationale": ["提高连续完成概率。"],
+        "safety_notes": [],
+    }
+    model = FakeStructuredModel(ProposalFinalizationDecision(
+        outcome="adjustment_proposal",
+        reply="建议减少一组；这是待确认提案。",
+        proposal_draft=draft,
+    ))
+    policy = ModelPlanningPolicy(model)
+
+    response = await policy.finalize(
+        goal="判断计划是否需要调整",
+        steps=[],
+        observations=[],
+        allowed_outcomes=["adjustment_proposal", "insufficient_evidence"],
+        proposal_creation_enabled=True,
+    )
+
+    assert model.schema is ProposalFinalizationDecision
+    assert response.proposal_draft == draft
+    assert "proposal_draft" in model.runnable.messages[0]["content"]
 
 
 @pytest.mark.asyncio

@@ -3,7 +3,14 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    ValidationError,
+    model_validator,
+)
 
 
 PlanAdjustmentProposalPayloadErrorCode = Literal[
@@ -130,6 +137,21 @@ class PlanAdjustmentExerciseTargetValues(_StrictFrozenModel):
         le=1000,
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def reject_boolean_numbers(cls, value: Any) -> Any:
+        if isinstance(value, dict) and any(
+            isinstance(value.get(field_name), bool)
+            for field_name in (
+                "sets",
+                "rest_seconds",
+                "recommended_weight_kg",
+            )
+            if field_name in value
+        ):
+            raise ValueError("target numeric values cannot be booleans")
+        return value
+
     @model_validator(mode="after")
     def validate_explicit_values(self) -> Self:
         if not self.model_fields_set:
@@ -152,6 +174,17 @@ class PlanAdjustmentExerciseIdentity(_StrictFrozenModel):
 class PlanAdjustmentScheduleValues(_StrictFrozenModel):
     duration_weeks: int | None = Field(default=None, ge=2, le=12)
     days_per_week: int | None = Field(default=None, ge=1, le=7)
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_boolean_numbers(cls, value: Any) -> Any:
+        if isinstance(value, dict) and any(
+            isinstance(value.get(field_name), bool)
+            for field_name in ("duration_weeks", "days_per_week")
+            if field_name in value
+        ):
+            raise ValueError("schedule numeric values cannot be booleans")
+        return value
 
     @model_validator(mode="after")
     def validate_explicit_values(self) -> Self:
@@ -244,6 +277,27 @@ PlanAdjustmentExplanation = Annotated[
     str,
     Field(min_length=1, max_length=1000),
 ]
+
+
+class PlanAdjustmentProposalDraft(_StrictFrozenModel):
+    """Untrusted compact Finalizer draft; the server builds full snapshots."""
+
+    proposal_type: Literal["plan_adjustment_v1"]
+    changes: tuple[PlanAdjustmentChange, ...] = Field(
+        min_length=1,
+        max_length=12,
+    )
+    rationale: tuple[PlanAdjustmentExplanation, ...] = Field(
+        min_length=1,
+        max_length=12,
+    )
+    safety_notes: tuple[PlanAdjustmentExplanation, ...] = Field(
+        max_length=12,
+    )
+    requested_ttl_hours: Annotated[
+        StrictInt,
+        Field(ge=1, le=72),
+    ] | None = None
 
 
 class PlanAdjustmentProposalPayload(_StrictFrozenModel):

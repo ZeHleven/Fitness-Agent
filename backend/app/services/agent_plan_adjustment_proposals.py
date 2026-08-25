@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
+from dataclasses import dataclass
 from collections.abc import Mapping
 from datetime import datetime, timedelta
 from typing import Any
@@ -13,11 +15,18 @@ from pydantic import ValidationError
 from app.schemas.agent_plan_adjustment_proposal import (
     PlanAdjustmentProposalCreationDecision,
     PlanAdjustmentProposalCreationReasonCode,
+    PlanAdjustmentProposalDraft,
+    PlanAdjustmentProposalEvidence,
+    PlanAdjustmentPlanSnapshot,
     PlanAdjustmentProposalPayload,
     PlanAdjustmentProposalPayloadErrorCode,
+    PlanAdjustmentExerciseReplacementChange,
+    PlanAdjustmentExerciseTargetChange,
+    PlanAdjustmentScheduleChange,
     ValidatedPlanAdjustmentProposal,
     plan_adjustment_proposal_payload_error_codes,
 )
+from app.services.agent_trace import observation_fingerprint
 
 
 PLAN_ADJUSTMENT_SUPPORTING_EVIDENCE_TOOL_IDS = frozenset({
@@ -44,6 +53,12 @@ class PlanAdjustmentProposalPayloadRejected(ValueError):
     ) -> None:
         self.error_codes = error_codes
         super().__init__(",".join(error_codes))
+
+
+@dataclass(frozen=True)
+class RuntimePlanAdjustmentProposalBuildResult:
+    decision: PlanAdjustmentProposalCreationDecision
+    built: ValidatedPlanAdjustmentProposal | None = None
 
 
 def _rejected(
@@ -229,4 +244,274 @@ def build_validated_plan_adjustment_proposal(
         payload_fingerprint=plan_adjustment_proposal_payload_fingerprint(
             payload
         ),
+    )
+
+
+def _active_plan_observation(
+    observations: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    for observation in reversed(observations):
+        result = observation.get("result")
+        if (
+            observation.get("tool_id") == "plan.get_active"
+            and observation.get("status") == "success"
+            and isinstance(result, dict)
+            and result.get("found") is True
+            and isinstance(result.get("plan"), dict)
+        ):
+            return observation
+    return None
+
+
+def _runtime_evidence_state(
+    observations: list[dict[str, Any]],
+) -> str:
+    if _active_plan_observation(observations) is None:
+        return "plan_missing"
+    if not any(
+        observation.get("tool_id")
+        in PLAN_ADJUSTMENT_SUPPORTING_EVIDENCE_TOOL_IDS
+        and observation.get("status") == "success"
+        and isinstance(observation.get("result"), dict)
+        for observation in observations
+    ):
+        return "supporting_missing"
+    return "complete"
+
+
+def _plan_snapshot_from_observation(
+    observation: dict[str, Any],
+) -> tuple[str, PlanAdjustmentPlanSnapshot]:
+    result = observation["result"]
+    plan = result["plan"]
+    plan_id = plan.get("id")
+    if not isinstance(plan_id, str) or not plan_id:
+        raise ValueError("active plan observation has no stable plan id")
+    exercises = plan.get("exercises")
+    if not isinstance(exercises, list) or not exercises:
+        raise ValueError("active plan observation has no exercises")
+
+    normalized_exercises: list[dict[str, Any]] = []
+    for item in exercises:
+        if not isinstance(item, dict):
+            raise ValueError("active plan exercise is not an object")
+        day_of_week = item.get("day_of_week")
+        order_index = item.get("order_index")
+        exercise_name = item.get("exercise_name")
+        if (
+            not isinstance(day_of_week, int)
+            or isinstance(day_of_week, bool)
+            or not isinstance(order_index, int)
+            or isinstance(order_index, bool)
+            or not isinstance(exercise_name, str)
+            or not exercise_name
+        ):
+            raise ValueError("active plan exercise identity is incomplete")
+        normalized_exercises.append({
+            "slot_key": f"day-{day_of_week}-order-{order_index}",
+            "exercise_id": item.get("exercise_id"),
+            "exercise_name": exercise_name,
+            "day_of_week": day_of_week,
+            "sets": item.get("sets"),
+            "reps": item.get("reps"),
+            "rest_seconds": item.get("rest_seconds"),
+            "recommended_weight_kg": item.get("recommended_weight_kg"),
+            "order_index": order_index,
+        })
+
+    snapshot = PlanAdjustmentPlanSnapshot.model_validate({
+        "name": plan.get("name"),
+        "goal": plan.get("goal"),
+        "duration_weeks": plan.get("duration_weeks"),
+        "days_per_week": plan.get("days_per_week"),
+        "exercises": normalized_exercises,
+    })
+    return plan_id, snapshot
+
+
+def _plan_snapshot_fingerprint(snapshot: PlanAdjustmentPlanSnapshot) -> str:
+    canonical = json.dumps(
+        snapshot.model_dump(mode="json"),
+        ensure_ascii=True,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _apply_runtime_draft(
+    before: PlanAdjustmentPlanSnapshot,
+    draft: PlanAdjustmentProposalDraft,
+) -> PlanAdjustmentPlanSnapshot:
+    after_data = deepcopy(before.model_dump(mode="python"))
+    exercises_by_slot = {
+        item["slot_key"]: item for item in after_data["exercises"]
+    }
+    seen_changes: set[tuple[str, str]] = set()
+
+    for change in draft.changes:
+        change_key = (change.change_type, change.stable_display_key)
+        if change_key in seen_changes:
+            raise ValueError("proposal draft repeats a change target")
+        seen_changes.add(change_key)
+
+        if isinstance(change, PlanAdjustmentExerciseReplacementChange):
+            raise ValueError("exercise replacement is outside the first cohort")
+        if isinstance(change, PlanAdjustmentScheduleChange):
+            changed_fields = change.before.model_fields_set
+            if "days_per_week" in changed_fields:
+                raise ValueError("schedule frequency changes require a later cohort")
+            for field_name in changed_fields:
+                if after_data[field_name] != getattr(change.before, field_name):
+                    raise ValueError("schedule draft does not match active plan")
+                after_data[field_name] = getattr(change.after, field_name)
+            continue
+        if not isinstance(change, PlanAdjustmentExerciseTargetChange):
+            raise ValueError("proposal draft change type is unsupported")
+
+        exercise = exercises_by_slot.get(change.stable_display_key)
+        if exercise is None:
+            raise ValueError("proposal draft target is not in active plan")
+        for field_name in change.before.model_fields_set:
+            if exercise[field_name] != getattr(change.before, field_name):
+                raise ValueError("proposal draft before value is stale")
+            exercise[field_name] = getattr(change.after, field_name)
+
+    after = PlanAdjustmentPlanSnapshot.model_validate(after_data)
+    if after == before:
+        raise ValueError("proposal draft has no effect")
+    return after
+
+
+def _runtime_evidence(
+    observations: list[dict[str, Any]],
+    *,
+    observed_at: datetime,
+) -> tuple[PlanAdjustmentProposalEvidence, ...]:
+    evidence: list[PlanAdjustmentProposalEvidence] = []
+    seen: set[tuple[str, str]] = set()
+    for observation in observations:
+        tool_id = observation.get("tool_id")
+        result = observation.get("result")
+        if (
+            observation.get("status") != "success"
+            or not isinstance(tool_id, str)
+            or tool_id
+            not in (
+                PLAN_ADJUSTMENT_SUPPORTING_EVIDENCE_TOOL_IDS
+                | {"plan.get_active"}
+            )
+            or not isinstance(result, dict)
+        ):
+            continue
+        result_fingerprint = observation_fingerprint(result)
+        evidence_key = (tool_id, result_fingerprint)
+        if evidence_key in seen:
+            continue
+        seen.add(evidence_key)
+        evidence.append(PlanAdjustmentProposalEvidence(
+            tool_id=tool_id,
+            result_fingerprint=result_fingerprint,
+            observed_at=observed_at,
+        ))
+    return tuple(evidence)
+
+
+def build_runtime_plan_adjustment_proposal(
+    *,
+    feature_enabled: bool,
+    run_owned: bool,
+    selected_outcome: str,
+    terminal_action: str,
+    intent_allows_adjustment: bool,
+    risk_level: str,
+    clarification_required: bool,
+    observations: list[dict[str, Any]],
+    proposal_draft: Mapping[str, Any] | None,
+    created_at: datetime,
+) -> RuntimePlanAdjustmentProposalBuildResult:
+    """Build a server-owned full payload from one compact Finalizer draft."""
+
+    parsed_draft: PlanAdjustmentProposalDraft | None = None
+    if feature_enabled and isinstance(proposal_draft, Mapping):
+        try:
+            parsed_draft = PlanAdjustmentProposalDraft.model_validate(
+                dict(proposal_draft)
+            )
+        except ValidationError:
+            parsed_draft = None
+
+    proposal_type = (
+        parsed_draft.proposal_type if parsed_draft is not None else ""
+    )
+    requested_ttl_hours = (
+        parsed_draft.requested_ttl_hours
+        if parsed_draft is not None
+        else None
+    )
+    decision = evaluate_plan_adjustment_proposal_creation(
+        feature_enabled=feature_enabled,
+        run_owned=run_owned,
+        selected_outcome=selected_outcome,
+        terminal_action=terminal_action,
+        intent_allows_adjustment=intent_allows_adjustment,
+        risk_level=risk_level,
+        clarification_required=clarification_required,
+        evidence_state=_runtime_evidence_state(observations),
+        draft_state="valid" if parsed_draft is not None else "invalid",
+        proposal_type=proposal_type,
+        requested_ttl_hours=requested_ttl_hours,
+    )
+    if not decision.eligible or parsed_draft is None:
+        return RuntimePlanAdjustmentProposalBuildResult(decision=decision)
+
+    plan_observation = _active_plan_observation(observations)
+    if plan_observation is None:  # pragma: no cover - decision parity
+        return RuntimePlanAdjustmentProposalBuildResult(
+            decision=_rejected("plan_evidence_missing")
+        )
+    try:
+        plan_id, before = _plan_snapshot_from_observation(plan_observation)
+        after = _apply_runtime_draft(before, parsed_draft)
+        base_fingerprint = _plan_snapshot_fingerprint(before)
+        evidence = _runtime_evidence(
+            observations,
+            observed_at=created_at,
+        )
+        payload = PlanAdjustmentProposalPayload(
+            schema_version="1.0.0",
+            proposal_type=parsed_draft.proposal_type,
+            target={
+                "resource_type": "workout_plan",
+                "base_plan_id": plan_id,
+                "base_plan_fingerprint": base_fingerprint,
+            },
+            before=before,
+            after=after,
+            changes=parsed_draft.changes,
+            evidence=evidence,
+            rationale=parsed_draft.rationale,
+            safety_notes=parsed_draft.safety_notes,
+        )
+        built = build_validated_plan_adjustment_proposal(
+            decision=decision,
+            payload_data=payload,
+            expected_base_plan_id=plan_id,
+            expected_base_plan_fingerprint=base_fingerprint,
+            created_at=created_at,
+        )
+    except (
+        PlanAdjustmentProposalCreationRejected,
+        PlanAdjustmentProposalPayloadRejected,
+        ValidationError,
+        TypeError,
+        ValueError,
+    ):
+        return RuntimePlanAdjustmentProposalBuildResult(
+            decision=_rejected("proposal_draft_invalid")
+        )
+    return RuntimePlanAdjustmentProposalBuildResult(
+        decision=decision,
+        built=built,
     )

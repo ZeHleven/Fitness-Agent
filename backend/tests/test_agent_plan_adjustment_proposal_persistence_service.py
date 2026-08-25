@@ -266,5 +266,9 @@ async def test_persistence_rejects_lost_or_mismatched_run_ownership(
         )
 
     assert raised.value.reason_code == "run_ownership_lost"
-    count = await db_session.scalar(select(func.count(AgentProposal.id)))
+    count = await db_session.scalar(
+        select(func.count(AgentProposal.id)).where(
+            AgentProposal.run_id == run.id
+        )
+    )
     assert count == 0

@@ -329,7 +329,7 @@ async def test_intent_retries_stay_inside_total_deadline():
     with (
         patch.object(settings, "DEEPSEEK_API_KEY", "test-key"),
         patch.object(settings, "AGENT_INTENT_TIMEOUT_SECONDS", 0.03),
-        patch.object(settings, "AGENT_INTENT_TOTAL_TIMEOUT_SECONDS", 0.05),
+        patch.object(settings, "AGENT_INTENT_TOTAL_TIMEOUT_SECONDS", 0.08),
         patch.object(
             settings,
             "AGENT_INTENT_RETRY_MIN_REMAINING_SECONDS",

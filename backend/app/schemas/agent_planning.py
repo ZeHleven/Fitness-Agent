@@ -158,6 +158,7 @@ class FinalResponse(BaseModel):
     terminal_action: Literal["answer", "proposal"]
     reply: str = Field(min_length=1, max_length=8000)
     outcome: FinalizationOutcome | None = None
+    proposal_draft: dict[str, Any] | None = Field(default=None, exclude=True)
     invocation_metrics: ModelInvocationMetrics | None = Field(
         default=None,
         exclude=True,
@@ -171,3 +172,9 @@ class FinalizationDecision(BaseModel):
 
     outcome: FinalizationOutcome
     reply: str = Field(min_length=1, max_length=8000)
+
+
+class ProposalFinalizationDecision(FinalizationDecision):
+    """Opt-in Finalizer shape used only while proposal creation is enabled."""
+
+    proposal_draft: dict[str, Any] | None = None

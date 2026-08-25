@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
 from app.schemas.agent_trace import AgentExecutionTrace, ExecutionMode
 
@@ -33,11 +33,28 @@ class AgentCard(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
 
 
+class AgentProposalReference(BaseModel):
+    id: str
+    proposal_type: Literal["plan_adjustment_v1"]
+    status: Literal["pending_confirmation"]
+    version: int = Field(ge=1)
+    expires_at: datetime
+    payload_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class AgentChatResponse(BaseModel):
     reply: str
     conversation_id: str
     run_id: str
     cards: list[AgentCard] = Field(default_factory=list)
+    proposal: AgentProposalReference | None = None
+
+    @model_serializer(mode="wrap")
+    def omit_absent_optional_proposal(self, handler):
+        data = handler(self)
+        if self.proposal is None:
+            data.pop("proposal", None)
+        return data
 
 
 class AgentConversationResponse(BaseModel):
@@ -88,6 +105,7 @@ class AgentRunResponse(BaseModel):
     error_message: str | None = None
     reply: str | None = None
     cards: list[AgentCard] = Field(default_factory=list)
+    proposal: AgentProposalReference | None = None
     poll_after_ms: int | None = None
     queued_at: datetime
     processing_started_at: datetime | None
@@ -95,3 +113,10 @@ class AgentRunResponse(BaseModel):
     started_at: datetime
     completed_at: datetime | None
     model_config = {"from_attributes": True}
+
+    @model_serializer(mode="wrap")
+    def omit_absent_optional_proposal(self, handler):
+        data = handler(self)
+        if self.proposal is None:
+            data.pop("proposal", None)
+        return data

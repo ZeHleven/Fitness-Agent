@@ -21,6 +21,7 @@ from app.models.agent import (
     AgentRun,
     AgentToolCall,
 )
+from app.schemas.agent import AgentProposalReference
 from app.schemas.agent_trace import AgentExecutionTrace
 from app.services.agent_controller import (
     ToolAuditEvent,
@@ -28,6 +29,12 @@ from app.services.agent_controller import (
 )
 from app.services.agent_intent import IntentResolution, route_tools
 from app.services.agent_intent_model import resolve_intent_with_fallback
+from app.services.agent_plan_adjustment_proposal_persistence import (
+    persist_optional_plan_adjustment_proposal,
+)
+from app.services.agent_plan_adjustment_proposals import (
+    build_runtime_plan_adjustment_proposal,
+)
 from app.services.agent_structured_errors import safe_error_category
 from app.services.agent_tool_registry_shadow_metric_adapter import (
     emit_registry_shadow_metrics,
@@ -74,10 +81,33 @@ class AgentRuntimeResult:
     run_id: str
     cards: list[dict[str, Any]] = field(default_factory=list)
     execution_trace: AgentExecutionTrace | None = None
+    proposal: AgentProposalReference | None = None
 
 
 class AgentRunOwnershipLost(RuntimeError):
     """Raised when a stale worker attempt tries to persist a run result."""
+
+
+def _proposal_reference_from_data(
+    value: Any,
+) -> AgentProposalReference | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        return AgentProposalReference.model_validate(value)
+    except ValueError:
+        return None
+
+
+def _proposal_reference_from_model(proposal: Any) -> AgentProposalReference:
+    return AgentProposalReference(
+        id=proposal.id,
+        proposal_type=proposal.proposal_type,
+        status=proposal.status,
+        version=proposal.version,
+        expires_at=proposal.expires_at,
+        payload_fingerprint=proposal.payload_fingerprint,
+    )
 
 
 def _finalize_registry_shadow_trace(
@@ -491,6 +521,9 @@ async def execute_agent_run(
         )
         if existing is not None:
             cards = existing.content_data.get("cards", [])
+            proposal_reference = _proposal_reference_from_data(
+                existing.content_data.get("proposal")
+            )
             if run.execution_trace:
                 execution_trace = AgentExecutionTrace.model_validate(
                     run.execution_trace
@@ -509,6 +542,7 @@ async def execute_agent_run(
                 run_id=run.id,
                 cards=cards if isinstance(cards, list) else [],
                 execution_trace=execution_trace,
+                proposal=proposal_reference,
             )
 
         shadow_session = create_registry_shadow_session(
@@ -714,6 +748,9 @@ async def execute_agent_run(
                 event_sink=persist_planned_event,
                 parallel_tool_invoker=invoke_parallel_read_tool,
                 shadow_session=shadow_session,
+                proposal_creation_enabled=(
+                    settings.AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED
+                ),
             )
             execution_trace = planned_result.execution_trace
             execution_trace = _finalize_registry_shadow_trace(
@@ -749,17 +786,69 @@ async def execute_agent_run(
                 run.risk_level = "high"
                 conversation.pending_clarification = {}
 
+            proposal_reference: AgentProposalReference | None = None
+            runtime_proposal = None
+            if settings.AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED:
+                runtime_proposal = build_runtime_plan_adjustment_proposal(
+                    feature_enabled=True,
+                    run_owned=True,
+                    selected_outcome=(
+                        execution_trace.finalization_contract.selected_outcome
+                        if execution_trace.finalization_contract is not None
+                        and execution_trace.finalization_contract.selected_outcome
+                        is not None
+                        else ""
+                    ),
+                    terminal_action=execution_trace.terminal_action or "",
+                    intent_allows_adjustment=(
+                        execution_trace.finalization_contract is not None
+                        and "adjustment_proposal"
+                        in execution_trace.finalization_contract.allowed_outcomes
+                    ),
+                    risk_level=run.risk_level,
+                    clarification_required=run.clarification_required,
+                    observations=planned_result.proposal_observations,
+                    proposal_draft=planned_result.proposal_draft,
+                    created_at=datetime.now(timezone.utc),
+                )
             await _lock_run_ownership(
                 db,
                 run_id=run.id,
                 expected_attempt_count=expected_attempt_count,
             )
+            if runtime_proposal is not None and runtime_proposal.built is not None:
+                persisted = await persist_optional_plan_adjustment_proposal(
+                    db,
+                    enabled=(
+                        settings.AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED
+                    ),
+                    user_id=run.user_id,
+                    conversation_id=conversation.id,
+                    run_id=run.id,
+                    expected_attempt_count=(
+                        expected_attempt_count
+                        if expected_attempt_count is not None
+                        else run.attempt_count
+                    ),
+                    built=runtime_proposal.built,
+                )
+                if persisted.proposal is not None:
+                    proposal_reference = _proposal_reference_from_model(
+                        persisted.proposal
+                    )
+            message_content_data: dict[str, Any] = {}
+            if cards:
+                message_content_data["cards"] = cards
+            if proposal_reference is not None:
+                message_content_data["proposal"] = (
+                    proposal_reference.model_dump(mode="json")
+                )
             db.add(AgentMessage(
                 conversation_id=conversation.id,
                 run_id=run.id,
                 role="assistant",
                 content=reply,
-                content_data={"cards": cards} if cards else {},
+                content_data=message_content_data,
             ))
             now = datetime.now(timezone.utc)
             run.status = "completed"
@@ -774,6 +863,7 @@ async def execute_agent_run(
                 run_id=run.id,
                 cards=cards,
                 execution_trace=execution_trace,
+                proposal=proposal_reference,
             )
 
         direct_started = time.perf_counter()

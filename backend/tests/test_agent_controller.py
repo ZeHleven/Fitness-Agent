@@ -1836,6 +1836,19 @@ async def test_low_adherence_narrows_runtime_finalizer_to_proposal():
             terminal_action="proposal",
             reply="建议先降为每周一至两练；提案尚未执行，需确认。",
             outcome="adjustment_proposal",
+            proposal_draft={
+                "proposal_type": "plan_adjustment_v1",
+                "changes": [{
+                    "change_type": "update_plan_schedule",
+                    "stable_display_key": "plan-schedule",
+                    "before": {"duration_weeks": 4},
+                    "after": {"duration_weeks": 6},
+                    "reason": "延长适应周期。",
+                    "safety_priority": False,
+                }],
+                "rationale": ["降低短期完成压力。"],
+                "safety_notes": [],
+            },
         ),
     )
 
@@ -1851,6 +1864,7 @@ async def test_low_adherence_narrows_runtime_finalizer_to_proposal():
         summarize_observation=_audit_result_summary,
         policy=policy,
         tools=[plan, progress],
+        proposal_creation_enabled=True,
     )
 
     contract = result.execution_trace.finalization_contract
@@ -1861,6 +1875,11 @@ async def test_low_adherence_narrows_runtime_finalizer_to_proposal():
         "adjustment_proposal"
     ]
     assert result.execution_trace.terminal_action == "proposal"
+    assert result.proposal_draft == policy.final_response.proposal_draft
+    assert {
+        item["tool_id"] for item in result.proposal_observations
+    } == {"plan.get_active", "workout.get_progress"}
+    assert policy.finalize_inputs[0]["proposal_creation_enabled"] is True
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,7 @@ from app.schemas.agent_plan_adjustment_proposal import (
 from app.services.agent_plan_adjustment_proposals import (
     PlanAdjustmentProposalCreationRejected,
     PlanAdjustmentProposalPayloadRejected,
+    build_runtime_plan_adjustment_proposal,
     build_validated_plan_adjustment_proposal,
     canonical_plan_adjustment_proposal_payload_data,
     evaluate_plan_adjustment_proposal_creation,
@@ -237,3 +238,106 @@ def test_builder_accepts_an_already_validated_immutable_payload():
     )
 
     assert built.payload is validated
+
+
+def _runtime_observations() -> list[dict]:
+    before = copy.deepcopy(_canonical_payloads()["adherence"]["before"])
+    plan = {
+        "id": "runtime-active-plan",
+        "name": before["name"],
+        "goal": before["goal"],
+        "duration_weeks": before["duration_weeks"],
+        "days_per_week": before["days_per_week"],
+        "exercises": [{
+            key: value
+            for key, value in exercise.items()
+            if key != "slot_key"
+        } for exercise in before["exercises"]],
+    }
+    return [
+        {
+            "tool_id": "plan.get_active",
+            "status": "success",
+            "result": {"found": True, "plan": plan},
+        },
+        {
+            "tool_id": "workout.get_progress",
+            "status": "success",
+            "result": {"weeks": 4, "total_sessions": 1},
+        },
+    ]
+
+
+def _runtime_draft() -> dict:
+    payload = _canonical_payloads()["adherence"]
+    return {
+        "proposal_type": "plan_adjustment_v1",
+        "changes": copy.deepcopy(payload["changes"]),
+        "rationale": copy.deepcopy(payload["rationale"]),
+        "safety_notes": copy.deepcopy(payload["safety_notes"]),
+        "requested_ttl_hours": 24,
+    }
+
+
+def test_runtime_builder_derives_full_snapshots_target_and_evidence():
+    result = build_runtime_plan_adjustment_proposal(
+        feature_enabled=True,
+        run_owned=True,
+        selected_outcome="adjustment_proposal",
+        terminal_action="proposal",
+        intent_allows_adjustment=True,
+        risk_level="low",
+        clarification_required=False,
+        observations=_runtime_observations(),
+        proposal_draft=_runtime_draft(),
+        created_at=_CREATED_AT,
+    )
+
+    assert result.decision.eligible is True
+    assert result.built is not None
+    payload = result.built.payload
+    assert payload.target.base_plan_id == "runtime-active-plan"
+    assert payload.before.exercises[0].sets == 4
+    assert payload.after.exercises[0].sets == 3
+    assert payload.after.exercises[0].rest_seconds == 150
+    assert payload.after.exercises[0].recommended_weight_kg == 57.5
+    assert {item.tool_id for item in payload.evidence} == {
+        "plan.get_active",
+        "workout.get_progress",
+    }
+
+
+@pytest.mark.parametrize("unsafe_change", ["replacement", "frequency"])
+def test_runtime_builder_rejects_changes_outside_the_first_cohort(
+    unsafe_change,
+):
+    draft = _runtime_draft()
+    if unsafe_change == "replacement":
+        draft["changes"] = copy.deepcopy(
+            _canonical_payloads()["health"]["changes"]
+        )
+    else:
+        draft["changes"] = [{
+            "change_type": "update_plan_schedule",
+            "stable_display_key": "plan-schedule",
+            "before": {"days_per_week": 1},
+            "after": {"days_per_week": 2},
+            "reason": "增加计划频率。",
+            "safety_priority": False,
+        }]
+
+    result = build_runtime_plan_adjustment_proposal(
+        feature_enabled=True,
+        run_owned=True,
+        selected_outcome="adjustment_proposal",
+        terminal_action="proposal",
+        intent_allows_adjustment=True,
+        risk_level="low",
+        clarification_required=False,
+        observations=_runtime_observations(),
+        proposal_draft=draft,
+        created_at=_CREATED_AT,
+    )
+
+    assert result.built is None
+    assert result.decision.reason_code == "proposal_draft_invalid"

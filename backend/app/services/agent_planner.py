@@ -14,6 +14,7 @@ from app.schemas.agent_planning import (
     MicroPlan,
     MicroPlanDraft,
     ModelInvocationMetrics,
+    ProposalFinalizationDecision,
 )
 from app.services.agent_tools import TOOL_ID_BY_LANGCHAIN_NAME
 from app.services.ai_client import AIServiceError
@@ -97,6 +98,24 @@ FINALIZER_SYSTEM_PROMPT = """你是 Fitness Agent 的最终回答器。
 才选择 insufficient_evidence 并说明暂不调整。
 严格输出：{"outcome":"允许的语义结果之一","reply":"..."}。
 不要使用 action、response、content 等别名；只输出上述 JSON，不输出内部推理过程。
+"""
+
+
+PROPOSAL_DRAFT_SYSTEM_PROMPT = """
+
+本轮服务端已开启训练计划调整 Proposal 草案。只有 outcome=adjustment_proposal 时填写
+proposal_draft；其他 outcome 必须为 null。草案不是执行授权，只描述显式变更：
+{"proposal_type":"plan_adjustment_v1","changes":[...],"rationale":["..."],
+"safety_notes":[],"requested_ttl_hours":null}。
+
+changes 只允许：
+- adjust_exercise_target：stable_display_key 使用 day-{星期}-order-{顺序}，before/after 只列出
+  实际变化的 sets、reps、rest_seconds 或 recommended_weight_kg，且两侧字段完全相同；
+- update_plan_schedule：首批只允许修改 duration_weeks，不允许修改 days_per_week；
+
+不要输出完整计划、user_id、plan_id、数据库状态、任意 patch、动作替换或 evidence。服务端会从
+本轮只读观察重建完整 before/after 和证据。信息不足以给出上述严格变更时选择
+insufficient_evidence，不要伪造 proposal_draft。
 """
 
 
@@ -513,11 +532,21 @@ class ModelPlanningPolicy:
         steps: list[dict[str, Any]],
         observations: list[dict[str, Any]],
         allowed_outcomes: list[FinalizationOutcome],
+        proposal_creation_enabled: bool = False,
     ) -> FinalResponse:
+        decision_schema = (
+            ProposalFinalizationDecision
+            if proposal_creation_enabled
+            else FinalizationDecision
+        )
         invocation = await _invoke_structured(
             self._model,
-            FinalizationDecision,
-            system_prompt=FINALIZER_SYSTEM_PROMPT,
+            decision_schema,
+            system_prompt=(
+                FINALIZER_SYSTEM_PROMPT + PROPOSAL_DRAFT_SYSTEM_PROMPT
+                if proposal_creation_enabled
+                else FINALIZER_SYSTEM_PROMPT
+            ),
             payload={
                 "goal": goal,
                 "step_results": _compact_finalizer_steps(steps),
@@ -544,6 +573,11 @@ class ModelPlanningPolicy:
             ),
             reply=decision.reply,
             outcome=decision.outcome,
+            proposal_draft=(
+                decision.proposal_draft
+                if isinstance(decision, ProposalFinalizationDecision)
+                else None
+            ),
             invocation_metrics=ModelInvocationMetrics(
                 input_chars=invocation.input_chars,
                 output_chars=invocation.output_chars,

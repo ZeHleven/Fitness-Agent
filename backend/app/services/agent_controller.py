@@ -99,6 +99,8 @@ class PlannedExecutionResult:
     missing_slots: list[str] = field(default_factory=list)
     input_tokens: int | None = None
     output_tokens: int | None = None
+    proposal_draft: dict[str, Any] | None = None
+    proposal_observations: list[dict[str, Any]] = field(default_factory=list)
 
 
 class PlanningPolicy(Protocol):
@@ -1095,6 +1097,7 @@ async def execute_planned_agent(
     tools: list[BaseTool] | None = None,
     parallel_tool_invoker: ParallelToolInvoker | None = None,
     shadow_session: ToolRegistryShadowSession | None = None,
+    proposal_creation_enabled: bool = False,
 ) -> PlannedExecutionResult:
     """Execute one small linear plan with explicit, planner-owned boundaries."""
     sink = event_sink or _noop_event_sink
@@ -1911,9 +1914,9 @@ async def execute_planned_agent(
         finalizer_started = time.perf_counter()
         finalizer_metrics = None
         try:
-            response = await planning_policy.finalize(
-                goal=goal,
-                steps=[
+            finalize_arguments: dict[str, Any] = {
+                "goal": goal,
+                "steps": [
                     {
                         **_step_payload(step),
                         "status": step.status,
@@ -1921,8 +1924,13 @@ async def execute_planned_agent(
                     }
                     for step in trace.plan.steps
                 ],
-                observations=raw_observations,
-                allowed_outcomes=allowed_outcomes,
+                "observations": raw_observations,
+                "allowed_outcomes": allowed_outcomes,
+            }
+            if proposal_creation_enabled:
+                finalize_arguments["proposal_creation_enabled"] = True
+            response = await planning_policy.finalize(
+                **finalize_arguments,
             )
             finalizer_metrics = response.invocation_metrics
             _validate_final_response_contract(
@@ -2068,4 +2076,10 @@ async def execute_planned_agent(
         cards=cards,
         input_tokens=getattr(planning_policy, "input_tokens", None),
         output_tokens=getattr(planning_policy, "output_tokens", None),
+        proposal_draft=(
+            response.proposal_draft if proposal_creation_enabled else None
+        ),
+        proposal_observations=(
+            raw_observations if proposal_creation_enabled else []
+        ),
     )
