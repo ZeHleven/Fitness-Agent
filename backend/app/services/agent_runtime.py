@@ -30,7 +30,14 @@ from app.services.agent_controller import (
 from app.services.agent_intent import IntentResolution, route_tools
 from app.services.agent_intent_model import resolve_intent_with_fallback
 from app.services.agent_plan_adjustment_proposal_persistence import (
+    PlanAdjustmentProposalPersistenceRejected,
     persist_optional_plan_adjustment_proposal,
+)
+from app.services.agent_plan_adjustment_proposal_trace import (
+    attach_proposal_creation_decision,
+    mark_proposal_persistence_failed,
+    mark_proposal_persistence_rejected,
+    mark_proposal_persisted,
 )
 from app.services.agent_plan_adjustment_proposals import (
     build_runtime_plan_adjustment_proposal,
@@ -811,30 +818,62 @@ async def execute_agent_run(
                     proposal_draft=planned_result.proposal_draft,
                     created_at=datetime.now(timezone.utc),
                 )
+                execution_trace = attach_proposal_creation_decision(
+                    execution_trace,
+                    runtime_proposal.decision,
+                )
             await _lock_run_ownership(
                 db,
                 run_id=run.id,
                 expected_attempt_count=expected_attempt_count,
             )
             if runtime_proposal is not None and runtime_proposal.built is not None:
-                persisted = await persist_optional_plan_adjustment_proposal(
-                    db,
-                    enabled=(
-                        settings.AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED
-                    ),
-                    user_id=run.user_id,
-                    conversation_id=conversation.id,
-                    run_id=run.id,
-                    expected_attempt_count=(
-                        expected_attempt_count
-                        if expected_attempt_count is not None
-                        else run.attempt_count
-                    ),
-                    built=runtime_proposal.built,
-                )
+                try:
+                    persisted = await persist_optional_plan_adjustment_proposal(
+                        db,
+                        enabled=(
+                            settings.AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED
+                        ),
+                        user_id=run.user_id,
+                        conversation_id=conversation.id,
+                        run_id=run.id,
+                        expected_attempt_count=(
+                            expected_attempt_count
+                            if expected_attempt_count is not None
+                            else run.attempt_count
+                        ),
+                        built=runtime_proposal.built,
+                    )
+                except PlanAdjustmentProposalPersistenceRejected as exc:
+                    execution_trace = mark_proposal_persistence_rejected(
+                        execution_trace,
+                        reason_code=exc.reason_code,
+                    )
+                    raise
+                except Exception:
+                    execution_trace = mark_proposal_persistence_failed(
+                        execution_trace
+                    )
+                    raise
                 if persisted.proposal is not None:
+                    execution_trace = mark_proposal_persisted(
+                        execution_trace,
+                        created=persisted.created,
+                    )
                     proposal_reference = _proposal_reference_from_model(
                         persisted.proposal
+                    )
+                elif persisted.reason_code is not None:
+                    execution_trace = mark_proposal_persistence_rejected(
+                        execution_trace,
+                        reason_code=persisted.reason_code,
+                    )
+                else:  # pragma: no cover - persistence result invariant
+                    execution_trace = mark_proposal_persistence_failed(
+                        execution_trace
+                    )
+                    raise RuntimeError(
+                        "proposal persistence returned no proposal or reason"
                     )
             message_content_data: dict[str, Any] = {}
             if cards:

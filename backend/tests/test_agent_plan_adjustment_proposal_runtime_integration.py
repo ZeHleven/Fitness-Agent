@@ -412,6 +412,8 @@ async def test_flag_off_preserves_exact_legacy_response_and_skips_proposal_path(
     )
     assert run_response.status_code == 200
     assert "proposal" not in run_response.json()
+    assert run_response.json()["execution_trace"]["trace_version"] == "1.0"
+    assert "proposal_creation" not in run_response.json()["execution_trace"]
 
 
 @pytest.mark.asyncio
@@ -495,6 +497,14 @@ async def test_flag_on_atomically_persists_and_returns_minimal_proposal_referenc
     )
     assert run_response.status_code == 200
     assert run_response.json()["proposal"] == proposal_reference
+    assert run_response.json()["execution_trace"]["trace_version"] == "1.2"
+    assert run_response.json()["execution_trace"]["proposal_creation"] == {
+        "eligible": True,
+        "reason_code": None,
+        "persisted": True,
+        "persistence_status": "created",
+        "persistence_reason_code": None,
+    }
 
 
 @pytest.mark.asyncio
@@ -547,6 +557,19 @@ async def test_flag_on_invalid_draft_keeps_text_response_without_proposal(
         )
     )
     assert proposal_count == 0
+    run_response = await client.get(
+        f"/api/v1/agent/runs/{response.json()['run_id']}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert run_response.status_code == 200
+    assert run_response.json()["execution_trace"]["trace_version"] == "1.2"
+    assert run_response.json()["execution_trace"]["proposal_creation"] == {
+        "eligible": False,
+        "reason_code": "proposal_draft_invalid",
+        "persisted": False,
+        "persistence_status": "not_attempted",
+        "persistence_reason_code": None,
+    }
 
 
 @pytest.mark.asyncio
@@ -606,6 +629,14 @@ async def test_persistence_error_after_flush_rolls_back_proposal_and_answer(
     assert run is not None
     assert run.status == "failed"
     assert run.error_code == "agent_runtime_error"
+    assert run.execution_trace["trace_version"] == "1.2"
+    assert run.execution_trace["proposal_creation"] == {
+        "eligible": True,
+        "reason_code": None,
+        "persisted": False,
+        "persistence_status": "failed",
+        "persistence_reason_code": None,
+    }
     assistant_count = await db_session.scalar(
         select(func.count(AgentMessage.id)).where(
             AgentMessage.run_id == run.id,

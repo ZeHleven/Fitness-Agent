@@ -11,6 +11,9 @@ from pydantic import (
     model_validator,
 )
 
+from app.schemas.agent_plan_adjustment_proposal import (
+    PlanAdjustmentProposalCreationReasonCode,
+)
 from app.schemas.agent_tool_registry import ToolRegistryShadowReport
 
 
@@ -36,6 +39,18 @@ FinalizationOutcomeTrace = Literal[
     "no_change_needed",
     "insufficient_evidence",
     "adjustment_proposal",
+]
+ProposalPersistenceStatusTrace = Literal[
+    "not_attempted",
+    "created",
+    "replayed",
+    "rejected",
+    "failed",
+]
+ProposalPersistenceReasonTrace = Literal[
+    "feature_disabled",
+    "run_ownership_lost",
+    "proposal_idempotency_conflict",
 ]
 
 
@@ -170,10 +185,49 @@ class AgentFinalizationContractTrace(BaseModel):
     derived_terminal_action: Literal["answer", "proposal"] | None = None
 
 
+class AgentProposalCreationTrace(BaseModel):
+    """Privacy-safe result of the optional Proposal creation boundary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    eligible: bool
+    reason_code: PlanAdjustmentProposalCreationReasonCode | None = None
+    persisted: bool = False
+    persistence_status: ProposalPersistenceStatusTrace = "not_attempted"
+    persistence_reason_code: ProposalPersistenceReasonTrace | None = None
+
+    @model_validator(mode="after")
+    def validate_lifecycle_projection(self) -> Self:
+        if self.eligible == (self.reason_code is not None):
+            raise ValueError(
+                "eligible proposal diagnostics cannot include a build reason"
+            )
+        if not self.eligible and (
+            self.persisted
+            or self.persistence_status != "not_attempted"
+            or self.persistence_reason_code is not None
+        ):
+            raise ValueError(
+                "rejected proposal builds cannot report persistence"
+            )
+        persisted_status = self.persistence_status in {"created", "replayed"}
+        if self.persisted != persisted_status:
+            raise ValueError(
+                "persisted must match created or replayed persistence status"
+            )
+        if (
+            self.persistence_status == "rejected"
+        ) != (self.persistence_reason_code is not None):
+            raise ValueError(
+                "rejected persistence requires only a stable reason code"
+            )
+        return self
+
+
 class AgentExecutionTrace(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    trace_version: Literal["1.0", "1.1"] = "1.0"
+    trace_version: Literal["1.0", "1.1", "1.2"] = "1.0"
     execution_mode: ExecutionMode
     risk_level: Literal["low", "medium", "high"]
     mode_reasons: list[str] = Field(default_factory=list, max_length=8)
@@ -195,22 +249,34 @@ class AgentExecutionTrace(BaseModel):
         default_factory=AgentBudgetUsageTrace
     )
     tool_registry_shadow: ToolRegistryShadowReport | None = None
+    proposal_creation: AgentProposalCreationTrace | None = None
 
     @model_validator(mode="after")
-    def validate_shadow_trace_version(self) -> Self:
+    def validate_optional_trace_versions(self) -> Self:
         if (
             self.tool_registry_shadow is not None
-            and self.trace_version != "1.1"
+            and self.trace_version == "1.0"
         ):
-            raise ValueError("tool registry shadow requires trace version 1.1")
+            raise ValueError(
+                "tool registry shadow requires trace version 1.1 or later"
+            )
+        if (
+            self.proposal_creation is not None
+            and self.trace_version != "1.2"
+        ):
+            raise ValueError(
+                "proposal creation diagnostics require trace version 1.2"
+            )
         return self
 
     @model_serializer(mode="wrap")
-    def omit_inactive_shadow_field(
+    def omit_inactive_optional_fields(
         self,
         handler: SerializerFunctionWrapHandler,
     ) -> dict[str, Any]:
         serialized = handler(self)
         if self.tool_registry_shadow is None:
             serialized.pop("tool_registry_shadow", None)
+        if self.proposal_creation is None:
+            serialized.pop("proposal_creation", None)
         return serialized

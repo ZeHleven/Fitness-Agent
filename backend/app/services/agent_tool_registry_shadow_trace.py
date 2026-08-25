@@ -230,7 +230,9 @@ def attach_registry_shadow_report(
         return trace
     try:
         return trace.model_copy(update={
-            "trace_version": "1.1",
+            "trace_version": (
+                "1.2" if trace.trace_version == "1.2" else "1.1"
+            ),
             "tool_registry_shadow": report,
         })
     except Exception:  # pragma: no cover - report loss must not fail v1
