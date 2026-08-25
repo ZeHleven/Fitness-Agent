@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.5.2",
+    [string]$Version = "0.5.8",
     [ValidateRange(0.01, 1024)]
     [double]$MaxPackageSizeMB = 25
 )
@@ -95,9 +95,19 @@ $required = @(
     "./alembic/versions/0017_agent_execution_trace.py",
     "./alembic/versions/0018_agent_tool_call_uniqueness.py",
     "./alembic/versions/0019_agent_intent_error_category.py",
+    "./alembic/versions/0020_agent_proposal_lifecycle.py",
+    "./app/config.py",
+    "./app/routers/agent.py",
+    "./app/schemas/agent_plan_adjustment_proposal.py",
+    "./app/schemas/agent_plan_adjustment_proposal_api.py",
     "./app/services/agent_jobs.py",
     "./app/services/agent_controller.py",
     "./app/services/agent_planner.py",
+    "./app/services/agent_plan_adjustment_proposal_decisions.py",
+    "./app/services/agent_plan_adjustment_proposal_execution.py",
+    "./app/services/agent_plan_adjustment_proposal_persistence.py",
+    "./app/services/agent_plan_adjustment_proposals.py",
+    "./app/services/agent_runtime.py",
     "./app/services/agent_tool_registry.py",
     "./app/services/agent_tool_registry_read_authority.py",
     "./app/services/agent_tool_registry_read_enforcement.py",
