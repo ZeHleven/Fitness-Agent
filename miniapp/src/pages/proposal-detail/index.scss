@@ -353,22 +353,139 @@
   line-height: 1.6;
 }
 
-.readonly-footer {
-  padding: 24px;
-  border: 1px dashed #bdcbbf;
-  border-radius: 22px;
-  text-align: center;
+.proposal-decision-panel {
+  padding: 28px;
+  border: 1px solid #cfddd1;
+  border-radius: 28px;
+  background: #ffffff;
+  box-shadow: 0 10px 32px rgba(28, 65, 47, 0.08);
 }
 
-.readonly-footer-title {
-  color: #1d6b49;
-  font-size: 25px;
-  font-weight: 800;
+.decision-title,
+.decision-copy,
+.decision-disabled-copy,
+.review-check-copy {
+  display: block;
 }
 
-.readonly-footer-copy {
-  margin-top: 8px;
+.decision-title {
+  font-size: 31px;
+  font-weight: 840;
+}
+
+.decision-copy {
+  margin-top: 9px;
   color: #718178;
-  font-size: 21px;
+  font-size: 22px;
+  line-height: 1.55;
+}
+
+.decision-notice {
+  margin-top: 18px;
+  padding: 16px 18px;
+  border-radius: 16px;
+  background: #e9eeea;
+  color: #58675e;
+  font-size: 23px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.decision-notice.attention {
+  background: #fff1c9;
+  color: #75570e;
+}
+
+.decision-notice.success {
+  background: #dcf2e3;
+  color: #16603e;
+}
+
+.decision-notice.warning {
+  background: #fff0ed;
+  color: #943f32;
+}
+
+.review-check {
+  display: flex;
+  margin-top: 20px;
+  padding: 18px;
+  align-items: flex-start;
+  border: 1px solid #d7e2d8;
+  border-radius: 18px;
+  background: #f8faf7;
+  gap: 14px;
+}
+
+.review-check.checked {
+  border-color: #75a88a;
+  background: #edf6ef;
+}
+
+.review-check.disabled {
+  opacity: 0.55;
+}
+
+.review-check-mark {
+  display: flex;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid #aebdb1;
+  border-radius: 10px;
+  color: #ffffff;
+  font-size: 25px;
+  font-weight: 900;
+}
+
+.review-check.checked .review-check-mark {
+  border-color: #1d6b49;
+  background: #1d6b49;
+}
+
+.review-check-copy {
+  min-width: 0;
+  flex: 1;
+  color: #41574a;
+  font-size: 22px;
   line-height: 1.5;
+}
+
+.decision-actions {
+  display: grid;
+  margin-top: 20px;
+  grid-template-columns: 0.8fr 1.2fr;
+  gap: 14px;
+}
+
+.decision-actions button {
+  width: 100%;
+  margin: 0;
+  padding-right: 10px;
+  padding-left: 10px;
+  font-size: 26px;
+}
+
+.retry-button,
+.verify-button {
+  width: 100%;
+  margin-top: 18px;
+  font-size: 26px;
+}
+
+.verify-button + .verify-button {
+  margin-top: 12px;
+}
+
+.decision-disabled-copy {
+  margin-top: 20px;
+  padding: 17px;
+  border-radius: 16px;
+  background: #f1f4f1;
+  color: #66756b;
+  font-size: 22px;
+  line-height: 1.55;
+  text-align: center;
 }

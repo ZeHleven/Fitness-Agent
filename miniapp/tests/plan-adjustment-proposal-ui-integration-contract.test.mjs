@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import test from 'node:test'
+
+import ts from 'typescript'
 
 
 const fixture = JSON.parse(readFileSync(
@@ -10,6 +13,24 @@ const fixture = JSON.parse(readFileSync(
   ),
   'utf8'
 ))
+
+function loadTypeScriptModule (relativePath) {
+  const sourceUrl = new URL(relativePath, import.meta.url)
+  const sourcePath = fileURLToPath(sourceUrl)
+  const output = ts.transpileModule(readFileSync(sourcePath, 'utf8'), {
+    compilerOptions: {
+      module: ts.ModuleKind.CommonJS,
+      target: ts.ScriptTarget.ES2020
+    },
+    fileName: sourcePath
+  }).outputText
+  const loaded = { exports: {} }
+  const evaluate = new Function('exports', 'module', output)
+  evaluate(loaded.exports, loaded)
+  return loaded.exports
+}
+
+const runtime = loadTypeScriptModule('../src/core/proposal-decision-ui.ts')
 
 const CONFIRMATION_KEYS = new Set([
   'case_id',
@@ -360,6 +381,21 @@ test('UI integration fixture is strict, bounded, and uniquely identified', () =>
     }
   }
   assert.equal(new Set(identifiers).size, identifiers.length)
+})
+
+test('runtime UI projectors satisfy every fixed integration case', () => {
+  const groups = [
+    [fixture.confirmation_cases, runtime.projectProposalConfirmation],
+    [fixture.button_lock_cases, runtime.projectProposalButtonLock],
+    [fixture.uncertain_result_cases, runtime.projectProposalUncertainResult],
+    [fixture.manual_retry_cases, runtime.projectProposalManualRetry],
+    [fixture.error_presentation_cases, runtime.projectProposalErrorPresentation]
+  ]
+  for (const [cases, projector] of groups) {
+    for (const item of cases) {
+      assert.deepEqual(projector(item), item.expected, item.case_id)
+    }
+  }
 })
 
 test('confirm and reject always require full review and second confirmation', () => {
