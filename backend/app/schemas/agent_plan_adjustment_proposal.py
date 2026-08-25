@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -16,10 +16,54 @@ PlanAdjustmentProposalPayloadErrorCode = Literal[
     "invalid_plan_bounds",
     "invalid_target",
 ]
+PlanAdjustmentProposalCreationReasonCode = Literal[
+    "feature_disabled",
+    "run_ownership_lost",
+    "health_red_flag",
+    "clarification_required",
+    "outcome_not_adjustment_proposal",
+    "terminal_action_not_proposal",
+    "intent_not_adjustment",
+    "plan_evidence_missing",
+    "supporting_evidence_missing",
+    "deadline_evidence_insufficient",
+    "proposal_draft_invalid",
+    "proposal_target_ambiguous",
+    "proposal_type_not_allowed",
+    "proposal_ttl_out_of_range",
+]
 
 
 class _StrictFrozenModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class PlanAdjustmentProposalCreationDecision(_StrictFrozenModel):
+    eligible: bool
+    reason_code: PlanAdjustmentProposalCreationReasonCode | None = None
+    initial_status: Literal["pending_confirmation"] | None = None
+    ttl_hours: int | None = Field(default=None, ge=1, le=72)
+
+    @model_validator(mode="after")
+    def validate_decision_shape(self) -> Self:
+        if self.eligible:
+            if (
+                self.reason_code is not None
+                or self.initial_status != "pending_confirmation"
+                or self.ttl_hours is None
+            ):
+                raise ValueError(
+                    "eligible proposal decisions require status and TTL"
+                )
+        elif (
+            self.reason_code is None
+            or self.initial_status is not None
+            or self.ttl_hours is not None
+        ):
+            raise ValueError(
+                "rejected proposal decisions require only a reason code"
+            )
+        return self
 
 
 class PlanAdjustmentProposalTarget(_StrictFrozenModel):
@@ -319,6 +363,24 @@ class PlanAdjustmentProposalPayload(_StrictFrozenModel):
                 "incomplete_candidate_plan: replacement diff does not match "
                 "snapshots"
             )
+
+
+class ValidatedPlanAdjustmentProposal(_StrictFrozenModel):
+    initial_status: Literal["pending_confirmation"]
+    ttl_hours: int = Field(ge=1, le=72)
+    created_at: datetime
+    expires_at: datetime
+    payload: PlanAdjustmentProposalPayload
+    payload_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def validate_lifecycle_window(self) -> Self:
+        if self.created_at.tzinfo is None or self.expires_at.tzinfo is None:
+            raise ValueError("proposal lifecycle timestamps require timezones")
+        expected_expiry = self.created_at + timedelta(hours=self.ttl_hours)
+        if self.expires_at != expected_expiry:
+            raise ValueError("proposal expiry must match the selected TTL")
+        return self
 
 
 _PAYLOAD_ERROR_PRIORITY: tuple[

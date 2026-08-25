@@ -13,6 +13,9 @@ from app.schemas.agent_plan_adjustment_proposal import (
     PlanAdjustmentProposalPayload,
     plan_adjustment_proposal_payload_error_codes,
 )
+from app.services.agent_plan_adjustment_proposals import (
+    evaluate_plan_adjustment_proposal_creation,
+)
 
 
 _CASES_PATH = (
@@ -538,6 +541,17 @@ def test_creation_gate_cases_define_every_rejection_reason_and_ttl_boundary():
         for case in cases
         if case["expected"]["eligible"]
     )
+
+
+def test_creation_gate_matches_every_fixed_contract_case():
+    for case in _load_fixture()["creation_gate_cases"]:
+        actual = evaluate_plan_adjustment_proposal_creation(**{
+            key: value
+            for key, value in case.items()
+            if key not in {"case_id", "expected"}
+        })
+
+        assert actual.model_dump(mode="json") == case["expected"]
 
 
 def test_transition_cases_define_atomic_idempotent_state_machine():
