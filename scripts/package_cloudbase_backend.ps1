@@ -11,6 +11,174 @@ $backendPath = (Resolve-Path (Join-Path $repoRoot "backend")).Path
 $outputDirectory = Join-Path $repoRoot "deploy\cloudbase"
 $outputPath = Join-Path $outputDirectory "fitness-agent-backend-$Version.zip"
 
+function Assert-ZipEntryBoundaries {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $resolvedPath = (Resolve-Path -LiteralPath $Path).Path
+    $stream = [System.IO.File]::Open(
+        $resolvedPath,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::Read
+    )
+    $reader = [System.IO.BinaryReader]::new($stream)
+    try {
+        if ($stream.Length -lt 22) {
+            throw "ZIP is too small to contain an end-of-central-directory record."
+        }
+
+        $tailLength = [int][Math]::Min($stream.Length, 65557)
+        [void]$stream.Seek(-$tailLength, [System.IO.SeekOrigin]::End)
+        $tail = $reader.ReadBytes($tailLength)
+        $eocdIndex = -1
+        for ($index = $tail.Length - 22; $index -ge 0; $index--) {
+            if (
+                $tail[$index] -eq 0x50 -and
+                $tail[$index + 1] -eq 0x4b -and
+                $tail[$index + 2] -eq 0x05 -and
+                $tail[$index + 3] -eq 0x06
+            ) {
+                $commentLength = [BitConverter]::ToUInt16($tail, $index + 20)
+                if ($index + 22 + $commentLength -eq $tail.Length) {
+                    $eocdIndex = $index
+                    break
+                }
+            }
+        }
+        if ($eocdIndex -lt 0) {
+            throw "ZIP end-of-central-directory record was not found."
+        }
+
+        $eocdOffset = $stream.Length - $tailLength + $eocdIndex
+        $stream.Position = $eocdOffset + 4
+        $diskNumber = $reader.ReadUInt16()
+        $centralDirectoryDisk = $reader.ReadUInt16()
+        $entriesOnDisk = $reader.ReadUInt16()
+        $entryCount = $reader.ReadUInt16()
+        $centralDirectorySize = $reader.ReadUInt32()
+        $centralDirectoryOffset = $reader.ReadUInt32()
+        [void]$reader.ReadUInt16()
+
+        if (
+            $diskNumber -ne 0 -or
+            $centralDirectoryDisk -ne 0 -or
+            $entriesOnDisk -ne $entryCount -or
+            $entryCount -eq [UInt16]::MaxValue
+        ) {
+            throw "Multi-disk or ZIP64 archives are not supported by this gate."
+        }
+        if (
+            [uint64]$centralDirectoryOffset +
+            [uint64]$centralDirectorySize -gt [uint64]$eocdOffset
+        ) {
+            throw "ZIP central directory overlaps the end record."
+        }
+
+        $centralEntries = [System.Collections.Generic.List[object]]::new()
+        $stream.Position = $centralDirectoryOffset
+        for ($entryIndex = 0; $entryIndex -lt $entryCount; $entryIndex++) {
+            if ($reader.ReadUInt32() -ne 0x02014b50) {
+                throw "ZIP central directory entry $entryIndex is invalid."
+            }
+            [void]$reader.ReadUInt16()
+            [void]$reader.ReadUInt16()
+            $flags = $reader.ReadUInt16()
+            [void]$reader.ReadUInt16()
+            [void]$reader.ReadUInt16()
+            [void]$reader.ReadUInt16()
+            [void]$reader.ReadUInt32()
+            $compressedSize = $reader.ReadUInt32()
+            [void]$reader.ReadUInt32()
+            $nameLength = $reader.ReadUInt16()
+            $extraLength = $reader.ReadUInt16()
+            $commentLength = $reader.ReadUInt16()
+            [void]$reader.ReadUInt16()
+            [void]$reader.ReadUInt16()
+            [void]$reader.ReadUInt32()
+            $localHeaderOffset = $reader.ReadUInt32()
+
+            if (
+                $compressedSize -eq [UInt32]::MaxValue -or
+                $localHeaderOffset -eq [UInt32]::MaxValue
+            ) {
+                throw "ZIP64 entries are not supported by this gate."
+            }
+            $nameBytes = $reader.ReadBytes($nameLength)
+            $entryName = [System.Text.Encoding]::UTF8.GetString($nameBytes)
+            [void]$stream.Seek(
+                $extraLength + $commentLength,
+                [System.IO.SeekOrigin]::Current
+            )
+            $centralEntries.Add([pscustomobject]@{
+                Name = $entryName
+                Flags = $flags
+                CompressedSize = [uint64]$compressedSize
+                LocalHeaderOffset = [uint64]$localHeaderOffset
+            })
+        }
+
+        $orderedEntries = @(
+            $centralEntries | Sort-Object LocalHeaderOffset
+        )
+        for ($entryIndex = 0; $entryIndex -lt $orderedEntries.Count; $entryIndex++) {
+            $entry = $orderedEntries[$entryIndex]
+            $stream.Position = [int64]$entry.LocalHeaderOffset
+            if ($reader.ReadUInt32() -ne 0x04034b50) {
+                throw "ZIP local header is invalid for $($entry.Name)."
+            }
+            [void]$reader.ReadUInt16()
+            $localFlags = $reader.ReadUInt16()
+            [void]$reader.ReadUInt16()
+            [void]$reader.ReadUInt16()
+            [void]$reader.ReadUInt16()
+            [void]$reader.ReadUInt32()
+            [void]$reader.ReadUInt32()
+            [void]$reader.ReadUInt32()
+            $localNameLength = $reader.ReadUInt16()
+            $localExtraLength = $reader.ReadUInt16()
+            if (($localFlags -band 0x08) -ne ($entry.Flags -band 0x08)) {
+                throw "ZIP flag mismatch for $($entry.Name)."
+            }
+
+            $dataEnd = (
+                $entry.LocalHeaderOffset + 30 + $localNameLength +
+                $localExtraLength + $entry.CompressedSize
+            )
+            $descriptorLength = 0
+            if (($entry.Flags -band 0x08) -ne 0) {
+                $stream.Position = [int64]$dataEnd
+                $descriptorSignature = $reader.ReadUInt32()
+                $descriptorLength = if ($descriptorSignature -eq 0x08074b50) {
+                    16
+                }
+                else {
+                    12
+                }
+            }
+            $entryEnd = $dataEnd + $descriptorLength
+            $nextBoundary = if ($entryIndex + 1 -lt $orderedEntries.Count) {
+                $orderedEntries[$entryIndex + 1].LocalHeaderOffset
+            }
+            else {
+                [uint64]$centralDirectoryOffset
+            }
+            if ($entryEnd -gt $nextBoundary) {
+                throw (
+                    "ZIP entry overlaps the next component: " +
+                    "$($entry.Name) ends at $entryEnd, boundary is $nextBoundary."
+                )
+            }
+        }
+    }
+    finally {
+        $reader.Dispose()
+        $stream.Dispose()
+    }
+}
+
 $excludedDirectoryNames = @(
     ".git",
     ".venv",
@@ -52,25 +220,17 @@ if (Test-Path -LiteralPath $outputPath) {
     Remove-Item -LiteralPath $outputPath -Force
 }
 
-$tarArguments = @("-a", "-c", "-f", $outputPath)
-foreach ($pattern in $tarExcludePatterns) {
-    $tarArguments += "--exclude=$pattern"
-}
-$tarArguments += @("-C", $backendPath, ".")
-
-& tar @tarArguments
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to create CloudBase package."
+$sourceMetadataPath = Join-Path $backendPath "app\build_metadata.json"
+if (Test-Path -LiteralPath $sourceMetadataPath) {
+    throw "Refusing to package a source-tree build_metadata.json file."
 }
 
 $buildCommit = (& git -C $repoRoot rev-parse --verify HEAD).Trim().ToLowerInvariant()
 if ($LASTEXITCODE -ne 0 -or $buildCommit -notmatch '^[0-9a-f]{40}$') {
-    Remove-Item -LiteralPath $outputPath -Force
     throw "Failed to resolve a full Git commit for build metadata."
 }
 $gitStatus = @(& git -C $repoRoot status --porcelain)
 if ($LASTEXITCODE -ne 0) {
-    Remove-Item -LiteralPath $outputPath -Force
     throw "Failed to inspect the Git worktree for build metadata."
 }
 $sourceDirty = $gitStatus.Count -gt 0
@@ -81,30 +241,65 @@ $buildMetadata = [ordered]@{
     source_dirty = $sourceDirty
 } | ConvertTo-Json -Compress
 
-Add-Type -AssemblyName System.IO.Compression.FileSystem
-$archive = [System.IO.Compression.ZipFile]::Open(
-    $outputPath,
-    [System.IO.Compression.ZipArchiveMode]::Update
+$tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
+$tempRootPrefix = $tempRoot.TrimEnd(
+    [System.IO.Path]::DirectorySeparatorChar,
+    [System.IO.Path]::AltDirectorySeparatorChar
+) + [System.IO.Path]::DirectorySeparatorChar
+$metadataStagingRoot = Join-Path $tempRoot (
+    "fitness-agent-cloudbase-" + [Guid]::NewGuid().ToString("N")
+)
+$metadataStagingRoot = [System.IO.Path]::GetFullPath($metadataStagingRoot)
+if (-not $metadataStagingRoot.StartsWith(
+    $tempRootPrefix,
+    [System.StringComparison]::OrdinalIgnoreCase
+)) {
+    throw "Refusing to create build metadata outside the temporary directory."
+}
+$metadataStagingApp = Join-Path $metadataStagingRoot "app"
+New-Item -ItemType Directory -Force -Path $metadataStagingApp | Out-Null
+
+$tarArguments = @("-a", "-c", "-f", $outputPath)
+foreach ($pattern in $tarExcludePatterns) {
+    $tarArguments += "--exclude=$pattern"
+}
+$tarArguments += @("-C", $backendPath, ".")
+$tarArguments += @(
+    "-C",
+    $metadataStagingRoot,
+    "./app/build_metadata.json"
 )
 try {
-    $metadataEntry = $archive.CreateEntry(
-        "./app/build_metadata.json",
-        [System.IO.Compression.CompressionLevel]::Optimal
-    )
-    $metadataStream = $metadataEntry.Open()
-    $metadataWriter = [System.IO.StreamWriter]::new(
-        $metadataStream,
+    [System.IO.File]::WriteAllText(
+        (Join-Path $metadataStagingApp "build_metadata.json"),
+        $buildMetadata,
         [System.Text.UTF8Encoding]::new($false)
     )
-    try {
-        $metadataWriter.Write($buildMetadata)
-    }
-    finally {
-        $metadataWriter.Dispose()
+    & tar @tarArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to create CloudBase package."
     }
 }
+catch {
+    if (Test-Path -LiteralPath $outputPath) {
+        Remove-Item -LiteralPath $outputPath -Force
+    }
+    throw
+}
 finally {
-    $archive.Dispose()
+    if (Test-Path -LiteralPath $metadataStagingRoot) {
+        Remove-Item -LiteralPath $metadataStagingRoot -Recurse -Force
+    }
+}
+
+try {
+    Assert-ZipEntryBoundaries -Path $outputPath
+}
+catch {
+    if (Test-Path -LiteralPath $outputPath) {
+        Remove-Item -LiteralPath $outputPath -Force
+    }
+    throw
 }
 
 $entries = @(& tar -tf $outputPath)
