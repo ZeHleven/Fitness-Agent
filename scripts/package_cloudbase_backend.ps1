@@ -1,4 +1,5 @@
 param(
+    [ValidatePattern('^[0-9A-Za-z][0-9A-Za-z._-]{0,39}$')]
     [string]$Version = "0.5.8",
     [ValidateRange(0.01, 1024)]
     [double]$MaxPackageSizeMB = 25
@@ -62,6 +63,50 @@ if ($LASTEXITCODE -ne 0) {
     throw "Failed to create CloudBase package."
 }
 
+$buildCommit = (& git -C $repoRoot rev-parse --verify HEAD).Trim().ToLowerInvariant()
+if ($LASTEXITCODE -ne 0 -or $buildCommit -notmatch '^[0-9a-f]{40}$') {
+    Remove-Item -LiteralPath $outputPath -Force
+    throw "Failed to resolve a full Git commit for build metadata."
+}
+$gitStatus = @(& git -C $repoRoot status --porcelain)
+if ($LASTEXITCODE -ne 0) {
+    Remove-Item -LiteralPath $outputPath -Force
+    throw "Failed to inspect the Git worktree for build metadata."
+}
+$sourceDirty = $gitStatus.Count -gt 0
+$buildMetadata = [ordered]@{
+    schema_version = "1.0"
+    build_version = $Version
+    build_commit = $buildCommit
+    source_dirty = $sourceDirty
+} | ConvertTo-Json -Compress
+
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$archive = [System.IO.Compression.ZipFile]::Open(
+    $outputPath,
+    [System.IO.Compression.ZipArchiveMode]::Update
+)
+try {
+    $metadataEntry = $archive.CreateEntry(
+        "./app/build_metadata.json",
+        [System.IO.Compression.CompressionLevel]::Optimal
+    )
+    $metadataStream = $metadataEntry.Open()
+    $metadataWriter = [System.IO.StreamWriter]::new(
+        $metadataStream,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    try {
+        $metadataWriter.Write($buildMetadata)
+    }
+    finally {
+        $metadataWriter.Dispose()
+    }
+}
+finally {
+    $archive.Dispose()
+}
+
 $entries = @(& tar -tf $outputPath)
 $forbidden = $entries | Where-Object {
     $normalizedEntry = $_ -replace '\\', '/'
@@ -97,6 +142,8 @@ $required = @(
     "./alembic/versions/0019_agent_intent_error_category.py",
     "./alembic/versions/0020_agent_proposal_lifecycle.py",
     "./app/config.py",
+    "./app/build_metadata.json",
+    "./app/startup_diagnostics.py",
     "./app/routers/agent.py",
     "./app/schemas/agent_plan_adjustment_proposal.py",
     "./app/schemas/agent_plan_adjustment_proposal_api.py",

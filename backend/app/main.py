@@ -13,6 +13,7 @@ from app.deps import get_current_user
 from app.models.user import User
 from app.services.ai_client import AIServiceError
 from app.services.agent_jobs import agent_worker_loop
+from app.startup_diagnostics import log_agent_startup_diagnostic
 
 
 logging.getLogger("app").setLevel(logging.INFO)
@@ -20,6 +21,7 @@ logging.getLogger("app").setLevel(logging.INFO)
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    log_agent_startup_diagnostic()
     stop_event = asyncio.Event()
     worker_task: asyncio.Task | None = None
     if settings.AGENT_ASYNC_WORKER_ENABLED:
