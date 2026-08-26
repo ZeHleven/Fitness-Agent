@@ -37,7 +37,10 @@ def test_adjustment_outcome_parses_a_typed_proposal_draft():
         decision.proposal_draft,
         PlanAdjustmentProposalDraft,
     )
-    assert decision.proposal_draft.model_dump(mode="json") == _valid_draft()
+    assert decision.proposal_draft.model_dump(
+        mode="json",
+        exclude_unset=True,
+    ) == _valid_draft()
 
 
 @pytest.mark.parametrize(

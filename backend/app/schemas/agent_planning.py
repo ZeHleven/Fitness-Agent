@@ -4,6 +4,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.schemas.agent_plan_adjustment_proposal import (
+    PlanAdjustmentProposalDraft,
+)
+
 
 ExecutionStrategy = Literal["direct", "parallel_read", "bounded_react"]
 CompletionPolicy = Literal[
@@ -177,4 +181,22 @@ class FinalizationDecision(BaseModel):
 class ProposalFinalizationDecision(FinalizationDecision):
     """Opt-in Finalizer shape used only while proposal creation is enabled."""
 
-    proposal_draft: dict[str, Any] | None = None
+    proposal_draft: PlanAdjustmentProposalDraft | None = None
+
+    @model_validator(mode="after")
+    def validate_outcome_draft_pair(self) -> ProposalFinalizationDecision:
+        if (
+            self.outcome == "adjustment_proposal"
+            and self.proposal_draft is None
+        ):
+            raise ValueError(
+                "adjustment_proposal requires proposal_draft"
+            )
+        if (
+            self.outcome != "adjustment_proposal"
+            and self.proposal_draft is not None
+        ):
+            raise ValueError(
+                "only adjustment_proposal may include proposal_draft"
+            )
+        return self

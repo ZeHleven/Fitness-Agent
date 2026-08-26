@@ -108,10 +108,22 @@ proposal_draft；其他 outcome 必须为 null。草案不是执行授权，只�
 {"proposal_type":"plan_adjustment_v1","changes":[...],"rationale":["..."],
 "safety_notes":[],"requested_ttl_hours":null}。
 
-changes 只允许：
-- adjust_exercise_target：stable_display_key 使用 day-{星期}-order-{顺序}，before/after 只列出
-  实际变化的 sets、reps、rest_seconds 或 recommended_weight_kg，且两侧字段完全相同；
-- update_plan_schedule：首批只允许修改 duration_weeks，不允许修改 days_per_week；
+每个 change 都必须完整包含 change_type、stable_display_key、before、after、reason 和
+safety_priority，不得添加其他字段。changes 只允许以下精确形状：
+- adjust_exercise_target：
+  {"change_type":"adjust_exercise_target","stable_display_key":"day-1-order-0",
+  "before":{"sets":4},"after":{"sets":3},"reason":"近期完成率偏低，先降低单次训练量。",
+  "safety_priority":false}。stable_display_key 必须来自观察中的 day-{星期}-order-{顺序}；
+  before/after 只列出实际变化的 sets、reps、rest_seconds 或 recommended_weight_kg，且两侧
+  字段集合完全相同、值不能相同。
+- update_plan_schedule：
+  {"change_type":"update_plan_schedule","stable_display_key":"plan-schedule",
+  "before":{"duration_weeks":4},"after":{"duration_weeks":6},
+  "reason":"延长计划周期以降低每周推进压力。","safety_priority":false}。首批只允许修改
+  duration_weeks，不允许修改 days_per_week；before/after 字段集合必须相同、值不能相同。
+
+rationale 必须是 1–12 条非空字符串；safety_notes 必须是 0–12 条非空字符串。
+requested_ttl_hours 只能是 null 或 1–72 的整数，不能使用字符串数字。
 
 不要输出完整计划、user_id、plan_id、数据库状态、任意 patch、动作替换或 evidence。服务端会从
 本轮只读观察重建完整 before/after 和证据。信息不足以给出上述严格变更时选择
@@ -574,8 +586,14 @@ class ModelPlanningPolicy:
             reply=decision.reply,
             outcome=decision.outcome,
             proposal_draft=(
-                decision.proposal_draft
-                if isinstance(decision, ProposalFinalizationDecision)
+                decision.proposal_draft.model_dump(
+                    mode="json",
+                    exclude_unset=True,
+                )
+                if (
+                    isinstance(decision, ProposalFinalizationDecision)
+                    and decision.proposal_draft is not None
+                )
                 else None
             ),
             invocation_metrics=ModelInvocationMetrics(
