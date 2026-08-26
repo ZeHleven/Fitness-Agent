@@ -1,7 +1,8 @@
 # 训练计划调整 Proposal 生命周期与安全不变量
 
-状态：`design_only`，默认关闭，2026-08-25。本文件只定义 Agent 发起的训练计划调整提案，
-不新增数据库迁移、API、Registry 运行时 authority 或写工具。
+状态：`internal_canary_passed`，运行时默认关闭，2026-08-26。本文既保留 Agent 发起训练计划
+调整提案的设计与安全不变量，也记录已经落地的数据库约束、Controller 接线、认证 API、小程序
+交互和内部真实模型门禁。Planner/Executor 仍未获得计划写工具或 execute authority。
 
 ## 决策
 
@@ -18,13 +19,13 @@
 
 ## 当前基线与范围
 
-当前已有三类容易混淆的能力：
+当前有三类容易混淆的能力：
 
-1. `terminal_action=proposal` 只是 Finalizer 生成的待确认文本，不创建 `AgentProposal`，也不修改
-   训练计划。
-2. `agent_proposals` 表已经预留 `user_id`、`conversation_id`、`run_id`、`proposal_type`、
-   `payload_data`、`status`、`version` 和 `expires_at`，但尚无运行时写入、确认或执行链路；现有
-   字段不足以证明幂等、基线一致性和执行结果。
+1. `terminal_action=proposal` 本身仍只是待确认语义，不是修改授权。只有 proposal flag 开启、
+   typed draft 和服务端证据门禁通过时，Controller 才会创建 `AgentProposal` 并在响应中返回引用；
+   flag 关闭或门禁拒绝时保持 legacy 只读行为。
+2. `agent_proposals` 表已经具备所有权、不可变 payload、fingerprint、状态版本、过期、幂等决策和
+   原子应用约束；运行时支持创建、所有权隔离读取、确认、拒绝、并发保护和结果重放。
 3. 个性化计划已有独立的 preview/confirm API；训练完成接口还有既有自适应调整逻辑。两者不是
    Agent proposal 的权限来源，不能绕过本文的确认、并发和审计不变量。是否将训练完成后的自动
    调整迁移到 Proposal 生命周期，必须另立产品决策。
@@ -97,10 +98,12 @@ AgentProposal(pending_confirmation)
 
 ## 模型草案与服务端 Payload
 
-当前 Finalizer 只返回 outcome 和自然语言 reply。未来 schema 可以在
-`outcome=adjustment_proposal` 时附带一个严格、可选的 `proposal_draft`，但该草案仍不是可执行
-payload。模型最多表达调整类型、计划中的日序/动作位置、期望值、理由和安全提醒；不能提供
-`user_id`、ORM 主键、状态、版本、确认信息或任意字段路径。
+proposal flag 开启时，Finalizer 使用 `ProposalFinalizationDecision`；
+`outcome=adjustment_proposal` 必须附带通过 `PlanAdjustmentProposalDraft` 校验的 typed
+`proposal_draft`，其他 outcome 禁止携带 draft。模型最多表达调整类型、计划中的日序/动作位置、
+期望值、理由和安全提醒；不能提供 `user_id`、ORM 主键、状态、版本、确认信息或任意字段路径。
+Planner 在 Controller 边界前把强类型 draft 转成紧凑 JSON，既保持现有运行时接口，也不放宽
+服务端 Builder 的二次验证。
 
 Proposal Builder 必须使用日序、动作顺序等服务端可验证定位重新解析当前计划，重新查询所有业务
 实体，并生成规范化完整候选计划。无法唯一定位、值超界、候选动作不安全或模型草案与当前计划不
@@ -320,7 +323,9 @@ proposal Registry authority 必须使用独立 feature flag、cohort、固定夹
 
 ## Trace 与指标
 
-Proposal 不能伪装成普通 read action。未来 Trace 应增加独立、可选的 proposal 引用，只记录：
+Proposal 不能伪装成普通 read action。当前 Trace `1.2` 使用独立、可选的
+`proposal_creation` 诊断，只记录创建资格、稳定拒绝原因、持久化状态和稳定持久化拒绝原因；
+Assistant/Run 响应在成功创建时另返回最小 proposal 引用：
 
 ```text
 proposal_id
@@ -363,3 +368,56 @@ payload_fingerprint
 
 每一步保持独立提交。前六步都不得让模型获得 execute 权限；第七、八步的执行入口只属于认证用户
 确认 API。
+
+## `0.5.11 / 022` 内部真实模型门禁
+
+观测时间：2026-08-26。来源提交为 `2dbae10`，CloudBase 部署 `022` 承载 100% 流量。
+内部环境开启 Proposal flag、Registry read enforcement 和 100% Registry shadow；`/health` 与
+`/ready` 均返回 200，数据库 ready 且 Agent worker 启用。所有样本都使用隔离合成账号、合成计划
+和合成训练记录，不读取或修改真实用户数据。
+
+### 创建与只读基线
+
+| 门禁 | 结果 |
+| --- | --- |
+| 只读 `direct_next_workout` | 1/1 完成；唯一工具为 `workout.get_next`；零重规划；shadow 无 mismatch |
+| 低完成率 Proposal Run | 3/3 completed，3/3 `terminal_action=proposal` |
+| typed draft 与 Builder | 3/3 eligible；draft schema/build rejection 为 0 |
+| Proposal 持久化 | 3/3 `persistence_status=created` |
+| Registry 一致性 | 3/3 六项检查 match；mismatch/error 为 0 |
+| 业务门禁 | 通过 |
+
+三次低完成率 Run 的服务端 duration 约为 32.9–49.0 秒。三次初始 Planner 都命中 15 秒 deadline
+fallback，但 fallback 仍生成固定的三证据只读计划，Finalizer 随后成功形成 typed draft，未影响
+Proposal 创建和持久化结果。
+
+### 决策生命周期
+
+| 场景 | 结果 |
+| --- | --- |
+| reject | 1/1：`pending_confirmation → rejected`，版本 `1 → 2` |
+| reject 幂等与计划隔离 | 同一 `client_request_id` 重放结果一致；终态无 allowed action；原计划保持唯一活动计划 |
+| confirm | 1/1：`pending_confirmation → applied`，版本 `1 → 2` |
+| confirm 幂等与原子应用 | 重放结果一致；只创建一个结果计划；新计划成为唯一活动计划，旧计划失活；结果 ID/fingerprint 与 GET 终态一致 |
+| 生命周期业务门禁 | 2/2 通过 |
+
+reject 和 confirm 样本的 Proposal 生成阶段分别约为 91.2 秒和 52.4 秒。该耗时包含真实模型
+Planner/Finalizer 和 Run 轮询，不能解释为确定性 decision 事务耗时。
+
+### 结论与非阻塞遗留
+
+`0.5.11 / 022` 通过 Proposal 后端内部观测门禁：本轮 typed Finalizer 修复把此前真实模型样本中的
+`proposal_draft_schema_invalid` / `proposal_draft_invalid` 从阻塞问题收敛为 0/3，创建、读取、拒绝、
+确认、幂等重放和原子计划切换均取得真实部署证据。该结论只允许收口当前
+`plan_adjustment_v1` 范围，不授权新增模型可见写工具、聊天确认、其他 proposal 类型或生产放量。
+
+保留两个非阻塞遗留：
+
+1. 小样本中 Planner deadline fallback 为 3/3，需要作为延迟与模型稳定性指标继续观察，但没有
+   破坏业务正确性，不阻塞当前 Proposal v1 收口。
+2. Proposal 生成端到端长尾达到约 91 秒，需要在真实产品试用中评估等待体验；优化时必须区分
+   模型生成/轮询耗时与确定性 confirm/reject 事务耗时，不能为追求延迟而放宽 typed draft、证据或
+   用户确认不变量。
+
+下一门禁是小程序真实交互验收：详情 before/after、二次确认、按钮锁、结果不确定时 GET 核实、
+幂等手动重试，以及并发/过期状态提示。通过前不扩大 Proposal cohort。
