@@ -307,6 +307,44 @@ def test_runtime_builder_derives_full_snapshots_target_and_evidence():
     }
 
 
+def test_runtime_builder_accepts_authoritative_plan_duration_extension():
+    draft = {
+        "proposal_type": "plan_adjustment_v1",
+        "changes": [{
+            "change_type": "update_plan_schedule",
+            "stable_display_key": "plan-schedule",
+            "before": {"duration_weeks": 4},
+            "after": {"duration_weeks": 6},
+            "reason": "延长计划周期以降低每周推进压力。",
+            "safety_priority": False,
+        }],
+        "rationale": ["近期完成率偏低，先给计划留出更多适应时间。"],
+        "safety_notes": [],
+        "requested_ttl_hours": 24,
+    }
+
+    result = build_runtime_plan_adjustment_proposal(
+        feature_enabled=True,
+        run_owned=True,
+        selected_outcome="adjustment_proposal",
+        terminal_action="proposal",
+        intent_allows_adjustment=True,
+        risk_level="low",
+        clarification_required=False,
+        observations=_runtime_observations(),
+        proposal_draft=draft,
+        created_at=_CREATED_AT,
+    )
+
+    assert result.decision.eligible is True
+    assert result.built is not None
+    assert result.built.payload.before.duration_weeks == 4
+    assert result.built.payload.after.duration_weeks == 6
+    assert result.built.payload.before.days_per_week == (
+        result.built.payload.after.days_per_week
+    )
+
+
 @pytest.mark.parametrize(
     ("failure_stage", "expected_reason"),
     [

@@ -82,6 +82,15 @@ SYSTEM_PROMPT = """你是 Fitness Agent，一位中文健身对话助手。
 """
 
 
+_PROPOSAL_NOT_CREATED_REPLY = (
+    "我已完成本轮评估，但没有生成可确认的训练计划调整提案，"
+    "当前计划未作修改。你可以补充希望调整的具体范围后重新发起请求。"
+)
+_PROPOSAL_REJECTED_SAFE_ANSWER_REASON = (
+    "proposal_creation_rejected_safe_answer"
+)
+
+
 @dataclass(frozen=True)
 class AgentRuntimeResult:
     reply: str
@@ -114,6 +123,63 @@ def _proposal_reference_from_model(proposal: Any) -> AgentProposalReference:
         version=proposal.version,
         expires_at=proposal.expires_at,
         payload_fingerprint=proposal.payload_fingerprint,
+    )
+
+
+def _normalize_unpersisted_proposal_result(
+    *,
+    reply: str,
+    execution_trace: AgentExecutionTrace,
+    proposal_creation_enabled: bool,
+    proposal_reference: AgentProposalReference | None,
+) -> tuple[str, AgentExecutionTrace]:
+    """Never expose a proposal terminal action without a durable proposal."""
+
+    if (
+        not proposal_creation_enabled
+        or execution_trace.terminal_action != "proposal"
+        or proposal_reference is not None
+    ):
+        return reply, execution_trace
+
+    mode_reasons = [
+        reason
+        for reason in execution_trace.mode_reasons
+        if reason != _PROPOSAL_REJECTED_SAFE_ANSWER_REASON
+    ][-7:]
+    mode_reasons.append(_PROPOSAL_REJECTED_SAFE_ANSWER_REASON)
+    return _PROPOSAL_NOT_CREATED_REPLY, execution_trace.model_copy(update={
+        "terminal_action": "answer",
+        "mode_reasons": mode_reasons,
+    })
+
+
+def _log_proposal_creation_diagnostic(
+    *,
+    run_id: str,
+    execution_trace: AgentExecutionTrace,
+) -> None:
+    diagnostic = execution_trace.proposal_creation
+    if diagnostic is None:
+        return
+    logger.info(
+        "agent_plan_adjustment_proposal_creation %s",
+        json.dumps(
+            {
+                "eligible": diagnostic.eligible,
+                "persisted": diagnostic.persisted,
+                "persistence_reason_code": (
+                    diagnostic.persistence_reason_code
+                ),
+                "persistence_status": diagnostic.persistence_status,
+                "reason_code": diagnostic.reason_code,
+                "run_id": run_id,
+                "terminal_action": execution_trace.terminal_action,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
     )
 
 
@@ -875,6 +941,14 @@ async def execute_agent_run(
                     raise RuntimeError(
                         "proposal persistence returned no proposal or reason"
                     )
+            reply, execution_trace = _normalize_unpersisted_proposal_result(
+                reply=reply,
+                execution_trace=execution_trace,
+                proposal_creation_enabled=(
+                    settings.AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED
+                ),
+                proposal_reference=proposal_reference,
+            )
             message_content_data: dict[str, Any] = {}
             if cards:
                 message_content_data["cards"] = cards
@@ -897,6 +971,10 @@ async def execute_agent_run(
             run.execution_trace = execution_trace.model_dump(mode="json")
             conversation.updated_at = now
             await db.commit()
+            _log_proposal_creation_diagnostic(
+                run_id=run.id,
+                execution_trace=execution_trace,
+            )
             return AgentRuntimeResult(
                 reply=reply,
                 run_id=run.id,

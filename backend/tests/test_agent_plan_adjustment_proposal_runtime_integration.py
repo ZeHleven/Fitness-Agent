@@ -508,10 +508,12 @@ async def test_flag_on_atomically_persists_and_returns_minimal_proposal_referenc
 
 
 @pytest.mark.asyncio
-async def test_flag_on_invalid_draft_keeps_text_response_without_proposal(
+async def test_flag_on_invalid_draft_normalizes_to_safe_answer_without_proposal(
     client,
     db_session,
+    caplog,
 ):
+    caplog.set_level("INFO", logger="app.services.agent_runtime")
     token, plan = await _seed_active_plan(
         client,
         email="proposal-runtime-invalid@example.com",
@@ -548,8 +550,14 @@ async def test_flag_on_invalid_draft_keeps_text_response_without_proposal(
         )
 
     assert response.status_code == 200
-    assert "proposal" not in response.json()
-    assert "尚未执行" in response.json()["reply"]
+    body = response.json()
+    assert "proposal" not in body
+    assert body["reply"] == (
+        "我已完成本轮评估，但没有生成可确认的训练计划调整提案，"
+        "当前计划未作修改。你可以补充希望调整的具体范围后重新发起请求。"
+    )
+    assert "待确认" not in body["reply"]
+    assert "需要你确认" not in body["reply"]
     persist_proposal.assert_not_awaited()
     proposal_count = await db_session.scalar(
         select(func.count(AgentProposal.id)).where(
@@ -562,14 +570,26 @@ async def test_flag_on_invalid_draft_keeps_text_response_without_proposal(
         headers={"Authorization": f"Bearer {token}"},
     )
     assert run_response.status_code == 200
-    assert run_response.json()["execution_trace"]["trace_version"] == "1.2"
-    assert run_response.json()["execution_trace"]["proposal_creation"] == {
+    trace = run_response.json()["execution_trace"]
+    assert trace["trace_version"] == "1.2"
+    assert trace["terminal_action"] == "answer"
+    assert trace["finalization_contract"]["derived_terminal_action"] == (
+        "proposal"
+    )
+    assert "proposal_creation_rejected_safe_answer" in trace["mode_reasons"]
+    assert trace["proposal_creation"] == {
         "eligible": False,
         "reason_code": "proposal_target_mismatch",
         "persisted": False,
         "persistence_status": "not_attempted",
         "persistence_reason_code": None,
     }
+    assert any(
+        "agent_plan_adjustment_proposal_creation" in record.message
+        and body["run_id"] in record.message
+        and '"reason_code":"proposal_target_mismatch"' in record.message
+        for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio
