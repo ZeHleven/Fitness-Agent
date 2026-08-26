@@ -65,6 +65,7 @@ from app.services.ai_client import AIServiceError
 
 
 logger = logging.getLogger(__name__)
+production_diagnostic_logger = logging.getLogger("uvicorn.error")
 
 
 SYSTEM_PROMPT = """你是 Fitness Agent，一位中文健身对话助手。
@@ -162,7 +163,7 @@ def _log_proposal_creation_diagnostic(
     diagnostic = execution_trace.proposal_creation
     if diagnostic is None:
         return
-    logger.info(
+    production_diagnostic_logger.info(
         "agent_plan_adjustment_proposal_creation %s",
         json.dumps(
             {

@@ -12,7 +12,7 @@ from typing import Literal
 from app.config import settings
 
 
-logger = logging.getLogger(__name__)
+production_logger = logging.getLogger("uvicorn.error")
 
 _BUILD_METADATA_PATH = Path(__file__).with_name("build_metadata.json")
 _BUILD_VERSION_PATTERN = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._-]{0,39}$")
@@ -111,7 +111,7 @@ def log_agent_startup_diagnostic(
             settings.AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED
         ),
     )
-    logger.info(
+    production_logger.info(
         "agent_startup_diagnostic %s",
         json.dumps(
             diagnostic,

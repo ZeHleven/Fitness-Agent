@@ -101,7 +101,7 @@ def test_startup_log_contains_only_allowlisted_non_secret_fields(
     )
     monkeypatch.setattr(settings, "SECRET_KEY", "must-never-be-logged")
     monkeypatch.setattr(settings, "DEEPSEEK_API_KEY", "also-never-logged")
-    caplog.set_level(logging.INFO, logger="app.startup_diagnostics")
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
 
     diagnostic = log_agent_startup_diagnostic(metadata_path=manifest)
 
@@ -109,6 +109,13 @@ def test_startup_log_contains_only_allowlisted_non_secret_fields(
     assert "agent_startup_diagnostic" in caplog.text
     assert "must-never-be-logged" not in caplog.text
     assert "also-never-logged" not in caplog.text
+    diagnostic_records = [
+        record
+        for record in caplog.records
+        if "agent_startup_diagnostic" in record.message
+    ]
+    assert len(diagnostic_records) == 1
+    assert diagnostic_records[0].name == "uvicorn.error"
     assert set(diagnostic) == {
         "schema_version",
         "build_version",

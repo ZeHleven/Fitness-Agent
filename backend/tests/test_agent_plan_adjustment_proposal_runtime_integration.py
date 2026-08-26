@@ -513,7 +513,7 @@ async def test_flag_on_invalid_draft_normalizes_to_safe_answer_without_proposal(
     db_session,
     caplog,
 ):
-    caplog.set_level("INFO", logger="app.services.agent_runtime")
+    caplog.set_level("INFO", logger="uvicorn.error")
     token, plan = await _seed_active_plan(
         client,
         email="proposal-runtime-invalid@example.com",
@@ -584,11 +584,17 @@ async def test_flag_on_invalid_draft_normalizes_to_safe_answer_without_proposal(
         "persistence_status": "not_attempted",
         "persistence_reason_code": None,
     }
-    assert any(
-        "agent_plan_adjustment_proposal_creation" in record.message
-        and body["run_id"] in record.message
-        and '"reason_code":"proposal_target_mismatch"' in record.message
+    diagnostic_records = [
+        record
         for record in caplog.records
+        if "agent_plan_adjustment_proposal_creation" in record.message
+    ]
+    assert len(diagnostic_records) == 1
+    assert diagnostic_records[0].name == "uvicorn.error"
+    assert body["run_id"] in diagnostic_records[0].message
+    assert (
+        '"reason_code":"proposal_target_mismatch"'
+        in diagnostic_records[0].message
     )
 
 
