@@ -15,6 +15,9 @@ declare module '*.styl';
 declare const __FITNESS_API_BASE_URL__: string
 declare const __FITNESS_CLOUD_ENV__: string
 declare const __FITNESS_CLOUD_SERVICE__: string
+declare const __FITNESS_BUILD_VERSION__: string
+declare const __FITNESS_BUILD_COMMIT__: string
+declare const __FITNESS_BUILD_SOURCE_DIRTY__: boolean
 
 declare namespace NodeJS {
   interface ProcessEnv {
@@ -34,5 +37,11 @@ declare namespace NodeJS {
     TARO_APP_CLOUD_ENV?: string
     /** 微信云托管服务名；与环境 ID 同时存在时启用 callContainer。 */
     TARO_APP_CLOUD_SERVICE?: string
+    /** Traceable mini program build version supplied by the build wrapper. */
+    TARO_APP_BUILD_VERSION?: string
+    /** Full Git SHA supplied by the build wrapper. */
+    TARO_APP_BUILD_COMMIT?: string
+    /** Whether tracked or untracked source changes existed at build time. */
+    TARO_APP_BUILD_SOURCE_DIRTY?: 'true' | 'false'
   }
 }

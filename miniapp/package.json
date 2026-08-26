@@ -12,7 +12,7 @@
   "packageManager": "pnpm@11.19.0",
   "scripts": {
     "new": "taro new",
-    "build:weapp": "taro build --type weapp && node scripts/validate-weapp-build.mjs",
+    "build:weapp": "node scripts/build-weapp.mjs",
     "build:h5": "taro build --type h5",
     "dev:weapp": "taro build --type weapp --watch",
     "dev:h5": "taro build --type h5 --watch",

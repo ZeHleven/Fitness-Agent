@@ -71,10 +71,18 @@
 
 .wechat-note {
   display: block;
-  padding: 8px 30px 40px;
+  padding: 8px 30px 16px;
   text-align: center;
   color: #7b8b81;
   font-size: 23px;
+}
+
+.build-identity {
+  display: block;
+  padding: 0 30px 40px;
+  color: #9aa69f;
+  font-size: 20px;
+  text-align: center;
 }
 
 .wechat-login-button {

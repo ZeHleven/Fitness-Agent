@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Button, ScrollView, Text, Textarea, View } from '@tarojs/components'
 import Taro, { useLoad } from '@tarojs/taro'
 
+import { miniappBuildLabel } from '../../core/build-info'
 import {
   projectProposalStatus,
   proposalLocalExpiryState
@@ -246,6 +247,7 @@ export default function AgentPage () {
         <View>
           <Text className='agent-eyebrow'>只读能力已开启</Text>
           <Text className='agent-title'>和训练搭子聊聊</Text>
+          <Text className='agent-build'>{miniappBuildLabel()}</Text>
         </View>
         <View className='new-chat' onClick={startNewConversation}>新对话</View>
       </View>

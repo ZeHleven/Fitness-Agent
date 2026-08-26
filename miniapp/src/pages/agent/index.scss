@@ -13,7 +13,8 @@
 }
 
 .agent-eyebrow,
-.agent-title {
+.agent-title,
+.agent-build {
   display: block;
 }
 
@@ -26,6 +27,12 @@
   margin-top: 4px;
   font-size: 40px;
   font-weight: 850;
+}
+
+.agent-build {
+  margin-top: 5px;
+  color: #9aa69f;
+  font-size: 18px;
 }
 
 .new-chat {

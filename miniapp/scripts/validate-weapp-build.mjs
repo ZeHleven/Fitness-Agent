@@ -40,7 +40,8 @@ if (javascriptFiles.length === 0) {
 const errors = validateWeappArtifact({
   javascriptFiles,
   appConfig: await readJson(path.join(distRoot, 'app.json'), true),
-  projectConfig: await readJson(path.join(distRoot, 'project.config.json'), false)
+  projectConfig: await readJson(path.join(distRoot, 'project.config.json'), false),
+  buildManifest: await readJson(path.join(distRoot, 'build-info.json'), true)
 })
 
 if (errors.length > 0) {

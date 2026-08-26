@@ -1,10 +1,13 @@
+import { validateMiniappBuildMetadata } from './miniapp-build-metadata.mjs'
+
 const RUNTIME_ENVIRONMENT_PATTERN = /\bprocess\s*(?:\.\s*env|\[\s*['"]env['"]\s*\])/u
 const REQUIRED_PAGES = ['pages/proposal-detail/index']
 
 export function validateWeappArtifact ({
   javascriptFiles,
   appConfig,
-  projectConfig = null
+  projectConfig = null,
+  buildManifest
 }) {
   const errors = []
 
@@ -41,6 +44,14 @@ export function validateWeappArtifact ({
     errors.push({
       code: 'invalid_miniprogram_root',
       message: 'dist/project.config.json must use ./ as miniprogramRoot'
+    })
+  }
+
+  const metadataErrors = validateMiniappBuildMetadata(buildManifest)
+  if (metadataErrors.length > 0) {
+    errors.push({
+      code: 'build_manifest_invalid',
+      message: metadataErrors.join('; ')
     })
   }
 

@@ -1,6 +1,9 @@
 [CmdletBinding()]
 param(
-    [switch]$SkipRemoteHealth
+    [switch]$SkipRemoteHealth,
+
+    [ValidatePattern('^\d+\.\d+\.\d+$')]
+    [string]$MiniappVersion
 )
 
 $ErrorActionPreference = 'Stop'
@@ -155,7 +158,12 @@ if (-not $SkipRemoteHealth) {
 }
 
 Push-Location $miniappPath
+$hadBuildVersion = Test-Path Env:TARO_APP_BUILD_VERSION
+$previousBuildVersion = $env:TARO_APP_BUILD_VERSION
 try {
+    if ($MiniappVersion) {
+        $env:TARO_APP_BUILD_VERSION = $MiniappVersion
+    }
     & pnpm.cmd typecheck
     if ($LASTEXITCODE -ne 0) { throw 'Miniapp typecheck failed.' }
 
@@ -173,12 +181,32 @@ try {
         throw 'compileHotReLoad must be disabled in the production build.'
     }
 
+    $buildInfo = Get-Content -LiteralPath 'dist\build-info.json' -Raw | ConvertFrom-Json
+    $headCommit = (& git -C $projectRoot rev-parse --verify HEAD).Trim().ToLowerInvariant()
+    if ($buildInfo.schema_version -ne '1.0') {
+        throw 'Miniapp build metadata schema is invalid.'
+    }
+    if ($MiniappVersion -and $buildInfo.build_version -ne $MiniappVersion) {
+        throw 'Built miniapp version does not match the upload version.'
+    }
+    if ($buildInfo.build_commit -ne $headCommit) {
+        throw 'Built miniapp commit does not match the current Git HEAD.'
+    }
+    if ($buildInfo.source_dirty -ne $false) {
+        throw 'Refusing to release a miniapp built from a dirty source tree.'
+    }
+
     $unsupported = Get-ChildItem -LiteralPath 'dist' -Filter '*.js' -Recurse |
         Select-String -SimpleMatch -Pattern '?.', '??'
     if ($unsupported) {
         throw 'Production build contains optional chaining or nullish coalescing.'
     }
 } finally {
+    if ($hadBuildVersion) {
+        $env:TARO_APP_BUILD_VERSION = $previousBuildVersion
+    } else {
+        Remove-Item Env:TARO_APP_BUILD_VERSION -ErrorAction SilentlyContinue
+    }
     Pop-Location
 }
 

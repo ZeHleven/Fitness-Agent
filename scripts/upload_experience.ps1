@@ -22,7 +22,9 @@ if (-not (Test-Path -LiteralPath $DeveloperToolsPath)) {
     throw "WeChat DevTools CLI not found: $DeveloperToolsPath"
 }
 
-& $preflightPath -SkipRemoteHealth:$SkipRemoteHealth
+& $preflightPath `
+    -SkipRemoteHealth:$SkipRemoteHealth `
+    -MiniappVersion $Version
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }

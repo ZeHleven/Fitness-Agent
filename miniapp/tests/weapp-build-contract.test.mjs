@@ -5,9 +5,14 @@ import test from 'node:test'
 
 import ts from 'typescript'
 
+import {
+  createMiniappBuildMetadata,
+  miniappBuildEnvironment,
+  validateMiniappBuildMetadata
+} from '../scripts/miniapp-build-metadata.mjs'
 import { validateWeappArtifact } from '../scripts/weapp-build-contract.mjs'
 
-function loadTypeScriptModule (relativePath) {
+function loadTypeScriptModule (relativePath, globals = {}) {
   const sourceUrl = new URL(relativePath, import.meta.url)
   const sourcePath = fileURLToPath(sourceUrl)
   const output = ts.transpileModule(readFileSync(sourcePath, 'utf8'), {
@@ -18,12 +23,29 @@ function loadTypeScriptModule (relativePath) {
     fileName: sourcePath
   }).outputText
   const loaded = { exports: {} }
-  const evaluate = new Function('exports', 'module', output)
-  evaluate(loaded.exports, loaded)
+  const globalNames = Object.keys(globals)
+  const evaluate = new Function('exports', 'module', ...globalNames, output)
+  evaluate(
+    loaded.exports,
+    loaded,
+    ...globalNames.map(name => globals[name])
+  )
   return loaded.exports
 }
 
 const runtimeEnvironment = loadTypeScriptModule('../config/runtime-env.ts')
+const buildInfo = loadTypeScriptModule('../src/core/build-info.ts', {
+  __FITNESS_BUILD_VERSION__: '1.2.3',
+  __FITNESS_BUILD_COMMIT__: 'a'.repeat(40),
+  __FITNESS_BUILD_SOURCE_DIRTY__: false
+})
+
+const validBuildManifest = {
+  schema_version: '1.0',
+  build_version: '1.2.3',
+  build_commit: 'a'.repeat(40),
+  source_dirty: false
+}
 
 function artifact (overrides = {}) {
   return {
@@ -33,6 +55,7 @@ function artifact (overrides = {}) {
       miniprogramRoot: './',
       setting: { compileHotReLoad: false }
     },
+    buildManifest: validBuildManifest,
     ...overrides
   }
 }
@@ -41,7 +64,10 @@ test('missing optional transport variables become string literals', () => {
   assert.deepEqual(runtimeEnvironment.projectRuntimeDefineConstants({}), {
     __FITNESS_API_BASE_URL__: '""',
     __FITNESS_CLOUD_ENV__: '""',
-    __FITNESS_CLOUD_SERVICE__: '""'
+    __FITNESS_CLOUD_SERVICE__: '""',
+    __FITNESS_BUILD_VERSION__: '"development"',
+    __FITNESS_BUILD_COMMIT__: '"unknown"',
+    __FITNESS_BUILD_SOURCE_DIRTY__: 'true'
   })
 })
 
@@ -49,12 +75,84 @@ test('runtime transport values are trimmed and safely quoted', () => {
   assert.deepEqual(runtimeEnvironment.projectRuntimeDefineConstants({
     TARO_APP_API_BASE_URL: ' https://api.example.test/api/v1/ ',
     TARO_APP_CLOUD_ENV: ' env-test ',
-    TARO_APP_CLOUD_SERVICE: ' service-"quoted" '
+    TARO_APP_CLOUD_SERVICE: ' service-"quoted" ',
+    TARO_APP_BUILD_VERSION: ' 1.2.3 ',
+    TARO_APP_BUILD_COMMIT: ` ${'b'.repeat(40)} `,
+    TARO_APP_BUILD_SOURCE_DIRTY: 'false'
   }), {
     __FITNESS_API_BASE_URL__: '"https://api.example.test/api/v1/"',
     __FITNESS_CLOUD_ENV__: '"env-test"',
-    __FITNESS_CLOUD_SERVICE__: '"service-\\"quoted\\""'
+    __FITNESS_CLOUD_SERVICE__: '"service-\\"quoted\\""',
+    __FITNESS_BUILD_VERSION__: '"1.2.3"',
+    __FITNESS_BUILD_COMMIT__: `"${'b'.repeat(40)}"`,
+    __FITNESS_BUILD_SOURCE_DIRTY__: 'false'
   })
+})
+
+test('build metadata is strict and projects one canonical build environment', () => {
+  const metadata = createMiniappBuildMetadata({
+    version: '1.2.3',
+    commit: 'A'.repeat(40),
+    sourceDirty: false
+  })
+  assert.deepEqual(metadata, validBuildManifest)
+  assert.deepEqual(validateMiniappBuildMetadata(metadata), [])
+  assert.deepEqual(miniappBuildEnvironment(metadata), {
+    TARO_APP_BUILD_VERSION: '1.2.3',
+    TARO_APP_BUILD_COMMIT: 'a'.repeat(40),
+    TARO_APP_BUILD_SOURCE_DIRTY: 'false'
+  })
+})
+
+test('invalid or ambiguous build identities are rejected', () => {
+  for (const candidate of [
+    null,
+    { ...validBuildManifest, build_version: 'latest' },
+    { ...validBuildManifest, build_version: '1.2.3-beta' },
+    { ...validBuildManifest, build_commit: 'abc1234' },
+    { ...validBuildManifest, source_dirty: 'false' },
+    { ...validBuildManifest, unexpected: true }
+  ]) {
+    assert.notDeepEqual(validateMiniappBuildMetadata(candidate), [])
+  }
+})
+
+test('runtime build label exposes version, short commit, and dirty state', () => {
+  assert.equal(buildInfo.miniappBuildLabel(), 'v1.2.3 · aaaaaaaaaaaa')
+  assert.equal(buildInfo.miniappBuildLabel({
+    ...validBuildManifest,
+    source_dirty: true
+  }), 'v1.2.3 · aaaaaaaaaaaa · dirty')
+})
+
+test('build identity is logged and visible before and after authentication', () => {
+  const appSource = readFileSync(new URL('../src/app.ts', import.meta.url), 'utf8')
+  const loginSource = readFileSync(
+    new URL('../src/pages/login/index.tsx', import.meta.url),
+    'utf8'
+  )
+  const agentSource = readFileSync(
+    new URL('../src/pages/agent/index.tsx', import.meta.url),
+    'utf8'
+  )
+  assert.match(appSource, /logMiniappBuildDiagnostic\(\)/u)
+  assert.match(loginSource, /miniappBuildLabel\(\)/u)
+  assert.match(agentSource, /miniappBuildLabel\(\)/u)
+})
+
+test('experience upload binds its version and release gate rejects dirty builds', () => {
+  const uploadSource = readFileSync(
+    new URL('../../scripts/upload_experience.ps1', import.meta.url),
+    'utf8'
+  )
+  const preflightSource = readFileSync(
+    new URL('../../scripts/release_preflight.ps1', import.meta.url),
+    'utf8'
+  )
+  assert.match(uploadSource, /-MiniappVersion \$Version/u)
+  assert.match(preflightSource, /build_version -ne \$MiniappVersion/u)
+  assert.match(preflightSource, /source_dirty -ne \$false/u)
+  assert.match(preflightSource, /build_commit -ne \$headCommit/u)
 })
 
 test('clean WeChat artifact satisfies the build contract', () => {
@@ -90,4 +188,16 @@ test('route, hot reload, and project root violations fail independently', () => 
 
 test('project config is optional for source-only CI builds', () => {
   assert.deepEqual(validateWeappArtifact(artifact({ projectConfig: null })), [])
+})
+
+test('missing or malformed build manifest fails the artifact gate', () => {
+  for (const buildManifest of [
+    null,
+    { ...validBuildManifest, build_commit: 'not-a-commit' }
+  ]) {
+    assert.deepEqual(
+      validateWeappArtifact(artifact({ buildManifest })).map(error => error.code),
+      ['build_manifest_invalid']
+    )
+  }
 })

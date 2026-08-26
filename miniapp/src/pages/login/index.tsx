@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Button, Input, Text, View } from '@tarojs/components'
 import Taro from '@tarojs/taro'
 
+import { miniappBuildLabel } from '../../core/build-info'
 import { errorMessage } from '../../core/request'
 import {
   authenticate,
@@ -124,6 +125,7 @@ export default function LoginPage () {
       </View>
 
       <Text className='wechat-note'>首次登录后需要完成基础资料与健康筛查，用于生成更安全的训练建议</Text>
+      <Text className='build-identity'>{miniappBuildLabel()}</Text>
     </View>
   )
 }
