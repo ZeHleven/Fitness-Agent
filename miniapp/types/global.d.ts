@@ -11,6 +11,11 @@ declare module '*.scss';
 declare module '*.sass';
 declare module '*.styl';
 
+/** Build-time transport constants projected by config/runtime-env.ts. */
+declare const __FITNESS_API_BASE_URL__: string
+declare const __FITNESS_CLOUD_ENV__: string
+declare const __FITNESS_CLOUD_SERVICE__: string
+
 declare namespace NodeJS {
   interface ProcessEnv {
     /** NODE 内置环境变量, 会影响到最终构建生成产物 */

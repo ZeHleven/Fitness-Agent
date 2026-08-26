@@ -9,10 +9,10 @@ import {
 import type { TokenResponse } from '../types/api'
 
 const API_BASE_URL = (
-  process.env.TARO_APP_API_BASE_URL || 'http://127.0.0.1:8000/api/v1'
+  __FITNESS_API_BASE_URL__ || 'http://127.0.0.1:8000/api/v1'
 ).replace(/\/$/, '')
-const CLOUD_ENV = process.env.TARO_APP_CLOUD_ENV || ''
-const CLOUD_SERVICE = process.env.TARO_APP_CLOUD_SERVICE || ''
+const CLOUD_ENV = __FITNESS_CLOUD_ENV__
+const CLOUD_SERVICE = __FITNESS_CLOUD_SERVICE__
 const USE_CLOUD_TRANSPORT = Boolean(CLOUD_ENV && CLOUD_SERVICE)
 const CLOUD_API_PREFIX = '/api/v1'
 const REQUEST_TIMEOUT_MS = 15000

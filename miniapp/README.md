@@ -61,8 +61,13 @@ TARO_APP_API_BASE_URL="https://你的测试接口域名/api/v1"
 
 ```powershell
 pnpm typecheck
+pnpm test:build-contract
 pnpm build:weapp
 ```
+
+`build:weapp` 会在 Taro 编译后校验产物：小程序 JavaScript 不得残留
+`process.env`，Proposal 详情路由必须存在，正式项目配置必须以产物目录为根且
+不得开启热重载。
 
 ## 微信登录数据边界
 
@@ -76,7 +81,8 @@ pnpm build:weapp
 ## 自建部署清单
 
 - 在微信公众平台申请自己的 AppID，并只在后端托管平台保存 AppSecret。
-- 复制 `.env.production.example` 为 `.env.production`，填写自己的 CloudBase 环境和服务名。
+- 复制 `.env.production.example` 为 `.env.production`（或使用优先级更高的
+  `.env.production.local`），填写自己的 CloudBase 环境和服务名。
 - 配置微信平台允许的 HTTPS 域名，完成真机网络、弱网、前后台切换和授权失败测试。
 - 根据实际主体和类目准备隐私协议、用户信息处理说明与平台审核材料。
 - 生产发布前重新运行类型检查、微信构建和完整手机验收。

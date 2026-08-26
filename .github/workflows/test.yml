@@ -92,6 +92,10 @@ jobs:
         working-directory: miniapp
         run: pnpm test:proposal-contract
 
+      - name: Run WeChat build contract
+        working-directory: miniapp
+        run: pnpm test:build-contract
+
       - name: Typecheck mini program
         working-directory: miniapp
         run: pnpm typecheck

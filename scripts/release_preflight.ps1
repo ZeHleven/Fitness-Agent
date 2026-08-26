@@ -6,7 +6,13 @@ param(
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $backendEnvPath = Join-Path $projectRoot '.env.production.local'
-$miniappEnvPath = Join-Path $projectRoot 'miniapp\.env.production.local'
+$miniappLocalEnvPath = Join-Path $projectRoot 'miniapp\.env.production.local'
+$miniappProductionEnvPath = Join-Path $projectRoot 'miniapp\.env.production'
+$miniappEnvPath = if (Test-Path -LiteralPath $miniappLocalEnvPath) {
+    $miniappLocalEnvPath
+} else {
+    $miniappProductionEnvPath
+}
 $miniappPath = Join-Path $projectRoot 'miniapp'
 
 function Read-DotEnv([string]$Path) {
@@ -41,7 +47,7 @@ if (-not (Test-Path -LiteralPath $backendEnvPath)) {
     $errors.Add('Missing root .env.production.local.')
 }
 if (-not (Test-Path -LiteralPath $miniappEnvPath)) {
-    $errors.Add('Missing miniapp/.env.production.local.')
+    $errors.Add('Missing miniapp/.env.production.local or miniapp/.env.production.')
 }
 
 $backendEnv = Read-DotEnv $backendEnvPath
@@ -152,6 +158,9 @@ Push-Location $miniappPath
 try {
     & pnpm.cmd typecheck
     if ($LASTEXITCODE -ne 0) { throw 'Miniapp typecheck failed.' }
+
+    & pnpm.cmd test:build-contract
+    if ($LASTEXITCODE -ne 0) { throw 'Miniapp build contract tests failed.' }
 
     & pnpm.cmd build:weapp
     if ($LASTEXITCODE -ne 0) { throw 'Miniapp production build failed.' }

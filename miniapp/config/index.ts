@@ -2,6 +2,7 @@ import { defineConfig, type UserConfigExport } from '@tarojs/cli'
 import TsconfigPathsPlugin from 'tsconfig-paths-webpack-plugin'
 import devConfig from './dev'
 import prodConfig from './prod'
+import { projectRuntimeDefineConstants } from './runtime-env'
 
 // https://taro-docs.jd.com/docs/next/config#defineconfig-辅助函数
 export default defineConfig<'webpack5'>(async (merge) => {
@@ -20,8 +21,10 @@ export default defineConfig<'webpack5'>(async (merge) => {
     plugins: [
       "@tarojs/plugin-generator"
     ],
-    defineConstants: {
-    },
+    // Always replace the complete runtime transport contract. Taro only
+    // substitutes TARO_APP_* variables that exist, so optional values must be
+    // projected explicitly to avoid shipping `process.env` into WeChat.
+    defineConstants: projectRuntimeDefineConstants(process.env),
     copy: {
       patterns: [
       ],
