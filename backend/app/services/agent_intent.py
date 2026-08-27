@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 IntentName = Literal[
@@ -51,6 +52,23 @@ class IntentResolution(BaseModel):
     clarification_question: str | None = Field(default=None, max_length=500)
     risk_level: Literal["low", "medium", "high"] = "low"
     confidence: float = Field(ge=0, le=1)
+
+
+class ExplicitPlanAdjustmentCommand(BaseModel):
+    """Server-owned typed command for the first explicit write cohort."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    operation: Literal["set_duration_weeks"] = "set_duration_weeks"
+    expected_duration_weeks: int = Field(ge=2, le=12)
+    target_duration_weeks: int = Field(ge=2, le=12)
+    preserve_other_fields: Literal[True] = True
+
+    @model_validator(mode="after")
+    def validate_effect(self) -> "ExplicitPlanAdjustmentCommand":
+        if self.expected_duration_weeks == self.target_duration_weeks:
+            raise ValueError("explicit plan adjustment must have an effect")
+        return self
 
 
 @dataclass(frozen=True)
@@ -117,17 +135,6 @@ _PLAN_ADJUSTMENT_MARKERS = (
     "合适",
 )
 
-_EXPLICIT_PLAN_MUTATION_MARKERS = (
-    "调整",
-    "修改",
-    "改为",
-    "改成",
-    "延长",
-    "缩短",
-    "增加到",
-    "减少到",
-)
-
 _EXPLICIT_PROPOSAL_MARKERS = (
     "待确认提案",
     "调整提案",
@@ -136,6 +143,30 @@ _EXPLICIT_PROPOSAL_MARKERS = (
 
 _EXPLICIT_PROPOSAL_SUBTASK = (
     "根据用户明确范围形成待确认的训练计划调整提案"
+)
+
+_EXPLICIT_DURATION_CHANGE_PATTERN = re.compile(
+    r"(?:训练计划(?:的)?周期|计划周期)"
+    r"从(?P<before>\d{1,2})周"
+    r"(?P<verb>延长|缩短|调整|修改|改)?"
+    r"(?:到|至|为|成)"
+    r"(?P<after>\d{1,2})周"
+)
+
+_EXPLICIT_PRESERVE_OTHER_FIELDS_PATTERN = re.compile(
+    r"(?:其他|其它|其余)内容(?:完全)?(?:保持)?不变"
+)
+
+_EXPLICIT_UNSUPPORTED_SCOPE_MARKERS = (
+    "组数",
+    "次数",
+    "重量",
+    "休息",
+    "替换动作",
+    "增加动作",
+    "删除动作",
+    "频率",
+    "训练天数",
 )
 
 _RECENT_COMPLETION_MARKERS = (
@@ -305,16 +336,52 @@ def _is_plan_adjustment_assessment(message: str) -> bool:
     )
 
 
+def parse_explicit_plan_adjustment_command(
+    message: str,
+) -> ExplicitPlanAdjustmentCommand | None:
+    """Parse only an unambiguous, one-field duration Proposal request.
+
+    This parser is intentionally narrower than natural-language intent
+    classification. A request reaches the plan-only mutation path only when
+    the expected baseline, target value, unchanged remainder, and Proposal
+    intent are all explicit.
+    """
+
+    normalized = re.sub(r"\s+", "", message.strip().lower())
+    if not (
+        any(marker in normalized for marker in _EXPLICIT_PLAN_KEYWORDS)
+        and any(marker in normalized for marker in _EXPLICIT_PROPOSAL_MARKERS)
+        and _EXPLICIT_PRESERVE_OTHER_FIELDS_PATTERN.search(normalized)
+        and not any(
+            marker in normalized
+            for marker in _EXPLICIT_UNSUPPORTED_SCOPE_MARKERS
+        )
+    ):
+        return None
+
+    matches = list(_EXPLICIT_DURATION_CHANGE_PATTERN.finditer(normalized))
+    if len(matches) != 1:
+        return None
+    match = matches[0]
+    before = int(match.group("before"))
+    after = int(match.group("after"))
+    verb = match.group("verb")
+    if verb == "延长" and after <= before:
+        return None
+    if verb == "缩短" and after >= before:
+        return None
+    try:
+        return ExplicitPlanAdjustmentCommand(
+            expected_duration_weeks=before,
+            target_duration_weeks=after,
+        )
+    except ValueError:
+        return None
+
+
 def is_explicit_plan_adjustment_request(message: str) -> bool:
     """Recognize a narrow, user-authored request for a confirmable proposal."""
-    normalized = message.strip().lower()
-    return (
-        any(marker in normalized for marker in _EXPLICIT_PLAN_KEYWORDS)
-        and any(
-            marker in normalized for marker in _EXPLICIT_PLAN_MUTATION_MARKERS
-        )
-        and any(marker in normalized for marker in _EXPLICIT_PROPOSAL_MARKERS)
-    )
+    return parse_explicit_plan_adjustment_command(message) is not None
 
 
 def is_explicit_plan_adjustment_resolution(

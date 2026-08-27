@@ -11,6 +11,7 @@ import pytest
 from app.schemas.agent_plan_adjustment_proposal import (
     PlanAdjustmentProposalPayload,
 )
+from app.services.agent_intent import ExplicitPlanAdjustmentCommand
 from app.services.agent_plan_adjustment_proposals import (
     PlanAdjustmentProposalCreationRejected,
     PlanAdjustmentProposalPayloadRejected,
@@ -343,6 +344,128 @@ def test_runtime_builder_accepts_authoritative_plan_duration_extension():
     assert result.built.payload.before.days_per_week == (
         result.built.payload.after.days_per_week
     )
+
+
+def test_explicit_duration_command_accepts_plan_only_and_owns_exact_diff():
+    observations = _runtime_observations()[:1]
+    untrusted_extra_change = _runtime_draft()
+    command = ExplicitPlanAdjustmentCommand(
+        expected_duration_weeks=4,
+        target_duration_weeks=6,
+    )
+
+    result = build_runtime_plan_adjustment_proposal(
+        feature_enabled=True,
+        run_owned=True,
+        selected_outcome="adjustment_proposal",
+        terminal_action="proposal",
+        intent_allows_adjustment=True,
+        risk_level="low",
+        clarification_required=False,
+        observations=observations,
+        proposal_draft=untrusted_extra_change,
+        explicit_adjustment_command=command,
+        created_at=_CREATED_AT,
+    )
+
+    assert result.decision.eligible is True
+    assert result.built is not None
+    payload = result.built.payload
+    assert payload.before.duration_weeks == 4
+    assert payload.after.duration_weeks == 6
+    assert payload.before.days_per_week == payload.after.days_per_week
+    assert payload.before.exercises == payload.after.exercises
+    assert len(payload.changes) == 1
+    assert payload.changes[0].change_type == "update_plan_schedule"
+    assert payload.changes[0].before.model_fields_set == {"duration_weeks"}
+    assert {item.tool_id for item in payload.evidence} == {
+        "plan.get_active"
+    }
+
+
+def test_evidence_derived_adjustment_still_rejects_plan_only_observation():
+    result = build_runtime_plan_adjustment_proposal(
+        feature_enabled=True,
+        run_owned=True,
+        selected_outcome="adjustment_proposal",
+        terminal_action="proposal",
+        intent_allows_adjustment=True,
+        risk_level="low",
+        clarification_required=False,
+        observations=_runtime_observations()[:1],
+        proposal_draft=_runtime_draft(),
+        created_at=_CREATED_AT,
+    )
+
+    assert result.built is None
+    assert result.decision.reason_code == "supporting_evidence_missing"
+
+
+def test_explicit_duration_command_rejects_stale_user_baseline():
+    result = build_runtime_plan_adjustment_proposal(
+        feature_enabled=True,
+        run_owned=True,
+        selected_outcome="adjustment_proposal",
+        terminal_action="proposal",
+        intent_allows_adjustment=True,
+        risk_level="low",
+        clarification_required=False,
+        observations=_runtime_observations()[:1],
+        proposal_draft=None,
+        explicit_adjustment_command=ExplicitPlanAdjustmentCommand(
+            expected_duration_weeks=6,
+            target_duration_weeks=8,
+        ),
+        created_at=_CREATED_AT,
+    )
+
+    assert result.built is None
+    assert result.decision.reason_code == "proposal_target_mismatch"
+
+
+def test_explicit_duration_command_is_not_inferred_frequency_workaround():
+    observations = _runtime_observations()
+    plan = observations[0]["result"]["plan"]
+    exercise = copy.deepcopy(plan["exercises"][0])
+    plan["days_per_week"] = 4
+    plan["exercises"] = [
+        {
+            **copy.deepcopy(exercise),
+            "day_of_week": day_of_week,
+            "order_index": 0,
+        }
+        for day_of_week in (1, 2, 4, 6)
+    ]
+    observations.insert(0, {
+        "tool_id": "profile.get_summary",
+        "status": "success",
+        "result": {
+            "found": True,
+            "training_days_per_week": 3,
+        },
+    })
+
+    result = build_runtime_plan_adjustment_proposal(
+        feature_enabled=True,
+        run_owned=True,
+        selected_outcome="adjustment_proposal",
+        terminal_action="proposal",
+        intent_allows_adjustment=True,
+        risk_level="low",
+        clarification_required=False,
+        observations=observations,
+        proposal_draft=None,
+        explicit_adjustment_command=ExplicitPlanAdjustmentCommand(
+            expected_duration_weeks=4,
+            target_duration_weeks=6,
+        ),
+        created_at=_CREATED_AT,
+    )
+
+    assert result.decision.eligible is True
+    assert result.built is not None
+    assert result.built.payload.before.days_per_week == 4
+    assert result.built.payload.after.days_per_week == 4
 
 
 def test_runtime_builder_rejects_duration_only_frequency_workaround():

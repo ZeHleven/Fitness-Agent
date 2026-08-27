@@ -227,6 +227,49 @@ def test_clear_low_adherence_requires_adjustment_proposal():
     ) == ["adjustment_proposal"]
 
 
+def test_explicit_duration_command_requires_proposal_after_plan_read():
+    observations = [{
+        "tool_id": "plan.get_active",
+        "status": "success",
+        "result": {
+            "found": True,
+            "plan": {"duration_weeks": 6, "days_per_week": 4},
+        },
+    }]
+
+    assert _finalization_outcomes_for_observations(
+        goal=(
+            "请把当前训练计划周期从6周延长到8周，"
+            "其他内容保持不变，并生成待确认提案。"
+        ),
+        subtasks=["读取当前训练计划"],
+        observations=observations,
+        proposal_creation_enabled=True,
+    ) == ["adjustment_proposal"]
+
+
+def test_explicit_duration_command_does_not_force_proposal_when_flag_off():
+    observations = [{
+        "tool_id": "plan.get_active",
+        "status": "success",
+        "result": {"found": True, "plan": {"duration_weeks": 6}},
+    }]
+
+    assert _finalization_outcomes_for_observations(
+        goal=(
+            "请把当前训练计划周期从6周延长到8周，"
+            "其他内容保持不变，并生成待确认提案。"
+        ),
+        subtasks=["读取当前训练计划"],
+        observations=observations,
+        proposal_creation_enabled=False,
+    ) == [
+        "adjustment_proposal",
+        "no_change_needed",
+        "insufficient_evidence",
+    ]
+
+
 def test_high_adherence_with_matching_profile_requires_no_change_outcome():
     observations = [
         {

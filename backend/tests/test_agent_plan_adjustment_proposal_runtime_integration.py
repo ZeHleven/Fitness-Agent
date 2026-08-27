@@ -159,27 +159,11 @@ def _target_reduction_draft() -> dict:
     }
 
 
-def _duration_extension_draft() -> dict:
-    return {
-        "proposal_type": "plan_adjustment_v1",
-        "changes": [{
-            "change_type": "update_plan_schedule",
-            "stable_display_key": "plan-schedule",
-            "before": {"duration_weeks": 6},
-            "after": {"duration_weeks": 8},
-            "reason": "按用户明确范围延长计划周期，其他安排保持不变。",
-            "safety_priority": False,
-        }],
-        "rationale": ["用户明确要求将当前计划从6周延长到8周。"],
-        "safety_notes": [],
-        "requested_ttl_hours": 24,
-    }
-
-
 def _planned_result(
     plan: dict,
     *,
     proposal_draft: dict | None,
+    include_supporting_evidence: bool = True,
 ) -> PlannedExecutionResult:
     trace = AgentExecutionTrace(
         execution_mode="planned",
@@ -214,7 +198,9 @@ def _planned_result(
             "status": "success",
             "result": {"found": True, "plan": plan},
         },
-        {
+    ]
+    if include_supporting_evidence:
+        observations.append({
             "step_id": "step_1",
             "call_id": "fixture-progress",
             "tool_id": "workout.get_progress",
@@ -227,8 +213,7 @@ def _planned_result(
                 "total_volume_kg": 0,
                 "weekly": [],
             },
-        },
-    ]
+        })
     return PlannedExecutionResult(
         reply="建议先减少一组；提案尚未执行，需要你确认。",
         execution_trace=trace,
@@ -564,7 +549,8 @@ async def test_explicit_single_read_adjustment_uses_planned_and_persists_proposa
     )
     execute_planned = AsyncMock(return_value=_planned_result(
         plan,
-        proposal_draft=_duration_extension_draft(),
+        proposal_draft=None,
+        include_supporting_evidence=False,
     ))
 
     with (
@@ -591,6 +577,10 @@ async def test_explicit_single_read_adjustment_uses_planned_and_persists_proposa
 
     assert response.status_code == 200
     reference = response.json()["proposal"]
+    assert response.json()["reply"] == (
+        "已按你的明确要求生成待确认提案：计划周期将从6周调整为8周，"
+        "其他内容保持不变。当前计划尚未修改，请查看详情后确认。"
+    )
     invoke_direct.assert_not_awaited()
     assert execute_planned.await_args.kwargs["tool_allowlist"] == [
         "plan.get_active"
@@ -607,6 +597,9 @@ async def test_explicit_single_read_adjustment_uses_planned_and_persists_proposa
     assert proposal.payload_data["after"]["duration_weeks"] == 8
     assert proposal.payload_data["before"]["days_per_week"] == 1
     assert proposal.payload_data["after"]["days_per_week"] == 1
+    assert {item["tool_id"] for item in proposal.payload_data["evidence"]} == {
+        "plan.get_active"
+    }
 
     run_response = await client.get(
         f"/api/v1/agent/runs/{response.json()['run_id']}",

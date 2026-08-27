@@ -29,7 +29,7 @@ from app.services.agent_controller import (
 )
 from app.services.agent_intent import (
     IntentResolution,
-    is_explicit_plan_adjustment_resolution,
+    parse_explicit_plan_adjustment_command,
     route_tools,
 )
 from app.services.agent_intent_model import resolve_intent_with_fallback
@@ -94,6 +94,18 @@ _PROPOSAL_NOT_CREATED_REPLY = (
 _PROPOSAL_REJECTED_SAFE_ANSWER_REASON = (
     "proposal_creation_rejected_safe_answer"
 )
+
+
+def _explicit_proposal_created_reply(
+    *,
+    before_weeks: int,
+    after_weeks: int,
+) -> str:
+    return (
+        f"已按你的明确要求生成待确认提案：计划周期将从{before_weeks}周"
+        f"调整为{after_weeks}周，其他内容保持不变。当前计划尚未修改，"
+        "请查看详情后确认。"
+    )
 
 
 @dataclass(frozen=True)
@@ -643,6 +655,9 @@ async def execute_agent_run(
             pending_clarification=(conversation.pending_clarification or None),
         )
         resolution = intent_outcome.resolution
+        explicit_adjustment_command = (
+            parse_explicit_plan_adjustment_command(user_message)
+        )
         legacy_tool_allowlist = route_tools(resolution)
         if shadow_session is not None:
             shadow_session.record_route(resolution, legacy_tool_allowlist)
@@ -894,6 +909,7 @@ async def execute_agent_run(
                     clarification_required=run.clarification_required,
                     observations=planned_result.proposal_observations,
                     proposal_draft=planned_result.proposal_draft,
+                    explicit_adjustment_command=explicit_adjustment_command,
                     created_at=datetime.now(timezone.utc),
                 )
                 execution_trace = attach_proposal_creation_decision(
@@ -953,6 +969,18 @@ async def execute_agent_run(
                     raise RuntimeError(
                         "proposal persistence returned no proposal or reason"
                     )
+            if (
+                proposal_reference is not None
+                and explicit_adjustment_command is not None
+            ):
+                reply = _explicit_proposal_created_reply(
+                    before_weeks=(
+                        explicit_adjustment_command.expected_duration_weeks
+                    ),
+                    after_weeks=(
+                        explicit_adjustment_command.target_duration_weeks
+                    ),
+                )
             reply, execution_trace = _normalize_unpersisted_proposal_result(
                 reply=reply,
                 execution_trace=execution_trace,
@@ -961,7 +989,7 @@ async def execute_agent_run(
                 ),
                 proposal_reference=proposal_reference,
                 proposal_expected=(
-                    is_explicit_plan_adjustment_resolution(resolution)
+                    explicit_adjustment_command is not None
                 ),
             )
             message_content_data: dict[str, Any] = {}
@@ -1049,7 +1077,7 @@ async def execute_agent_run(
             ),
             proposal_reference=None,
             proposal_expected=(
-                is_explicit_plan_adjustment_resolution(resolution)
+                explicit_adjustment_command is not None
             ),
         )
         await _lock_run_ownership(

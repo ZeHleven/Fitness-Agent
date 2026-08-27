@@ -32,6 +32,7 @@ from app.services.agent_planner import (
     PlanningModelError,
     build_tool_catalog,
 )
+from app.services.agent_intent import parse_explicit_plan_adjustment_command
 from app.services.agent_structured_errors import safe_error_category
 from app.services.agent_tool_registry_shadow_trace import (
     ToolRegistryShadowSession,
@@ -384,8 +385,20 @@ def _finalization_outcomes_for_observations(
     goal: str,
     subtasks: list[str],
     observations: list[dict[str, Any]],
+    proposal_creation_enabled: bool = False,
 ) -> list[FinalizationOutcome]:
     allowed_outcomes = _allowed_finalization_outcomes(goal, subtasks)
+    active_plan = _latest_successful_observation_result(
+        observations,
+        "plan.get_active",
+    )
+    if (
+        proposal_creation_enabled
+        and parse_explicit_plan_adjustment_command(goal) is not None
+        and active_plan is not None
+        and active_plan.get("found") is True
+    ):
+        return ["adjustment_proposal"]
     if (
         "adjustment_proposal" in allowed_outcomes
         and _has_clear_low_plan_adherence(observations)
@@ -1894,6 +1907,7 @@ async def execute_planned_agent(
             goal=goal,
             subtasks=subtasks,
             observations=raw_observations,
+            proposal_creation_enabled=proposal_creation_enabled,
         )
     )
     trace = trace.model_copy(update={

@@ -26,6 +26,7 @@ from app.schemas.agent_plan_adjustment_proposal import (
     ValidatedPlanAdjustmentProposal,
     plan_adjustment_proposal_payload_error_codes,
 )
+from app.services.agent_intent import ExplicitPlanAdjustmentCommand
 from app.services.agent_trace import observation_fingerprint
 
 
@@ -161,13 +162,14 @@ def _validate_evidence(
     payload: PlanAdjustmentProposalPayload,
     *,
     created_at: datetime,
+    supporting_evidence_required: bool = True,
 ) -> None:
     evidence_tool_ids = {item.tool_id for item in payload.evidence}
     if "plan.get_active" not in evidence_tool_ids:
         raise PlanAdjustmentProposalCreationRejected(
             "plan_evidence_missing"
         )
-    if not (
+    if supporting_evidence_required and not (
         evidence_tool_ids & PLAN_ADJUSTMENT_SUPPORTING_EVIDENCE_TOOL_IDS
     ):
         raise PlanAdjustmentProposalCreationRejected(
@@ -199,6 +201,7 @@ def build_validated_plan_adjustment_proposal(
     expected_base_plan_id: str,
     expected_base_plan_fingerprint: str,
     created_at: datetime,
+    supporting_evidence_required: bool = True,
 ) -> ValidatedPlanAdjustmentProposal:
     """Build an immutable proposal result without persistence or side effects."""
 
@@ -229,7 +232,11 @@ def build_validated_plan_adjustment_proposal(
         != expected_base_plan_fingerprint
     ):
         raise PlanAdjustmentProposalPayloadRejected(("invalid_target",))
-    _validate_evidence(payload, created_at=created_at)
+    _validate_evidence(
+        payload,
+        created_at=created_at,
+        supporting_evidence_required=supporting_evidence_required,
+    )
 
     if (  # pragma: no cover - schema invariant
         decision.ttl_hours is None or decision.initial_status is None
@@ -265,10 +272,12 @@ def _active_plan_observation(
 
 def _runtime_evidence_state(
     observations: list[dict[str, Any]],
+    *,
+    supporting_evidence_required: bool = True,
 ) -> str:
     if _active_plan_observation(observations) is None:
         return "plan_missing"
-    if not any(
+    if supporting_evidence_required and not any(
         observation.get("tool_id")
         in PLAN_ADJUSTMENT_SUPPORTING_EVIDENCE_TOOL_IDS
         and observation.get("status") == "success"
@@ -277,6 +286,32 @@ def _runtime_evidence_state(
     ):
         return "supporting_missing"
     return "complete"
+
+
+def _explicit_duration_proposal_draft(
+    command: ExplicitPlanAdjustmentCommand,
+) -> PlanAdjustmentProposalDraft:
+    before = command.expected_duration_weeks
+    after = command.target_duration_weeks
+    return PlanAdjustmentProposalDraft.model_validate({
+        "proposal_type": "plan_adjustment_v1",
+        "changes": [{
+            "change_type": "update_plan_schedule",
+            "stable_display_key": "plan-schedule",
+            "before": {"duration_weeks": before},
+            "after": {"duration_weeks": after},
+            "reason": (
+                f"按用户明确指令将计划周期从{before}周调整为{after}周，"
+                "其他内容保持不变。"
+            ),
+            "safety_priority": False,
+        }],
+        "rationale": [
+            f"用户明确要求将当前计划周期从{before}周调整为{after}周。"
+        ],
+        "safety_notes": [],
+        "requested_ttl_hours": 24,
+    })
 
 
 def _plan_snapshot_from_observation(
@@ -469,6 +504,7 @@ def build_runtime_plan_adjustment_proposal(
     clarification_required: bool,
     observations: list[dict[str, Any]],
     proposal_draft: Mapping[str, Any] | None,
+    explicit_adjustment_command: ExplicitPlanAdjustmentCommand | None = None,
     created_at: datetime,
 ) -> RuntimePlanAdjustmentProposalBuildResult:
     """Build a server-owned full payload from one compact Finalizer draft."""
@@ -480,7 +516,11 @@ def build_runtime_plan_adjustment_proposal(
         and terminal_action == "proposal"
     )
     draft_rejection_reason: PlanAdjustmentProposalCreationReasonCode | None = None
-    if feature_enabled and isinstance(proposal_draft, Mapping):
+    if feature_enabled and explicit_adjustment_command is not None:
+        parsed_draft = _explicit_duration_proposal_draft(
+            explicit_adjustment_command
+        )
+    elif feature_enabled and isinstance(proposal_draft, Mapping):
         try:
             parsed_draft = PlanAdjustmentProposalDraft.model_validate(
                 dict(proposal_draft)
@@ -508,7 +548,12 @@ def build_runtime_plan_adjustment_proposal(
         intent_allows_adjustment=intent_allows_adjustment,
         risk_level=risk_level,
         clarification_required=clarification_required,
-        evidence_state=_runtime_evidence_state(observations),
+        evidence_state=_runtime_evidence_state(
+            observations,
+            supporting_evidence_required=(
+                explicit_adjustment_command is None
+            ),
+        ),
         draft_state="valid" if parsed_draft is not None else "invalid",
         proposal_type=proposal_type,
         requested_ttl_hours=requested_ttl_hours,
@@ -536,10 +581,13 @@ def build_runtime_plan_adjustment_proposal(
         return RuntimePlanAdjustmentProposalBuildResult(
             decision=_rejected("proposal_candidate_build_invalid")
         )
-    if _is_unsupported_frequency_workaround(
-        before=before,
-        draft=parsed_draft,
-        observations=observations,
+    if (
+        explicit_adjustment_command is None
+        and _is_unsupported_frequency_workaround(
+            before=before,
+            draft=parsed_draft,
+            observations=observations,
+        )
     ):
         return RuntimePlanAdjustmentProposalBuildResult(
             decision=_rejected(
@@ -579,6 +627,9 @@ def build_runtime_plan_adjustment_proposal(
             expected_base_plan_id=plan_id,
             expected_base_plan_fingerprint=base_fingerprint,
             created_at=created_at,
+            supporting_evidence_required=(
+                explicit_adjustment_command is None
+            ),
         )
     except (
         PlanAdjustmentProposalCreationRejected,
