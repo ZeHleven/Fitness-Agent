@@ -419,7 +419,7 @@ def _normalize_plan_fit_fast_path(
     subtasks: list[str],
     tool_catalog: list[dict[str, Any]],
 ) -> tuple[MicroPlan, bool]:
-    """Canonicalize already-planned plan-fit primary read routes."""
+    """Canonicalize server-routed plan-fit primary read routes."""
     available_tool_ids = {
         item["tool_id"]
         for item in tool_catalog
@@ -447,14 +447,6 @@ def _normalize_plan_fit_fast_path(
         marker in semantic_scope
         for marker in history_required_markers
     ):
-        return plan, False
-
-    candidate_tool_ids = {
-        tool_id
-        for step in plan.steps
-        for tool_id in step.candidate_tools
-    }
-    if not set(primary_tool_ids).issubset(candidate_tool_ids):
         return plan, False
 
     planned_tool_ids = {

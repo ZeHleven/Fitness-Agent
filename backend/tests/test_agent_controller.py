@@ -1421,40 +1421,44 @@ def test_plan_fit_fast_path_preserves_explicit_history_analysis():
     assert normalized is plan
 
 
-def test_plan_fit_fast_path_does_not_inject_missing_primary_evidence():
+def test_plan_fit_fast_path_restores_missing_primary_evidence():
     plan = MicroPlan(
         goal="判断计划适配度",
         steps=[MicroPlanStep(
-            objective="读取计划与进度",
-            candidate_tools=[
-                "plan.get_active",
-                "workout.get_progress",
-            ],
-            execution_strategy="parallel_read",
-            completion_policy="after_all_observations",
-            planned_actions=[
-                PlannedToolAction(
-                    tool_id="plan.get_active",
-                    arguments={},
-                ),
-                PlannedToolAction(
-                    tool_id="workout.get_progress",
-                    arguments={"weeks": 4},
-                ),
-            ],
-            success_signal="计划与进度均已返回",
+            objective="读取当前计划",
+            candidate_tools=["plan.get_active"],
+            execution_strategy="direct",
+            completion_policy="after_successful_observation",
+            success_signal="当前计划已返回",
         )],
     )
 
     normalized, changed = _normalize_plan_fit_fast_path(
         plan,
-        goal="结合最近四周完成情况判断计划适配度",
+        goal=(
+            "结合我最近四周的实际完成情况，看看当前计划是不是太激进，"
+            "并给调整建议。"
+        ),
         subtasks=["判断计划适配度"],
         tool_catalog=_plan_fit_tool_catalog(),
     )
 
-    assert changed is False
-    assert normalized is plan
+    assert changed is True
+    assert len(normalized.steps) == 1
+    step = normalized.steps[0]
+    assert step.execution_strategy == "parallel_read"
+    assert step.completion_policy == "after_all_observations"
+    assert step.candidate_tools == [
+        "profile.get_summary",
+        "plan.get_active",
+        "workout.get_progress",
+    ]
+    assert [item.tool_id for item in step.planned_actions] == [
+        "profile.get_summary",
+        "plan.get_active",
+        "workout.get_progress",
+    ]
+    assert step.planned_actions[2].arguments == {"weeks": 4}
 
 
 def test_plan_progress_fast_path_normalizes_conditional_history_route():
@@ -2019,7 +2023,7 @@ async def test_high_adherence_narrows_runtime_finalizer_to_no_change():
 
 
 @pytest.mark.asyncio
-async def test_plan_fit_fast_path_normalizes_split_three_evidence_plan():
+async def test_plan_fit_fast_path_restores_omitted_evidence_before_execution():
     @tool(
         "profile_get_summary",
         args_schema=NoArguments,
@@ -2067,35 +2071,13 @@ async def test_plan_fit_fast_path_normalizes_split_three_evidence_plan():
     policy = ScriptedPolicy(
         plan=MicroPlan(
             goal="判断当前计划是否太激进",
-            steps=[
-                MicroPlanStep(
-                    objective="先读取偏好和当前计划",
-                    candidate_tools=[
-                        "profile.get_summary",
-                        "plan.get_active",
-                    ],
-                    execution_strategy="parallel_read",
-                    completion_policy="after_all_observations",
-                    planned_actions=[
-                        PlannedToolAction(
-                            tool_id="profile.get_summary",
-                            arguments={},
-                        ),
-                        PlannedToolAction(
-                            tool_id="plan.get_active",
-                            arguments={},
-                        ),
-                    ],
-                    success_signal="偏好和计划均已返回",
-                ),
-                MicroPlanStep(
-                    objective="再读取四周训练进度",
-                    candidate_tools=["workout.get_progress"],
-                    execution_strategy="direct",
-                    completion_policy="after_successful_observation",
-                    success_signal="四周训练进度已返回",
-                ),
-            ],
+            steps=[MicroPlanStep(
+                objective="读取当前计划",
+                candidate_tools=["plan.get_active"],
+                execution_strategy="direct",
+                completion_policy="after_successful_observation",
+                success_signal="当前计划已返回",
+            )],
         ),
         decisions=[],
         final_response=FinalResponse(
@@ -2111,7 +2093,10 @@ async def test_plan_fit_fast_path_normalizes_split_three_evidence_plan():
         user_id="user-plan-fit-fast-path",
         run_id="plan-fit-fast-path",
         model=None,
-        goal="结合最近四周完成情况，判断当前计划是否太激进并给调整建议",
+        goal=(
+            "结合我最近四周的实际完成情况，看看当前计划是不是太激进，"
+            "并给调整建议。"
+        ),
         subtasks=["读取偏好、计划和四周进度", "判断计划适配度"],
         tool_allowlist=allowlist,
         initial_trace=_planned_trace(allowlist),
