@@ -140,7 +140,8 @@ export default function AgentPage () {
           const proposal = await proposalsApi.get(id)
           updates.set(id, proposalReferenceFromRead(proposal))
         } catch (requestError) {
-          const code = (requestError as { code?: unknown } | null)?.code
+          const candidate = requestError as { code?: unknown } | null
+          const code = candidate && candidate.code
           if (code === 'proposal_not_found') {
             updates.set(id, unavailableProposalReference(reference))
           }
