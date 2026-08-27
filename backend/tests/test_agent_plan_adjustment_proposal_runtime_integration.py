@@ -37,6 +37,10 @@ from app.services.agent_plan_adjustment_proposal_persistence import (
 _USER_MESSAGE = (
     "最近四周完成率很低，当前训练计划是否太激进，请给调整建议"
 )
+_EXPLICIT_DURATION_PROPOSAL_MESSAGE = (
+    "请把当前训练计划周期从6周延长到8周，其他内容保持不变，"
+    "并生成待确认提案。"
+)
 
 
 @dataclass(frozen=True)
@@ -116,13 +120,14 @@ async def _seed_active_plan(
     *,
     email: str,
     suffix: str,
+    duration_weeks: int = 4,
 ) -> tuple[str, dict]:
     token = await _token(client, email)
     return token, {
         "id": f"proposal-runtime-plan-{suffix}",
         "name": "基础力量计划",
         "goal": "strength",
-        "duration_weeks": 4,
+        "duration_weeks": duration_weeks,
         "days_per_week": 1,
         "exercises": [{
             "exercise_id": f"proposal-runtime-exercise-{suffix}",
@@ -149,6 +154,23 @@ def _target_reduction_draft() -> dict:
             "safety_priority": False,
         }],
         "rationale": ["先降低训练量以提高连续完成概率。"],
+        "safety_notes": [],
+        "requested_ttl_hours": 24,
+    }
+
+
+def _duration_extension_draft() -> dict:
+    return {
+        "proposal_type": "plan_adjustment_v1",
+        "changes": [{
+            "change_type": "update_plan_schedule",
+            "stable_display_key": "plan-schedule",
+            "before": {"duration_weeks": 6},
+            "after": {"duration_weeks": 8},
+            "reason": "按用户明确范围延长计划周期，其他安排保持不变。",
+            "safety_priority": False,
+        }],
+        "rationale": ["用户明确要求将当前计划从6周延长到8周。"],
         "safety_notes": [],
         "requested_ttl_hours": 24,
     }
@@ -213,6 +235,28 @@ def _planned_result(
         cards=[{"type": "plan.get_active", "data": {"found": True}}],
         proposal_draft=proposal_draft,
         proposal_observations=observations,
+    )
+
+
+def _planned_fake_text_only_proposal_result(
+    plan: dict,
+) -> PlannedExecutionResult:
+    result = _planned_result(plan, proposal_draft=None)
+    contract = result.execution_trace.finalization_contract
+    assert contract is not None
+    trace = result.execution_trace.model_copy(update={
+        "terminal_action": "answer",
+        "finalization_contract": contract.model_copy(update={
+            "selected_outcome": "insufficient_evidence",
+            "derived_terminal_action": "answer",
+        }),
+    })
+    return PlannedExecutionResult(
+        reply="已经生成待确认提案，请在卡片中确认。",
+        execution_trace=trace,
+        cards=result.cards,
+        proposal_draft=None,
+        proposal_observations=result.proposal_observations,
     )
 
 
@@ -505,6 +549,122 @@ async def test_flag_on_atomically_persists_and_returns_minimal_proposal_referenc
         "persistence_status": "created",
         "persistence_reason_code": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_explicit_single_read_adjustment_uses_planned_and_persists_proposal(
+    client,
+    db_session,
+):
+    token, plan = await _seed_active_plan(
+        client,
+        email="proposal-runtime-explicit-duration@example.com",
+        suffix="explicit-duration",
+        duration_weeks=6,
+    )
+    execute_planned = AsyncMock(return_value=_planned_result(
+        plan,
+        proposal_draft=_duration_extension_draft(),
+    ))
+
+    with (
+        patch.object(
+            settings,
+            "AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED",
+            True,
+        ),
+        patch("app.services.agent_runtime._build_model", return_value=object()),
+        patch(
+            "app.services.agent_runtime.execute_planned_agent",
+            new=execute_planned,
+        ),
+        patch(
+            "app.services.agent_runtime.invoke_langchain_agent",
+            new=AsyncMock(),
+        ) as invoke_direct,
+    ):
+        response = await client.post(
+            "/api/v1/agent/chat",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"message": _EXPLICIT_DURATION_PROPOSAL_MESSAGE},
+        )
+
+    assert response.status_code == 200
+    reference = response.json()["proposal"]
+    invoke_direct.assert_not_awaited()
+    assert execute_planned.await_args.kwargs["tool_allowlist"] == [
+        "plan.get_active"
+    ]
+    initial_trace = execute_planned.await_args.kwargs["initial_trace"]
+    assert initial_trace.execution_mode == "planned"
+    assert initial_trace.mode_reasons == [
+        "explicit_plan_adjustment_proposal"
+    ]
+
+    proposal = await db_session.get(AgentProposal, reference["id"])
+    assert proposal is not None
+    assert proposal.payload_data["before"]["duration_weeks"] == 6
+    assert proposal.payload_data["after"]["duration_weeks"] == 8
+    assert proposal.payload_data["before"]["days_per_week"] == 1
+    assert proposal.payload_data["after"]["days_per_week"] == 1
+
+    run_response = await client.get(
+        f"/api/v1/agent/runs/{response.json()['run_id']}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    trace = run_response.json()["execution_trace"]
+    assert trace["execution_mode"] == "planned"
+    assert trace["proposal_creation"]["persisted"] is True
+
+
+@pytest.mark.asyncio
+async def test_explicit_adjustment_never_returns_fake_text_only_proposal(
+    client,
+):
+    token, plan = await _seed_active_plan(
+        client,
+        email="proposal-runtime-explicit-no-durable@example.com",
+        suffix="explicit-no-durable",
+        duration_weeks=6,
+    )
+    execute_planned = AsyncMock(
+        return_value=_planned_fake_text_only_proposal_result(plan)
+    )
+
+    with (
+        patch.object(
+            settings,
+            "AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED",
+            True,
+        ),
+        patch("app.services.agent_runtime._build_model", return_value=object()),
+        patch(
+            "app.services.agent_runtime.execute_planned_agent",
+            new=execute_planned,
+        ),
+    ):
+        response = await client.post(
+            "/api/v1/agent/chat",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"message": _EXPLICIT_DURATION_PROPOSAL_MESSAGE},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "proposal" not in body
+    assert body["reply"] == (
+        "我已完成本轮评估，但没有生成可确认的训练计划调整提案，"
+        "当前计划未作修改。你可以补充希望调整的具体范围后重新发起请求。"
+    )
+    assert "卡片中确认" not in body["reply"]
+
+    run_response = await client.get(
+        f"/api/v1/agent/runs/{body['run_id']}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    trace = run_response.json()["execution_trace"]
+    assert trace["terminal_action"] == "answer"
+    assert "proposal_creation_rejected_safe_answer" in trace["mode_reasons"]
 
 
 @pytest.mark.asyncio

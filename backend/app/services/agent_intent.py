@@ -117,6 +117,27 @@ _PLAN_ADJUSTMENT_MARKERS = (
     "合适",
 )
 
+_EXPLICIT_PLAN_MUTATION_MARKERS = (
+    "调整",
+    "修改",
+    "改为",
+    "改成",
+    "延长",
+    "缩短",
+    "增加到",
+    "减少到",
+)
+
+_EXPLICIT_PROPOSAL_MARKERS = (
+    "待确认提案",
+    "调整提案",
+    "生成提案",
+)
+
+_EXPLICIT_PROPOSAL_SUBTASK = (
+    "根据用户明确范围形成待确认的训练计划调整提案"
+)
+
 _RECENT_COMPLETION_MARKERS = (
     "最近四周",
     "最近训练",
@@ -284,6 +305,28 @@ def _is_plan_adjustment_assessment(message: str) -> bool:
     )
 
 
+def is_explicit_plan_adjustment_request(message: str) -> bool:
+    """Recognize a narrow, user-authored request for a confirmable proposal."""
+    normalized = message.strip().lower()
+    return (
+        any(marker in normalized for marker in _EXPLICIT_PLAN_KEYWORDS)
+        and any(
+            marker in normalized for marker in _EXPLICIT_PLAN_MUTATION_MARKERS
+        )
+        and any(marker in normalized for marker in _EXPLICIT_PROPOSAL_MARKERS)
+    )
+
+
+def is_explicit_plan_adjustment_resolution(
+    resolution: IntentResolution,
+) -> bool:
+    """Return whether normalized intent explicitly requests Proposal creation."""
+    return (
+        resolution.primary_intent == "plan_query"
+        and _EXPLICIT_PROPOSAL_SUBTASK in resolution.subtasks
+    )
+
+
 def _asks_personal_plan_fit(message: str) -> bool:
     normalized = message.strip().lower()
     return any(marker in normalized for marker in _PERSONAL_FIT_MARKERS)
@@ -297,7 +340,11 @@ def resolve_intent(message: str) -> IntentResolution:
         if any(keyword in normalized for keyword in keywords):
             matched.append(intent)
 
-    if contains_unsupported_write_request(message) and "health_query" not in matched:
+    if (
+        contains_unsupported_write_request(message)
+        and not is_explicit_plan_adjustment_request(message)
+        and "health_query" not in matched
+    ):
         return IntentResolution(
             primary_intent="general_qa",
             resolved_query=message.strip(),
@@ -310,6 +357,11 @@ def resolve_intent(message: str) -> IntentResolution:
         matched.insert(0, "health_query")
 
     if (
+        is_explicit_plan_adjustment_request(message)
+        and "health_query" not in matched
+    ):
+        matched = ["plan_query"]
+    elif (
         _is_active_continuation_comparison(message)
         and "health_query" not in matched
     ):
@@ -354,6 +406,14 @@ def resolve_intent(message: str) -> IntentResolution:
             "判断现在应该继续上次训练还是开始下一练"
         )
         subtasks = ["检查活动训练", "必要时查询下一练"]
+    elif (
+        is_explicit_plan_adjustment_request(message)
+        and primary != "health_query"
+    ):
+        subtasks = [
+            "读取当前训练计划",
+            _EXPLICIT_PROPOSAL_SUBTASK,
+        ]
     elif (
         _is_plan_adjustment_assessment(message)
         and primary != "health_query"
@@ -562,6 +622,12 @@ def normalize_resolution(
         risk_level = rules_resolution.risk_level
 
     if (
+        is_explicit_plan_adjustment_request(message)
+        and rules_resolution.primary_intent != "health_query"
+    ):
+        primary = "plan_query"
+        expanded = []
+    elif (
         contains_unsupported_write_request(message)
         and rules_resolution.primary_intent == "general_qa"
         and rules_resolution.risk_level == "low"
@@ -627,6 +693,14 @@ def normalize_resolution(
             "判断现在应该继续上次训练还是开始下一练"
         )
         subtasks = ["检查活动训练", "必要时查询下一练"]
+    elif (
+        is_explicit_plan_adjustment_request(message)
+        and rules_resolution.primary_intent != "health_query"
+    ):
+        subtasks = [
+            "读取当前训练计划",
+            _EXPLICIT_PROPOSAL_SUBTASK,
+        ]
     elif (
         _is_plan_adjustment_assessment(message)
         and rules_resolution.primary_intent != "health_query"

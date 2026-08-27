@@ -47,6 +47,37 @@ def test_execution_mode_gate_covers_direct_planned_clarify_and_safe_stop():
     assert select_execution_mode(safe_stop, [])[0] == "safe_stop"
 
 
+def test_explicit_plan_adjustment_proposal_uses_feature_gated_planned_mode():
+    resolution = IntentResolution(
+        primary_intent="plan_query",
+        resolved_query=(
+            "请把当前训练计划周期从6周延长到8周，其他内容保持不变，"
+            "并生成待确认提案。"
+        ),
+        subtasks=[
+            "读取当前训练计划",
+            "根据用户明确范围形成待确认的训练计划调整提案",
+        ],
+        confidence=0.95,
+    )
+
+    enabled_mode, enabled_reasons = select_execution_mode(
+        resolution,
+        ["plan.get_active"],
+        proposal_creation_enabled=True,
+    )
+    disabled_mode, disabled_reasons = select_execution_mode(
+        resolution,
+        ["plan.get_active"],
+        proposal_creation_enabled=False,
+    )
+
+    assert enabled_mode == "planned"
+    assert enabled_reasons == ["explicit_plan_adjustment_proposal"]
+    assert disabled_mode == "direct"
+    assert disabled_reasons == ["single_goal_or_tool"]
+
+
 def test_initial_trace_records_intent_attempts_and_rules_fallback():
     resolution = IntentResolution(
         primary_intent="workout_history_query",

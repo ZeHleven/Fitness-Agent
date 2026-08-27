@@ -113,3 +113,36 @@ def test_personal_plan_fit_fallback_also_includes_profile():
         "workout.list_history",
         "profile.get_summary",
     ]
+
+
+def test_explicit_plan_adjustment_proposal_routes_authoritative_plan_read():
+    resolution = resolve_intent(
+        "请把当前训练计划周期从6周延长到8周，其他内容保持不变，"
+        "并生成待确认提案。"
+    )
+
+    assert resolution.primary_intent == "plan_query"
+    assert resolution.expanded_intents == []
+    assert resolution.subtasks == [
+        "读取当前训练计划",
+        "根据用户明确范围形成待确认的训练计划调整提案",
+    ]
+    assert route_tools(resolution) == ["plan.get_active"]
+
+
+def test_explicit_plan_adjustment_never_overrides_health_red_flag():
+    resolution = resolve_intent(
+        "我现在胸痛，但请把当前训练计划延长并生成待确认提案。"
+    )
+
+    assert resolution.primary_intent == "health_query"
+    assert resolution.risk_level == "high"
+    assert route_tools(resolution) == []
+
+
+def test_plain_plan_question_does_not_become_a_proposal_candidate():
+    resolution = resolve_intent("训练计划通常应该怎样延长周期？")
+
+    assert resolution.primary_intent == "plan_query"
+    assert resolution.subtasks == ["查询并回答：plan_query"]
+    assert route_tools(resolution) == ["plan.get_active"]

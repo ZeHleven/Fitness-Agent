@@ -17,7 +17,11 @@ from app.schemas.agent_trace import (
     ExecutionMode,
     RuntimeTerminalAction,
 )
-from app.services.agent_intent import IntentResolution, IntentResolverOutcome
+from app.services.agent_intent import (
+    IntentResolution,
+    IntentResolverOutcome,
+    is_explicit_plan_adjustment_resolution,
+)
 from app.services.agent_tools import TOOL_ID_BY_LANGCHAIN_NAME
 
 
@@ -119,11 +123,20 @@ def observation_fingerprint(content: Any) -> str:
 def select_execution_mode(
     resolution: IntentResolution,
     tool_allowlist: list[str],
+    *,
+    proposal_creation_enabled: bool = False,
 ) -> tuple[ExecutionMode, list[str]]:
     if resolution.risk_level == "high":
         return "safe_stop", ["health_red_flag"]
     if resolution.clarification_required:
         return "clarify", ["critical_information_missing"]
+
+    if (
+        proposal_creation_enabled
+        and is_explicit_plan_adjustment_resolution(resolution)
+        and tool_allowlist == ["plan.get_active"]
+    ):
+        return "planned", ["explicit_plan_adjustment_proposal"]
 
     reasons: list[str] = []
     if len(tool_allowlist) > 1 and len(resolution.subtasks) > 1:
@@ -139,10 +152,13 @@ def build_initial_execution_trace(
     resolution: IntentResolution,
     tool_allowlist: list[str],
     intent_outcome: IntentResolverOutcome | None = None,
+    *,
+    proposal_creation_enabled: bool = False,
 ) -> AgentExecutionTrace:
     execution_mode, mode_reasons = select_execution_mode(
         resolution,
         tool_allowlist,
+        proposal_creation_enabled=proposal_creation_enabled,
     )
     goal = resolution.resolved_query.strip() or "完成当前用户请求"
 

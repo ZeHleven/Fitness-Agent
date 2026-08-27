@@ -599,6 +599,36 @@ async def test_plan_fit_overlay_restores_profile_and_history_candidates():
 
 
 @pytest.mark.asyncio
+async def test_explicit_proposal_overlay_overrides_model_general_answer():
+    candidate = IntentResolution(
+        primary_intent="general_qa",
+        resolved_query="解释如何手动延长计划",
+        subtasks=["回答一般问题"],
+        confidence=0.91,
+    )
+    with (
+        patch.object(settings, "DEEPSEEK_API_KEY", "test-key"),
+        patch(
+            "app.services.agent_intent_model._invoke_model_intent",
+            new=AsyncMock(return_value=candidate),
+        ),
+    ):
+        outcome = await resolve_intent_with_fallback(
+            "请把当前训练计划周期从6周延长到8周，其他内容保持不变，"
+            "并生成待确认提案。",
+            use_model=True,
+        )
+
+    assert outcome.resolution.primary_intent == "plan_query"
+    assert outcome.resolution.expanded_intents == []
+    assert outcome.resolution.subtasks == [
+        "读取当前训练计划",
+        "根据用户明确范围形成待确认的训练计划调整提案",
+    ]
+    assert route_tools(outcome.resolution) == ["plan.get_active"]
+
+
+@pytest.mark.asyncio
 async def test_affirmative_followup_inherits_the_last_assistant_offer():
     outcome = await resolve_intent_with_fallback(
         "需要",

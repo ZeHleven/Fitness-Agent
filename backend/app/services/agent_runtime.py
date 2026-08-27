@@ -27,7 +27,11 @@ from app.services.agent_controller import (
     ToolAuditEvent,
     execute_planned_agent,
 )
-from app.services.agent_intent import IntentResolution, route_tools
+from app.services.agent_intent import (
+    IntentResolution,
+    is_explicit_plan_adjustment_resolution,
+    route_tools,
+)
 from app.services.agent_intent_model import resolve_intent_with_fallback
 from app.services.agent_plan_adjustment_proposal_persistence import (
     PlanAdjustmentProposalPersistenceRejected,
@@ -133,13 +137,17 @@ def _normalize_unpersisted_proposal_result(
     execution_trace: AgentExecutionTrace,
     proposal_creation_enabled: bool,
     proposal_reference: AgentProposalReference | None,
+    proposal_expected: bool = False,
 ) -> tuple[str, AgentExecutionTrace]:
     """Never expose a proposal terminal action without a durable proposal."""
 
     if (
         not proposal_creation_enabled
-        or execution_trace.terminal_action != "proposal"
         or proposal_reference is not None
+        or (
+            execution_trace.terminal_action != "proposal"
+            and not proposal_expected
+        )
     ):
         return reply, execution_trace
 
@@ -649,6 +657,9 @@ async def execute_agent_run(
             resolution,
             tool_allowlist,
             intent_outcome,
+            proposal_creation_enabled=(
+                settings.AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED
+            ),
         )
         run.status = "running"
         run.primary_intent = resolution.primary_intent
@@ -949,6 +960,9 @@ async def execute_agent_run(
                     settings.AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED
                 ),
                 proposal_reference=proposal_reference,
+                proposal_expected=(
+                    is_explicit_plan_adjustment_resolution(resolution)
+                ),
             )
             message_content_data: dict[str, Any] = {}
             if cards:
@@ -1027,6 +1041,17 @@ async def execute_agent_run(
             shadow_session,
         )
         reply, cards = _extract_agent_output(result)
+        reply, execution_trace = _normalize_unpersisted_proposal_result(
+            reply=reply,
+            execution_trace=execution_trace,
+            proposal_creation_enabled=(
+                settings.AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED
+            ),
+            proposal_reference=None,
+            proposal_expected=(
+                is_explicit_plan_adjustment_resolution(resolution)
+            ),
+        )
         await _lock_run_ownership(
             db,
             run_id=run.id,
