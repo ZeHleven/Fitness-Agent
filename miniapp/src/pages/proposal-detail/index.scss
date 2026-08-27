@@ -468,6 +468,26 @@
   font-size: 26px;
 }
 
+.inline-confirmation-panel {
+  margin-top: 20px;
+  padding: 18px;
+  border: 1px solid #e4c96d;
+  border-radius: 18px;
+  background: #fff8df;
+}
+
+.inline-confirmation-copy {
+  display: block;
+  color: #624f17;
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.55;
+}
+
+.inline-confirmation-panel .decision-actions {
+  margin-top: 16px;
+}
+
 .retry-button,
 .verify-button {
   width: 100%;

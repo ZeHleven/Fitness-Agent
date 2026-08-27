@@ -10,6 +10,13 @@ import {
 } from '../../core/proposal-decision-ui'
 import type { ProposalUiTone } from '../../core/proposal-decision-ui'
 import {
+  proposalConfirmationOptions,
+  requestProposalConfirmation
+} from '../../core/proposal-confirmation'
+import type {
+  NativeProposalConfirmationOptions
+} from '../../core/proposal-confirmation'
+import {
   projectProposalStatus,
   proposalLocalExpiryState
 } from '../../core/proposal-interaction'
@@ -39,6 +46,7 @@ const weekday = (day: number) => (
 type DecisionUiMode =
   | 'idle'
   | 'modal'
+  | 'inline_confirmation_required'
   | 'submitting'
   | 'verifying'
   | 'verification_required'
@@ -49,6 +57,21 @@ type DecisionUiMode =
 interface DecisionNotice {
   label: string
   tone: ProposalUiTone
+}
+
+interface WechatModalRuntime {
+  showModal?: (options: NativeProposalConfirmationOptions) => void
+}
+
+function nativeWechatModalAdapter () {
+  const runtime = (
+    globalThis as typeof globalThis & { wx?: WechatModalRuntime }
+  ).wx
+  if (!runtime || typeof runtime.showModal !== 'function') return undefined
+  const showModal = runtime.showModal
+  return (options: NativeProposalConfirmationOptions) => {
+    showModal.call(runtime, options)
+  }
 }
 
 export default function ProposalDetailPage () {
@@ -63,11 +86,13 @@ export default function ProposalDetailPage () {
   const [decisionAction, setDecisionAction] = useState<PlanAdjustmentProposalDecisionAction | null>(null)
   const [decisionNotice, setDecisionNotice] = useState<DecisionNotice | null>(null)
   const interactionLock = useRef(false)
+  const inlineConfirmationRetry = useRef(false)
 
   const resetDecisionUi = () => {
     setDecisionMode('idle')
     setDecisionAction(null)
     setDecisionNotice(null)
+    inlineConfirmationRetry.current = false
   }
 
   const applyReadProposal = (
@@ -218,6 +243,7 @@ export default function ProposalDetailPage () {
     setDetailReviewed(false)
     setDecisionMode('idle')
     setDecisionAction(null)
+    inlineConfirmationRetry.current = false
     setDecisionNotice({
       label: response.status === 'applied' ? '已应用' : '已拒绝',
       tone: response.status === 'applied' ? 'success' : 'neutral'
@@ -307,7 +333,8 @@ export default function ProposalDetailPage () {
 
   const decide = async (
     action: PlanAdjustmentProposalDecisionAction,
-    retry = false
+    retry = false,
+    confirmationGranted = false
   ) => {
     if (!proposal || interactionLock.current) return
     const localExpiryState = proposalLocalExpiryState(
@@ -359,42 +386,51 @@ export default function ProposalDetailPage () {
     interactionLock.current = true
     setDecisionMode('modal')
     setDecisionAction(action)
-    let modal: Taro.showModal.SuccessCallbackResult
-    try {
-      modal = await Taro.showModal({
-        title: action === 'confirm' ? '确认应用这份调整？' : '确认拒绝这份提案？',
-        content: action === 'confirm'
-          ? `将按页面中展示的 ${proposal.payload.changes.length} 项变化原子更新当前训练计划。`
-          : '拒绝后不会修改当前训练计划，且这份提案不能再确认。',
-        confirmText: action === 'confirm' ? '确认应用' : '确认拒绝',
-        confirmColor: action === 'confirm' ? '#1d6b49' : '#9d382b'
-      })
-    } catch (_) {
-      interactionLock.current = false
-      setDecisionMode(retry ? 'retry_confirmation_required' : 'idle')
-      if (!retry) setDecisionAction(null)
-      setDecisionNotice({
-        label: '暂时无法显示二次确认，请稍后重试',
-        tone: 'warning'
-      })
-      return
+    let userChoice: 'accept' | 'cancel' = 'accept'
+    if (!confirmationGranted) {
+      const confirmation = await requestProposalConfirmation(
+        proposalConfirmationOptions(action, proposal.payload.changes.length),
+        {
+          native: nativeWechatModalAdapter(),
+          taro: options => Taro.showModal(options)
+        }
+      )
+      if (confirmation.diagnostics.length > 0) {
+        console.warn('[fitness-agent] proposal_confirmation_fallback', {
+          selected_channel: confirmation.channel,
+          failures: confirmation.diagnostics
+        })
+      }
+      if (confirmation.choice === 'inline_required') {
+        interactionLock.current = false
+        inlineConfirmationRetry.current = retry
+        setDecisionMode('inline_confirmation_required')
+        setDecisionNotice({
+          label: '系统弹窗不可用，请在本页完成二次确认',
+          tone: 'attention'
+        })
+        return
+      }
+      userChoice = confirmation.choice
     }
     const projection = projectProposalConfirmation({
       action,
       server_status: proposal.status,
       local_expiry_state: localExpiryState,
       detail_reviewed: detailReviewed,
-      user_choice: modal.confirm ? 'accept' : 'cancel',
+      user_choice: userChoice,
       existing_journal: pending ? 'reusable' : 'none'
     })
     if (projection.post_attempts === 0) {
       interactionLock.current = false
+      inlineConfirmationRetry.current = false
       setDecisionMode(retry ? 'retry_confirmation_required' : 'idle')
       if (!retry) setDecisionAction(null)
       return
     }
 
     setDecisionMode('submitting')
+    inlineConfirmationRetry.current = false
     setDecisionNotice({
       label: action === 'confirm' ? '正在应用调整…' : '正在拒绝提案…',
       tone: 'neutral'
@@ -408,6 +444,16 @@ export default function ProposalDetailPage () {
     } finally {
       interactionLock.current = false
     }
+  }
+
+  const cancelInlineConfirmation = () => {
+    const retry = inlineConfirmationRetry.current
+    inlineConfirmationRetry.current = false
+    setDecisionMode(retry ? 'retry_confirmation_required' : 'idle')
+    if (!retry) setDecisionAction(null)
+    setDecisionNotice(retry
+      ? { label: '上次操作结果未确认', tone: 'warning' }
+      : null)
   }
 
   if (loading) {
@@ -466,6 +512,16 @@ export default function ProposalDetailPage () {
           decisionNotice={decisionNotice}
           onReviewChange={() => setDetailReviewed(current => !current)}
           onDecision={(action, retry) => decide(action, retry)}
+          onConfirmInline={() => {
+            if (decisionAction) {
+              void decide(
+                decisionAction,
+                inlineConfirmationRetry.current,
+                true
+              )
+            }
+          }}
+          onCancelInline={cancelInlineConfirmation}
           onRefresh={() => loadProposal(proposal.id, true)}
         />
       )}
@@ -483,6 +539,8 @@ function ProposalContent ({
   decisionNotice,
   onReviewChange,
   onDecision,
+  onConfirmInline,
+  onCancelInline,
   onRefresh
 }: {
   proposal: PlanAdjustmentProposalReadResponse
@@ -497,10 +555,13 @@ function ProposalContent ({
     action: PlanAdjustmentProposalDecisionAction,
     retry?: boolean
   ) => void
+  onConfirmInline: () => void
+  onCancelInline: () => void
   onRefresh: () => void
 }) {
   const mutationBusy = (
     decisionMode === 'modal' ||
+    decisionMode === 'inline_confirmation_required' ||
     decisionMode === 'submitting' ||
     decisionMode === 'verifying'
   )
@@ -661,6 +722,34 @@ function ProposalContent ({
               {refreshing ? '正在核实…' : '先刷新服务端状态'}
             </Button>
           </>
+        )}
+
+        {decisionMode === 'inline_confirmation_required' && decisionAction && (
+          <View className='inline-confirmation-panel'>
+            <Text className='inline-confirmation-copy'>
+              {decisionAction === 'confirm'
+                ? `再次确认后，系统将原子应用上方展示的 ${proposal.payload.changes.length} 项调整。`
+                : '再次确认后，这份提案将被拒绝，当前训练计划不会修改。'}
+            </Text>
+            <View className='decision-actions'>
+              <Button
+                className='secondary-button'
+                disabled={refreshing}
+                onClick={onCancelInline}
+              >
+                取消
+              </Button>
+              <Button
+                className={decisionAction === 'confirm'
+                  ? 'primary-button'
+                  : 'danger-button'}
+                disabled={refreshing}
+                onClick={onConfirmInline}
+              >
+                {decisionAction === 'confirm' ? '二次确认并应用' : '二次确认拒绝'}
+              </Button>
+            </View>
+          </View>
         )}
 
         {(decisionMode === 'submitting' || decisionMode === 'modal') && (
