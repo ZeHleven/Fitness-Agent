@@ -16,7 +16,7 @@
     "build:h5": "taro build --type h5",
     "dev:weapp": "taro build --type weapp --watch",
     "dev:h5": "taro build --type h5 --watch",
-    "test:proposal-contract": "node --test tests/plan-adjustment-proposal-interaction-contract.test.mjs tests/plan-adjustment-proposal-client.test.mjs tests/plan-adjustment-proposal-ui-integration-contract.test.mjs tests/proposal-confirmation-adapter.test.mjs",
+    "test:proposal-contract": "node --test tests/plan-adjustment-proposal-interaction-contract.test.mjs tests/plan-adjustment-proposal-client.test.mjs tests/plan-adjustment-proposal-ui-integration-contract.test.mjs tests/proposal-confirmation-adapter.test.mjs tests/proposal-reference-sync.test.mjs",
     "test:build-contract": "node --test tests/weapp-build-contract.test.mjs",
     "typecheck": "tsc --noEmit"
   },

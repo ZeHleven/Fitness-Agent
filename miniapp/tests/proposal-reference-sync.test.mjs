@@ -1,0 +1,104 @@
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import test from 'node:test'
+
+import ts from 'typescript'
+
+
+function loadTypeScriptModule (relativePath) {
+  const sourceUrl = new URL(relativePath, import.meta.url)
+  const sourcePath = fileURLToPath(sourceUrl)
+  const output = ts.transpileModule(readFileSync(sourcePath, 'utf8'), {
+    compilerOptions: {
+      module: ts.ModuleKind.CommonJS,
+      target: ts.ScriptTarget.ES2020
+    },
+    fileName: sourcePath
+  }).outputText
+  const loaded = { exports: {} }
+  const evaluate = new Function('exports', 'module', output)
+  evaluate(loaded.exports, loaded)
+  return loaded.exports
+}
+
+const runtime = loadTypeScriptModule('../src/core/proposal-reference.ts')
+
+const fingerprint = 'a'.repeat(64)
+const pendingReference = {
+  id: 'proposal-1',
+  proposal_type: 'plan_adjustment_v1',
+  status: 'pending_confirmation',
+  version: 1,
+  expires_at: '2026-08-28T09:31:00Z',
+  payload_fingerprint: fingerprint
+}
+
+test('historical proposal references retain authoritative terminal states', () => {
+  for (const status of [
+    'pending_confirmation',
+    'applied',
+    'rejected',
+    'expired',
+    'stale',
+    'failed'
+  ]) {
+    assert.deepEqual(
+      runtime.proposalReferenceFromUnknown({ ...pendingReference, status }),
+      { ...pendingReference, status },
+      status
+    )
+  }
+})
+
+test('proposal reads replace the message snapshot with server authority', () => {
+  const authoritative = runtime.proposalReferenceFromRead({
+    ...pendingReference,
+    status: 'applied',
+    version: 2,
+    created_at: '2026-08-27T09:31:00Z',
+    updated_at: '2026-08-27T09:35:00Z',
+    allowed_actions: [],
+    payload: {},
+    result: {
+      plan_id: 'plan-1',
+      plan_fingerprint: 'b'.repeat(64),
+      applied_at: '2026-08-27T09:35:00Z'
+    }
+  })
+
+  assert.deepEqual(authoritative, {
+    ...pendingReference,
+    status: 'applied',
+    version: 2
+  })
+})
+
+test('not-found authority is explicit and preserves traceable reference data', () => {
+  assert.deepEqual(runtime.unavailableProposalReference(pendingReference), {
+    ...pendingReference,
+    status: 'missing'
+  })
+})
+
+test('agent page refreshes proposal authority on restore and page return', () => {
+  const source = readFileSync(
+    new URL('../src/pages/agent/index.tsx', import.meta.url),
+    'utf8'
+  )
+  assert.match(source, /useDidShow\(\(\) => \{/)
+  assert.match(source, /proposalsApi\.get\(id\)/)
+  assert.match(source, /synchronizeProposalReferences\(restored\)/)
+  assert.match(source, /proposalSyncQueued\.current = true/)
+  assert.match(source, /presentation\.terminal \? '查看结果 →' : '查看详情 →'/)
+})
+
+test('fresh confirm bypasses modal while reject and uncertain retry reconfirm', () => {
+  const source = readFileSync(
+    new URL('../src/pages/proposal-detail/index.tsx', import.meta.url),
+    'utf8'
+  )
+  assert.match(source, /confirmationRequired = action === 'reject' \|\| retry/)
+  assert.match(source, /confirmation_required: confirmationRequired/)
+  assert.match(source, /if \(confirmationRequired && !confirmationGranted\)/)
+})

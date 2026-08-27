@@ -13,10 +13,11 @@
       "server_status": "pending_confirmation",
       "local_expiry_state": "before",
       "detail_reviewed": true,
+      "confirmation_required": false,
       "user_choice": "accept",
       "existing_journal": "none",
       "expected": {
-        "modal": "confirm_plan_adjustment",
+        "modal": "not_required",
         "post_attempts": 1,
         "lock": "acquired",
         "next_ui_state": "submitting",
@@ -24,13 +25,14 @@
       }
     },
     {
-      "case_id": "confirm.reviewed_but_cancelled",
+      "case_id": "confirm.manual_retry_cancelled",
       "action": "confirm",
       "server_status": "pending_confirmation",
       "local_expiry_state": "before",
       "detail_reviewed": true,
+      "confirmation_required": true,
       "user_choice": "cancel",
-      "existing_journal": "none",
+      "existing_journal": "reusable",
       "expected": {
         "modal": "confirm_plan_adjustment",
         "post_attempts": 0,
@@ -45,6 +47,7 @@
       "server_status": "pending_confirmation",
       "local_expiry_state": "before",
       "detail_reviewed": true,
+      "confirmation_required": true,
       "user_choice": "accept",
       "existing_journal": "none",
       "expected": {
@@ -61,6 +64,7 @@
       "server_status": "pending_confirmation",
       "local_expiry_state": "before",
       "detail_reviewed": true,
+      "confirmation_required": true,
       "user_choice": "cancel",
       "existing_journal": "none",
       "expected": {
@@ -77,6 +81,7 @@
       "server_status": "pending_confirmation",
       "local_expiry_state": "before",
       "detail_reviewed": false,
+      "confirmation_required": false,
       "user_choice": "accept",
       "existing_journal": "none",
       "expected": {
@@ -93,6 +98,7 @@
       "server_status": "pending_confirmation",
       "local_expiry_state": "at_or_after",
       "detail_reviewed": true,
+      "confirmation_required": false,
       "user_choice": "accept",
       "existing_journal": "none",
       "expected": {
@@ -109,6 +115,7 @@
       "server_status": "pending_confirmation",
       "local_expiry_state": "before",
       "detail_reviewed": true,
+      "confirmation_required": true,
       "user_choice": "accept",
       "existing_journal": "reusable",
       "expected": {
@@ -571,8 +578,9 @@
     }
   ],
   "safety_invariants": {
-    "decision_requires_second_confirmation": true,
-    "full_detail_review_required_before_modal": true,
+    "fresh_confirm_requires_second_confirmation": false,
+    "reject_requires_second_confirmation": true,
+    "full_detail_review_required_before_decision": true,
     "single_proposal_mutation_lock": true,
     "opposite_action_blocked_while_locked": true,
     "refresh_blocked_while_mutation_in_flight": true,

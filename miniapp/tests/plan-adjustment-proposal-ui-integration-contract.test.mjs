@@ -39,6 +39,7 @@ const CONFIRMATION_KEYS = new Set([
   'server_status',
   'local_expiry_state',
   'detail_reviewed',
+  'confirmation_required',
   'user_choice',
   'existing_journal',
   'expected'
@@ -140,9 +141,11 @@ function projectConfirmation (item) {
       request_id: 'none'
     }
   }
-  const modal = item.action === 'confirm'
-    ? 'confirm_plan_adjustment'
-    : 'confirm_rejection'
+  const modal = item.confirmation_required
+    ? item.action === 'confirm'
+      ? 'confirm_plan_adjustment'
+      : 'confirm_rejection'
+    : 'not_required'
   if (item.user_choice === 'cancel') {
     return {
       modal,
@@ -432,7 +435,7 @@ test('proposal summaries render an explicit frequency change', () => {
   })
 })
 
-test('confirm and reject always require full review and second confirmation', () => {
+test('fresh confirm submits once after review while risky or retry actions reconfirm', () => {
   for (const item of fixture.confirmation_cases) {
     assert.deepEqual(projectConfirmation(item), item.expected, item.case_id)
   }
@@ -443,10 +446,14 @@ test('confirm and reject always require full review and second confirmation', ()
     'confirm',
     'reject'
   ]))
-  assert.ok(posted.every(item => (
-    item.detail_reviewed &&
-    item.user_choice === 'accept' &&
-    item.expected.modal !== 'not_shown'
+  assert.ok(posted.every(item => item.detail_reviewed && item.user_choice === 'accept'))
+  const freshConfirm = posted.find(item => (
+    item.action === 'confirm' && item.existing_journal === 'none'
+  ))
+  assert.equal(freshConfirm.expected.modal, 'not_required')
+  assert.ok(posted.filter(item => item.confirmation_required).every(item => (
+    item.expected.modal === 'confirm_plan_adjustment' ||
+    item.expected.modal === 'confirm_rejection'
   )))
 })
 
@@ -523,8 +530,9 @@ test('concurrency, expiry, and stale errors render only after authoritative reco
 
 test('UI safety invariants prohibit optimistic or automatic mutation behavior', () => {
   assert.deepEqual(fixture.safety_invariants, {
-    decision_requires_second_confirmation: true,
-    full_detail_review_required_before_modal: true,
+    fresh_confirm_requires_second_confirmation: false,
+    reject_requires_second_confirmation: true,
+    full_detail_review_required_before_decision: true,
     single_proposal_mutation_lock: true,
     opposite_action_blocked_while_locked: true,
     refresh_blocked_while_mutation_in_flight: true,

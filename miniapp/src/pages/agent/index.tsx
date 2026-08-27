@@ -1,8 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import { Button, ScrollView, Text, Textarea, View } from '@tarojs/components'
-import Taro, { useLoad } from '@tarojs/taro'
+import Taro, { useDidShow, useLoad } from '@tarojs/taro'
 
 import { miniappBuildLabel } from '../../core/build-info'
+import {
+  proposalReferenceFromRead,
+  proposalReferenceFromUnknown,
+  unavailableProposalReference
+} from '../../core/proposal-reference'
 import {
   projectProposalStatus,
   proposalLocalExpiryState
@@ -18,6 +23,7 @@ import {
 } from '../../core/storage'
 import type { PendingAgentRequest } from '../../core/storage'
 import { agentApi } from '../../services/agent'
+import { proposalsApi } from '../../services/proposals'
 import type { AgentCard, AgentMessage } from '../../types/api'
 import type { PlanAdjustmentProposalReference } from '../../types/plan-adjustment-proposal'
 import './index.scss'
@@ -41,7 +47,7 @@ const quickPrompts = [
 const welcomeMessage: DisplayMessage = {
   id: 'welcome',
   role: 'assistant',
-  content: '你好，我是训练搭子。现在可以帮你查询训练计划、下一练、进行中的训练、历史和进度，也可以回答一般健身问题。涉及修改数据时，我会先说明，目前不会直接执行。',
+  content: '你好，我是训练搭子。现在可以帮你查询训练计划、下一练、进行中的训练、历史和进度，也可以回答一般健身问题。涉及修改训练计划时，我会先生成提案，只有你确认后才会执行。',
   cards: [],
   proposal: null
 }
@@ -68,6 +74,10 @@ export default function AgentPage () {
   const [sendingLabel, setSendingLabel] = useState('正在提交…')
   const pollGeneration = useRef(0)
   const sendLock = useRef(false)
+  const proposalSyncInFlight = useRef(false)
+  const proposalSyncQueued = useRef(false)
+  const messagesRef = useRef(messages)
+  messagesRef.current = messages
 
   useLoad(() => {
     const loadConversation = async () => {
@@ -85,6 +95,7 @@ export default function AgentPage () {
           .map(toDisplayMessage)
         setConversationId(savedId)
         setMessages(restored.length ? restored : [welcomeMessage])
+        if (restored.length) void synchronizeProposalReferences(restored)
       } catch (requestError) {
         setError(errorMessage(requestError, '历史对话加载失败，你仍可开始新对话'))
       } finally {
@@ -95,6 +106,10 @@ export default function AgentPage () {
     void loadConversation()
   })
 
+  useDidShow(() => {
+    void synchronizeProposalReferences(messagesRef.current)
+  })
+
   useEffect(() => {
     const last = messages[messages.length - 1]
     if (last) setScrollTarget(`message-${last.id}`)
@@ -103,6 +118,48 @@ export default function AgentPage () {
   useEffect(() => () => {
     pollGeneration.current += 1
   }, [])
+
+  async function synchronizeProposalReferences (
+    sourceMessages: DisplayMessage[]
+  ) {
+    if (proposalSyncInFlight.current) {
+      proposalSyncQueued.current = true
+      return
+    }
+    const references = new Map<string, PlanAdjustmentProposalReference>()
+    for (const message of sourceMessages) {
+      if (message.proposal) references.set(message.proposal.id, message.proposal)
+    }
+    if (references.size === 0) return
+
+    proposalSyncInFlight.current = true
+    try {
+      const updates = new Map<string, PlanAdjustmentProposalReference>()
+      await Promise.all([...references.entries()].map(async ([id, reference]) => {
+        try {
+          const proposal = await proposalsApi.get(id)
+          updates.set(id, proposalReferenceFromRead(proposal))
+        } catch (requestError) {
+          const code = (requestError as { code?: unknown } | null)?.code
+          if (code === 'proposal_not_found') {
+            updates.set(id, unavailableProposalReference(reference))
+          }
+        }
+      }))
+      if (updates.size === 0) return
+      setMessages(current => current.map(message => {
+        if (!message.proposal) return message
+        const updated = updates.get(message.proposal.id)
+        return updated ? { ...message, proposal: updated } : message
+      }))
+    } finally {
+      proposalSyncInFlight.current = false
+      if (proposalSyncQueued.current) {
+        proposalSyncQueued.current = false
+        void synchronizeProposalReferences(messagesRef.current)
+      }
+    }
+  }
 
   async function resumePendingRequest (
     initialRequest: PendingAgentRequest
@@ -245,7 +302,7 @@ export default function AgentPage () {
     <View className='agent-page'>
       <View className='agent-header'>
         <View>
-          <Text className='agent-eyebrow'>只读能力已开启</Text>
+          <Text className='agent-eyebrow'>查询与提案能力已开启</Text>
           <Text className='agent-title'>和训练搭子聊聊</Text>
           <Text className='agent-build'>{miniappBuildLabel()}</Text>
         </View>
@@ -316,7 +373,7 @@ export default function AgentPage () {
         >
           {sending ? '处理中' : '发送'}
         </Button>
-        <Text className='composer-hint'>健康建议不能替代医生诊断；当前不会直接修改训练数据。</Text>
+        <Text className='composer-hint'>健康建议不能替代医生诊断；未经你的确认不会修改训练数据。</Text>
       </View>
     </View>
   )
@@ -341,21 +398,7 @@ function toDisplayMessage (message: AgentMessage): DisplayMessage {
 function proposalFromContentData (
   contentData: Record<string, unknown>
 ): PlanAdjustmentProposalReference | null {
-  const value = contentData.proposal
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
-  const proposal = value as Record<string, unknown>
-  if (
-    typeof proposal.id !== 'string' ||
-    proposal.proposal_type !== 'plan_adjustment_v1' ||
-    proposal.status !== 'pending_confirmation' ||
-    typeof proposal.version !== 'number' ||
-    !Number.isInteger(proposal.version) ||
-    proposal.version < 1 ||
-    typeof proposal.expires_at !== 'string' ||
-    typeof proposal.payload_fingerprint !== 'string' ||
-    !/^[0-9a-f]{64}$/.test(proposal.payload_fingerprint)
-  ) return null
-  return proposal as unknown as PlanAdjustmentProposalReference
+  return proposalReferenceFromUnknown(contentData.proposal)
 }
 
 function ProposalReferenceCard ({
@@ -363,9 +406,12 @@ function ProposalReferenceCard ({
 }: {
   proposal: PlanAdjustmentProposalReference
 }) {
+  const localExpiryState = proposal.status === 'missing'
+    ? 'irrelevant'
+    : proposalLocalExpiryState(proposal.status, proposal.expires_at)
   const presentation = projectProposalStatus(
     proposal.status,
-    proposalLocalExpiryState(proposal.status, proposal.expires_at)
+    localExpiryState
   )
   const open = () => Taro.navigateTo({
     url: `/pages/proposal-detail/index?id=${encodeURIComponent(proposal.id)}`
@@ -383,9 +429,13 @@ function ProposalReferenceCard ({
       </Text>
       <View className='proposal-reference-footer'>
         <Text className='proposal-reference-expiry'>
-          有效期至 {formatProposalDate(proposal.expires_at)}
+          {presentation.terminal
+            ? '状态已与服务端同步'
+            : `有效期至 ${formatProposalDate(proposal.expires_at)}`}
         </Text>
-        <Text className='proposal-reference-action'>查看详情 →</Text>
+        <Text className='proposal-reference-action'>
+          {presentation.terminal ? '查看结果 →' : '查看详情 →'}
+        </Text>
       </View>
     </View>
   )

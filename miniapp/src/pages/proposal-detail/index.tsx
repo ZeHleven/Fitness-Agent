@@ -383,11 +383,12 @@ export default function ProposalDetailPage () {
       }
     }
 
+    const confirmationRequired = action === 'reject' || retry
     interactionLock.current = true
-    setDecisionMode('modal')
+    setDecisionMode(confirmationRequired ? 'modal' : 'submitting')
     setDecisionAction(action)
     let userChoice: 'accept' | 'cancel' = 'accept'
-    if (!confirmationGranted) {
+    if (confirmationRequired && !confirmationGranted) {
       const confirmation = await requestProposalConfirmation(
         proposalConfirmationOptions(action, proposal.payload.changes.length),
         {
@@ -418,6 +419,7 @@ export default function ProposalDetailPage () {
       server_status: proposal.status,
       local_expiry_state: localExpiryState,
       detail_reviewed: detailReviewed,
+      confirmation_required: confirmationRequired,
       user_choice: userChoice,
       existing_journal: pending ? 'reusable' : 'none'
     })

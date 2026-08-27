@@ -6,6 +6,7 @@ export interface ProposalConfirmationInput {
   server_status: string
   local_expiry_state: string
   detail_reviewed: boolean
+  confirmation_required: boolean
   user_choice: 'accept' | 'cancel'
   existing_journal: 'none' | 'reusable'
 }
@@ -103,9 +104,11 @@ export function projectProposalConfirmation (
       request_id: 'none'
     }
   }
-  const modal = input.action === 'confirm'
-    ? 'confirm_plan_adjustment'
-    : 'confirm_rejection'
+  const modal = input.confirmation_required
+    ? input.action === 'confirm'
+      ? 'confirm_plan_adjustment'
+      : 'confirm_rejection'
+    : 'not_required'
   if (input.user_choice === 'cancel') {
     return {
       modal,

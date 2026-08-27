@@ -27,7 +27,7 @@ export type PlanAdjustmentProposalBusinessErrorCode =
 export interface PlanAdjustmentProposalReference {
   id: string
   proposal_type: 'plan_adjustment_v1'
-  status: 'pending_confirmation'
+  status: PlanAdjustmentProposalStatus | 'missing'
   version: number
   expires_at: string
   payload_fingerprint: string
