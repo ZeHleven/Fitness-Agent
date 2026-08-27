@@ -31,6 +31,7 @@ function loadTypeScriptModule (relativePath) {
 }
 
 const runtime = loadTypeScriptModule('../src/core/proposal-decision-ui.ts')
+const displayRuntime = loadTypeScriptModule('../src/core/proposal-display.ts')
 
 const CONFIRMATION_KEYS = new Set([
   'case_id',
@@ -396,6 +397,39 @@ test('runtime UI projectors satisfy every fixed integration case', () => {
       assert.deepEqual(projector(item), item.expected, item.case_id)
     }
   }
+})
+
+test('sparse proposal summaries omit legacy null fields', () => {
+  const values = displayRuntime.proposalChangeValues({
+    change_type: 'update_plan_schedule',
+    stable_display_key: 'plan-schedule',
+    before: { duration_weeks: 6, days_per_week: null },
+    after: { duration_weeks: 8, days_per_week: null },
+    reason: '延长计划周期。',
+    safety_priority: false
+  })
+
+  assert.deepEqual(values, {
+    before: '计划周数：6 周',
+    after: '计划周数：8 周'
+  })
+  assert.doesNotMatch(JSON.stringify(values), /null|undefined/)
+})
+
+test('proposal summaries render an explicit frequency change', () => {
+  const values = displayRuntime.proposalChangeValues({
+    change_type: 'update_plan_schedule',
+    stable_display_key: 'plan-schedule',
+    before: { days_per_week: 4 },
+    after: { days_per_week: 3 },
+    reason: '按个人训练频率重排计划。',
+    safety_priority: false
+  })
+
+  assert.deepEqual(values, {
+    before: '每周天数：4 天',
+    after: '每周天数：3 天'
+  })
 })
 
 test('confirm and reject always require full review and second confirmation', () => {

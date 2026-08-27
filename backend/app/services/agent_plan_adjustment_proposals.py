@@ -420,6 +420,44 @@ def _runtime_evidence(
     return tuple(evidence)
 
 
+def _profile_training_days_per_week(
+    observations: list[dict[str, Any]],
+) -> int | None:
+    for observation in reversed(observations):
+        if (
+            observation.get("tool_id") != "profile.get_summary"
+            or observation.get("status") != "success"
+        ):
+            continue
+        result = observation.get("result")
+        if not isinstance(result, dict) or result.get("found") is not True:
+            continue
+        value = result.get("training_days_per_week")
+        if (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and 1 <= value <= 7
+        ):
+            return value
+    return None
+
+
+def _is_unsupported_frequency_workaround(
+    *,
+    before: PlanAdjustmentPlanSnapshot,
+    draft: PlanAdjustmentProposalDraft,
+    observations: list[dict[str, Any]],
+) -> bool:
+    profile_days = _profile_training_days_per_week(observations)
+    if profile_days is None or profile_days >= before.days_per_week:
+        return False
+    return bool(draft.changes) and all(
+        isinstance(change, PlanAdjustmentScheduleChange)
+        and change.before.model_fields_set == {"duration_weeks"}
+        for change in draft.changes
+    )
+
+
 def build_runtime_plan_adjustment_proposal(
     *,
     feature_enabled: bool,
@@ -497,6 +535,16 @@ def build_runtime_plan_adjustment_proposal(
     except (KeyError, ValidationError, TypeError, ValueError):
         return RuntimePlanAdjustmentProposalBuildResult(
             decision=_rejected("proposal_candidate_build_invalid")
+        )
+    if _is_unsupported_frequency_workaround(
+        before=before,
+        draft=parsed_draft,
+        observations=observations,
+    ):
+        return RuntimePlanAdjustmentProposalBuildResult(
+            decision=_rejected(
+                "proposal_frequency_restructure_unsupported"
+            )
         )
     try:
         after = apply_plan_adjustment_proposal_draft(before, parsed_draft)

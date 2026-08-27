@@ -38,6 +38,7 @@ PlanAdjustmentProposalCreationReasonCode = Literal[
     "proposal_draft_missing",
     "proposal_draft_schema_invalid",
     "proposal_target_mismatch",
+    "proposal_frequency_restructure_unsupported",
     "proposal_candidate_build_invalid",
     "proposal_target_ambiguous",
     "proposal_type_not_allowed",

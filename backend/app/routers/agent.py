@@ -266,6 +266,7 @@ async def get_agent_run(
 @router.get(
     "/proposals/{proposal_id}",
     response_model=PlanAdjustmentProposalReadResponse,
+    response_model_exclude_unset=True,
 )
 async def get_plan_adjustment_proposal(
     proposal_id: str,

@@ -345,6 +345,62 @@ def test_runtime_builder_accepts_authoritative_plan_duration_extension():
     )
 
 
+def test_runtime_builder_rejects_duration_only_frequency_workaround():
+    observations = _runtime_observations()
+    plan = observations[0]["result"]["plan"]
+    exercise = copy.deepcopy(plan["exercises"][0])
+    plan["days_per_week"] = 4
+    plan["exercises"] = [
+        {
+            **copy.deepcopy(exercise),
+            "day_of_week": day_of_week,
+            "order_index": 0,
+        }
+        for day_of_week in (1, 2, 4, 6)
+    ]
+    observations.insert(0, {
+        "tool_id": "profile.get_summary",
+        "status": "success",
+        "result": {
+            "found": True,
+            "training_days_per_week": 3,
+        },
+    })
+    draft = {
+        "proposal_type": "plan_adjustment_v1",
+        "changes": [{
+            "change_type": "update_plan_schedule",
+            "stable_display_key": "plan-schedule",
+            "before": {"duration_weeks": 4},
+            "after": {"duration_weeks": 6},
+            "reason": "延长周期，使每周实际训练约三次。",
+            "safety_priority": False,
+        }],
+        "rationale": ["个人资料目标为每周三天，当前计划为每周四天。"],
+        "safety_notes": [],
+        "requested_ttl_hours": 24,
+    }
+
+    result = build_runtime_plan_adjustment_proposal(
+        feature_enabled=True,
+        run_owned=True,
+        selected_outcome="adjustment_proposal",
+        terminal_action="proposal",
+        intent_allows_adjustment=True,
+        risk_level="low",
+        clarification_required=False,
+        observations=observations,
+        proposal_draft=draft,
+        created_at=_CREATED_AT,
+    )
+
+    assert result.built is None
+    assert (
+        result.decision.reason_code
+        == "proposal_frequency_restructure_unsupported"
+    )
+
+
 @pytest.mark.parametrize(
     ("failure_stage", "expected_reason"),
     [

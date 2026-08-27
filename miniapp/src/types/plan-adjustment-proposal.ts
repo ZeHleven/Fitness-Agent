@@ -60,9 +60,9 @@ export interface PlanAdjustmentPlanSnapshot {
 }
 
 export interface PlanAdjustmentExerciseTargetValues {
-  sets?: number
-  reps?: string
-  rest_seconds?: number
+  sets?: number | null
+  reps?: string | null
+  rest_seconds?: number | null
   recommended_weight_kg?: number | null
 }
 
@@ -72,8 +72,8 @@ export interface PlanAdjustmentExerciseIdentity {
 }
 
 export interface PlanAdjustmentScheduleValues {
-  duration_weeks?: number
-  days_per_week?: number
+  duration_weeks?: number | null
+  days_per_week?: number | null
 }
 
 interface PlanAdjustmentChangeBase {

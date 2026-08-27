@@ -14,6 +14,7 @@ import {
   proposalLocalExpiryState
 } from '../../core/proposal-interaction'
 import type { ProposalStatusPresentation } from '../../core/proposal-interaction'
+import { proposalChangeValues } from '../../core/proposal-display'
 import { errorMessage } from '../../core/request'
 import {
   mapProposalClientError,
@@ -792,7 +793,7 @@ function ChangeSummary ({
   change: PlanAdjustmentChange
   index: number
 }) {
-  const values = changeValues(change)
+  const values = proposalChangeValues(change)
   return (
     <View className='change-summary'>
       <View className='change-heading'>
@@ -823,45 +824,6 @@ function changeTitle (change: PlanAdjustmentChange): string {
   if (change.change_type === 'replace_exercise') return '替换训练动作'
   if (change.change_type === 'update_plan_schedule') return '调整计划节奏'
   return '调整动作目标'
-}
-
-function changeValues (change: PlanAdjustmentChange): {
-  before: string
-  after: string
-} {
-  if (change.change_type === 'replace_exercise') {
-    return {
-      before: change.before.exercise_name,
-      after: change.after.exercise_name
-    }
-  }
-  const labels: Record<string, string> = {
-    sets: '组数',
-    reps: '次数',
-    rest_seconds: '休息秒数',
-    recommended_weight_kg: '建议重量',
-    duration_weeks: '计划周数',
-    days_per_week: '每周天数'
-  }
-  return {
-    before: Object.entries(change.before)
-      .map(([key, value]) => `${labels[key] || key}：${formatChangeValue(key, value)}`)
-      .join(' · '),
-    after: Object.entries(change.after)
-      .map(([key, value]) => `${labels[key] || key}：${formatChangeValue(key, value)}`)
-      .join(' · ')
-  }
-}
-
-function formatChangeValue (key: string, value: unknown): string {
-  if (key === 'recommended_weight_kg') {
-    return typeof value === 'number' ? `${value} kg` : '自重/未指定'
-  }
-  if (key === 'rest_seconds') return `${String(value)} 秒`
-  if (key === 'duration_weeks') return `${String(value)} 周`
-  if (key === 'days_per_week') return `${String(value)} 天`
-  if (key === 'sets') return `${String(value)} 组`
-  return String(value)
 }
 
 function formatWeight (value: number | null): string {

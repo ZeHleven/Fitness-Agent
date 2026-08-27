@@ -320,6 +320,8 @@ async def test_read_and_decisions_hide_foreign_proposals_as_missing(
     assert owned.json()["status"] == "pending_confirmation"
     assert owned.json()["allowed_actions"] == ["confirm", "reject"]
     assert owned.json()["payload_fingerprint"] == seeded.payload_fingerprint
+    assert owned.json()["payload"]["changes"][0]["before"] == {"sets": 4}
+    assert owned.json()["payload"]["changes"][0]["after"] == {"sets": 3}
     assert foreign.status_code == 404
     assert missing.status_code == 404
     assert foreign_confirm.status_code == 404
