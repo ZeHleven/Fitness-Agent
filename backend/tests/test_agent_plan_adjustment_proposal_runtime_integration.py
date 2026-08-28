@@ -164,6 +164,8 @@ def _planned_result(
     *,
     proposal_draft: dict | None,
     include_supporting_evidence: bool = True,
+    profile_days_per_week: int | None = None,
+    total_sessions: int = 0,
 ) -> PlannedExecutionResult:
     trace = AgentExecutionTrace(
         execution_mode="planned",
@@ -190,15 +192,25 @@ def _planned_result(
         terminal_action="proposal",
         termination_reason="agent_completed",
     )
-    observations = [
-        {
+    observations = []
+    if profile_days_per_week is not None:
+        observations.append({
             "step_id": "step_1",
-            "call_id": "fixture-plan",
-            "tool_id": "plan.get_active",
+            "call_id": "fixture-profile",
+            "tool_id": "profile.get_summary",
             "status": "success",
-            "result": {"found": True, "plan": plan},
-        },
-    ]
+            "result": {
+                "found": True,
+                "training_days_per_week": profile_days_per_week,
+            },
+        })
+    observations.append({
+        "step_id": "step_1",
+        "call_id": "fixture-plan",
+        "tool_id": "plan.get_active",
+        "status": "success",
+        "result": {"found": True, "plan": plan},
+    })
     if include_supporting_evidence:
         observations.append({
             "step_id": "step_1",
@@ -207,7 +219,7 @@ def _planned_result(
             "status": "success",
             "result": {
                 "weeks": 4,
-                "total_sessions": 0,
+                "total_sessions": total_sessions,
                 "total_sets": 0,
                 "total_reps": 0,
                 "total_volume_kg": 0,
@@ -527,6 +539,99 @@ async def test_flag_on_atomically_persists_and_returns_minimal_proposal_referenc
     assert run_response.status_code == 200
     assert run_response.json()["proposal"] == proposal_reference
     assert run_response.json()["execution_trace"]["trace_version"] == "1.2"
+    assert run_response.json()["execution_trace"]["proposal_creation"] == {
+        "eligible": True,
+        "reason_code": None,
+        "persisted": True,
+        "persistence_status": "created",
+        "persistence_reason_code": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_low_adherence_profile_mismatch_persists_frequency_proposal(
+    client,
+    db_session,
+):
+    token, plan = await _seed_active_plan(
+        client,
+        email="proposal-runtime-frequency@example.com",
+        suffix="frequency",
+        duration_weeks=8,
+    )
+    exercise = plan["exercises"][0]
+    plan["days_per_week"] = 4
+    plan["exercises"] = [
+        {
+            **exercise,
+            "day_of_week": day_of_week,
+            "order_index": 0,
+        }
+        for day_of_week in (1, 2, 4, 6)
+    ]
+    duration_workaround = {
+        "proposal_type": "plan_adjustment_v1",
+        "changes": [{
+            "change_type": "update_plan_schedule",
+            "stable_display_key": "plan-schedule",
+            "before": {"duration_weeks": 8},
+            "after": {"duration_weeks": 10},
+            "reason": "延长计划周期以降低每周推进压力。",
+            "safety_priority": False,
+        }],
+        "rationale": ["个人资料为每周三天，当前四天计划完成率偏低。"],
+        "safety_notes": [],
+        "requested_ttl_hours": 24,
+    }
+    execute_planned = AsyncMock(return_value=_planned_result(
+        plan,
+        proposal_draft=duration_workaround,
+        profile_days_per_week=3,
+        total_sessions=4,
+    ))
+
+    with (
+        patch.object(
+            settings,
+            "AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED",
+            True,
+        ),
+        patch("app.services.agent_runtime._build_model", return_value=object()),
+        patch(
+            "app.services.agent_runtime.execute_planned_agent",
+            new=execute_planned,
+        ),
+    ):
+        response = await client.post(
+            "/api/v1/agent/chat",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "message": (
+                    "结合我最近四周的实际完成情况，看看当前计划是不是太激进，"
+                    "并给调整建议。"
+                )
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "proposal" in body
+    proposal = await db_session.get(AgentProposal, body["proposal"]["id"])
+    assert proposal is not None
+    assert proposal.payload_data["before"]["duration_weeks"] == 8
+    assert proposal.payload_data["after"]["duration_weeks"] == 8
+    assert proposal.payload_data["before"]["days_per_week"] == 4
+    assert proposal.payload_data["after"]["days_per_week"] == 3
+    assert {
+        item["day_of_week"]
+        for item in proposal.payload_data["after"]["exercises"]
+    } == {1, 2, 4}
+
+    run_response = await client.get(
+        f"/api/v1/agent/runs/{body['run_id']}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert run_response.status_code == 200
     assert run_response.json()["execution_trace"]["proposal_creation"] == {
         "eligible": True,
         "reason_code": None,

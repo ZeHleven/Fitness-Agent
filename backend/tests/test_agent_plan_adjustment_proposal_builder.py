@@ -468,10 +468,11 @@ def test_explicit_duration_command_is_not_inferred_frequency_workaround():
     assert result.built.payload.after.days_per_week == 4
 
 
-def test_runtime_builder_rejects_duration_only_frequency_workaround():
+def test_runtime_builder_normalizes_duration_workaround_to_profile_frequency():
     observations = _runtime_observations()
     plan = observations[0]["result"]["plan"]
     exercise = copy.deepcopy(plan["exercises"][0])
+    plan["duration_weeks"] = 8
     plan["days_per_week"] = 4
     plan["exercises"] = [
         {
@@ -494,8 +495,8 @@ def test_runtime_builder_rejects_duration_only_frequency_workaround():
         "changes": [{
             "change_type": "update_plan_schedule",
             "stable_display_key": "plan-schedule",
-            "before": {"duration_weeks": 4},
-            "after": {"duration_weeks": 6},
+            "before": {"duration_weeks": 8},
+            "after": {"duration_weeks": 10},
             "reason": "延长周期，使每周实际训练约三次。",
             "safety_priority": False,
         }],
@@ -517,11 +518,24 @@ def test_runtime_builder_rejects_duration_only_frequency_workaround():
         created_at=_CREATED_AT,
     )
 
-    assert result.built is None
-    assert (
-        result.decision.reason_code
-        == "proposal_frequency_restructure_unsupported"
-    )
+    assert result.decision.eligible is True
+    assert result.built is not None
+    payload = result.built.payload
+    assert payload.before.duration_weeks == payload.after.duration_weeks == 8
+    assert payload.before.days_per_week == 4
+    assert payload.after.days_per_week == 3
+    assert {item.day_of_week for item in payload.after.exercises} == {1, 2, 4}
+    assert len(payload.before.exercises) == 4
+    assert len(payload.after.exercises) == 3
+    assert len(payload.changes) == 1
+    change = payload.changes[0]
+    assert change.change_type == "update_plan_schedule"
+    assert change.before.model_dump(exclude_unset=True) == {
+        "days_per_week": 4,
+    }
+    assert change.after.model_dump(exclude_unset=True) == {
+        "days_per_week": 3,
+    }
 
 
 @pytest.mark.parametrize(
