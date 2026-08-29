@@ -468,7 +468,7 @@ def test_explicit_duration_command_is_not_inferred_frequency_workaround():
     assert result.built.payload.after.days_per_week == 4
 
 
-def test_runtime_builder_normalizes_duration_workaround_to_profile_frequency():
+def _profile_frequency_runtime_observations() -> list[dict]:
     observations = _runtime_observations()
     plan = observations[0]["result"]["plan"]
     exercise = copy.deepcopy(plan["exercises"][0])
@@ -490,6 +490,11 @@ def test_runtime_builder_normalizes_duration_workaround_to_profile_frequency():
             "training_days_per_week": 3,
         },
     })
+    return observations
+
+
+def test_runtime_builder_normalizes_duration_workaround_to_profile_frequency():
+    observations = _profile_frequency_runtime_observations()
     draft = {
         "proposal_type": "plan_adjustment_v1",
         "changes": [{
@@ -536,6 +541,85 @@ def test_runtime_builder_normalizes_duration_workaround_to_profile_frequency():
     assert change.after.model_dump(exclude_unset=True) == {
         "days_per_week": 3,
     }
+
+
+def test_runtime_builder_accepts_server_validated_frequency_draft():
+    observations = _profile_frequency_runtime_observations()
+    draft = {
+        "proposal_type": "plan_adjustment_v1",
+        "changes": [{
+            "change_type": "update_plan_schedule",
+            "stable_display_key": "plan-schedule",
+            "before": {"days_per_week": 4},
+            "after": {"days_per_week": 3},
+            "reason": "按个人目标频率减少一个训练日。",
+            "safety_priority": False,
+        }],
+        "rationale": ["当前四天计划完成率偏低，个人目标为每周三天。"],
+        "safety_notes": [],
+        "requested_ttl_hours": 24,
+    }
+
+    result = build_runtime_plan_adjustment_proposal(
+        feature_enabled=True,
+        run_owned=True,
+        selected_outcome="adjustment_proposal",
+        terminal_action="proposal",
+        intent_allows_adjustment=True,
+        risk_level="low",
+        clarification_required=False,
+        observations=observations,
+        proposal_draft=draft,
+        created_at=_CREATED_AT,
+    )
+
+    assert result.decision.eligible is True
+    assert result.built is not None
+    assert result.built.payload.after.days_per_week == 3
+    assert {
+        item.day_of_week for item in result.built.payload.after.exercises
+    } == {1, 2, 4}
+
+
+@pytest.mark.parametrize("invalid_evidence", ["profile", "adherence"])
+def test_runtime_builder_rejects_unproven_frequency_reduction(
+    invalid_evidence,
+):
+    observations = _profile_frequency_runtime_observations()
+    if invalid_evidence == "profile":
+        observations[0]["result"]["training_days_per_week"] = 2
+    else:
+        observations[-1]["result"]["total_sessions"] = 9
+    draft = {
+        "proposal_type": "plan_adjustment_v1",
+        "changes": [{
+            "change_type": "update_plan_schedule",
+            "stable_display_key": "plan-schedule",
+            "before": {"days_per_week": 4},
+            "after": {"days_per_week": 3},
+            "reason": "按个人目标频率减少一个训练日。",
+            "safety_priority": False,
+        }],
+        "rationale": ["尝试调整训练频率。"],
+        "safety_notes": [],
+        "requested_ttl_hours": 24,
+    }
+
+    result = build_runtime_plan_adjustment_proposal(
+        feature_enabled=True,
+        run_owned=True,
+        selected_outcome="adjustment_proposal",
+        terminal_action="proposal",
+        intent_allows_adjustment=True,
+        risk_level="low",
+        clarification_required=False,
+        observations=observations,
+        proposal_draft=draft,
+        created_at=_CREATED_AT,
+    )
+
+    assert result.built is None
+    assert result.decision.reason_code == "proposal_target_mismatch"
 
 
 @pytest.mark.parametrize(

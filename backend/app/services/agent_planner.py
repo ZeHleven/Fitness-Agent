@@ -119,8 +119,10 @@ safety_priority，不得添加其他字段。changes 只允许以下精确形状
 - update_plan_schedule：
   {"change_type":"update_plan_schedule","stable_display_key":"plan-schedule",
   "before":{"duration_weeks":4},"after":{"duration_weeks":6},
-  "reason":"延长计划周期以降低每周推进压力。","safety_priority":false}。首批只允许修改
-  duration_weeks，不允许修改 days_per_week；before/after 字段集合必须相同、值不能相同。
+  "reason":"延长计划周期以降低每周推进压力。","safety_priority":false}。允许修改
+  duration_weeks；当个人目标频率比当前计划少 1 天且近期完成率不超过一半时，也允许仅将
+  days_per_week 下调 1 天。频率调整不得与其他 change 混用；服务端会确定性移除总组数最少的
+  训练日，并在完整 before/after 中展示结果。before/after 字段集合必须相同、值不能相同。
 
 rationale 必须是 1–12 条非空字符串；safety_notes 必须是 0–12 条非空字符串。
 requested_ttl_hours 只能是 null 或 1–72 的整数，不能使用字符串数字。

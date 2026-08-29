@@ -273,6 +273,7 @@ async def _create_executable_proposal(
     db_session,
     *,
     suffix: str,
+    frequency_reduction: bool = False,
 ) -> _ExecutableProposalSeed:
     token = await _token(
         client,
@@ -290,7 +291,7 @@ async def _create_executable_proposal(
     assert profile is not None
     profile.experience_level = "intermediate"
     profile.primary_goal = "strength"
-    profile.training_days_per_week = 1
+    profile.training_days_per_week = 3 if frequency_reduction else 1
     profile.training_location = "gym"
     profile.injuries = []
     profile.chronic_conditions = []
@@ -313,26 +314,38 @@ async def _create_executable_proposal(
     base_plan = WorkoutPlan(
         id=f"proposal-runtime-e2e-plan-{suffix}",
         user_id=user.id,
-        name="基础力量计划",
+        name=(
+            "力量提升 · 4日入门计划"
+            if frequency_reduction
+            else "基础力量计划"
+        ),
         goal="strength",
-        duration_weeks=4,
-        days_per_week=1,
+        duration_weeks=8 if frequency_reduction else 4,
+        days_per_week=4 if frequency_reduction else 1,
         is_active=True,
         ai_generated=False,
-        notes="Proposal 端到端联调基线",
+        notes=(
+            "Proposal 4→3 天原子应用基线"
+            if frequency_reduction
+            else "Proposal 端到端联调基线"
+        ),
     )
     db_session.add_all([exercise, base_plan])
     await db_session.flush()
-    db_session.add(PlannedExercise(
-        plan_id=base_plan.id,
-        exercise_id=exercise.id,
-        day_of_week=1,
-        sets=4,
-        reps="8-10",
-        rest_seconds=120,
-        recommended_weight_kg=20.0,
-        order_index=0,
-    ))
+    planned = [
+        PlannedExercise(
+            plan_id=base_plan.id,
+            exercise_id=exercise.id,
+            day_of_week=day_of_week,
+            sets=4,
+            reps="8-10",
+            rest_seconds=120,
+            recommended_weight_kg=20.0,
+            order_index=0,
+        )
+        for day_of_week in ((1, 2, 4, 6) if frequency_reduction else (1,))
+    ]
+    db_session.add_all(planned)
     await db_session.commit()
 
     plan = {
@@ -344,17 +357,35 @@ async def _create_executable_proposal(
         "exercises": [{
             "exercise_id": exercise.id,
             "exercise_name": exercise.name_zh,
-            "day_of_week": 1,
-            "sets": 4,
-            "reps": "8-10",
-            "rest_seconds": 120,
-            "recommended_weight_kg": 20.0,
-            "order_index": 0,
-        }],
+            "day_of_week": item.day_of_week,
+            "sets": item.sets,
+            "reps": item.reps,
+            "rest_seconds": item.rest_seconds,
+            "recommended_weight_kg": item.recommended_weight_kg,
+            "order_index": item.order_index,
+        } for item in planned],
     }
+    proposal_draft = _target_reduction_draft()
+    if frequency_reduction:
+        proposal_draft = {
+            "proposal_type": "plan_adjustment_v1",
+            "changes": [{
+                "change_type": "update_plan_schedule",
+                "stable_display_key": "plan-schedule",
+                "before": {"duration_weeks": 8},
+                "after": {"duration_weeks": 10},
+                "reason": "延长计划周期以降低每周推进压力。",
+                "safety_priority": False,
+            }],
+            "rationale": ["个人资料为每周三天，当前四天计划完成率偏低。"],
+            "safety_notes": [],
+            "requested_ttl_hours": 24,
+        }
     execute_planned = AsyncMock(return_value=_planned_result(
         plan,
-        proposal_draft=_target_reduction_draft(),
+        proposal_draft=proposal_draft,
+        profile_days_per_week=3 if frequency_reduction else None,
+        total_sessions=4 if frequency_reduction else 0,
     ))
     with (
         patch.object(
@@ -371,7 +402,14 @@ async def _create_executable_proposal(
         response = await client.post(
             "/api/v1/agent/chat",
             headers=_headers(token),
-            json={"message": _USER_MESSAGE},
+            json={
+                "message": (
+                    "结合我最近四周的实际完成情况，看看当前计划是不是太激进，"
+                    "并给调整建议。"
+                    if frequency_reduction
+                    else _USER_MESSAGE
+                )
+            },
         )
 
     assert response.status_code == 200
@@ -1067,6 +1105,83 @@ async def test_e2e_runtime_create_confirm_applies_atomically_and_replays(
     await db_session.refresh(proposal)
     assert proposal.status == "applied"
     assert proposal.result_plan_id == active[0].id
+
+
+@pytest.mark.asyncio
+async def test_frequency_proposal_confirm_applies_atomically_and_replays(
+    client,
+    db_session,
+):
+    seeded = await _create_executable_proposal(
+        client,
+        db_session,
+        suffix="frequency-confirm",
+        frequency_reduction=True,
+    )
+    path = f"/api/v1/agent/proposals/{seeded.proposal_id}"
+    headers = _headers(seeded.token)
+
+    with patch.object(
+        settings,
+        "AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED",
+        True,
+    ):
+        first = await client.post(
+            f"{path}/confirm",
+            headers=headers,
+            json=_decision_body("frequency-confirm-first"),
+        )
+        same_request = await client.post(
+            f"{path}/confirm",
+            headers=headers,
+            json=_decision_body("frequency-confirm-first"),
+        )
+        different_request = await client.post(
+            f"{path}/confirm",
+            headers=headers,
+            json=_decision_body("frequency-confirm-second"),
+        )
+
+    assert first.status_code == 200
+    assert same_request.status_code == 200
+    assert different_request.status_code == 200
+    assert first.json() == same_request.json() == different_request.json()
+    assert first.json()["status"] == "applied"
+    assert first.json()["applied"] is True
+    result_plan_id = first.json()["result_plan_id"]
+    assert result_plan_id != seeded.base_plan_id
+
+    db_session.expire_all()
+    plans = list((await db_session.execute(
+        select(WorkoutPlan)
+        .where(WorkoutPlan.user_id == seeded.user_id)
+        .order_by(WorkoutPlan.id)
+    )).scalars().all())
+    assert len(plans) == 2
+    assert sum(plan.is_active for plan in plans) == 1
+    base_plan = next(plan for plan in plans if plan.id == seeded.base_plan_id)
+    applied_plan = next(plan for plan in plans if plan.id == result_plan_id)
+    assert base_plan.is_active is False
+    assert applied_plan.is_active is True
+    assert applied_plan.name == "力量提升 · 3日入门计划"
+    assert applied_plan.duration_weeks == 8
+    assert applied_plan.days_per_week == 3
+
+    applied_exercises = list((await db_session.execute(
+        select(PlannedExercise)
+        .where(PlannedExercise.plan_id == applied_plan.id)
+        .order_by(PlannedExercise.day_of_week)
+    )).scalars().all())
+    assert len(applied_exercises) == 3
+    assert {item.day_of_week for item in applied_exercises} == {1, 2, 4}
+    assert all(item.sets == 4 for item in applied_exercises)
+
+    proposal = await db_session.get(AgentProposal, seeded.proposal_id)
+    assert proposal is not None
+    await db_session.refresh(proposal)
+    assert proposal.status == "applied"
+    assert proposal.result_plan_id == applied_plan.id
+    assert proposal.version == 2
 
 
 @pytest.mark.asyncio

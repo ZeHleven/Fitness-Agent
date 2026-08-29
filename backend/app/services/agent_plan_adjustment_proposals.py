@@ -377,6 +377,22 @@ def plan_adjustment_plan_snapshot_fingerprint(
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _deterministic_frequency_reduction_day(
+    snapshot: PlanAdjustmentPlanSnapshot,
+) -> int:
+    day_loads: dict[int, int] = {}
+    for exercise in snapshot.exercises:
+        day_loads[exercise.day_of_week] = (
+            day_loads.get(exercise.day_of_week, 0) + exercise.sets
+        )
+    if len(day_loads) != snapshot.days_per_week:
+        raise ValueError("active plan schedule is inconsistent")
+    return min(
+        day_loads,
+        key=lambda day: (day_loads[day], -day),
+    )
+
+
 def apply_plan_adjustment_proposal_draft(
     before: PlanAdjustmentPlanSnapshot,
     draft: PlanAdjustmentProposalDraft,
@@ -386,6 +402,20 @@ def apply_plan_adjustment_proposal_draft(
         item["slot_key"]: item for item in after_data["exercises"]
     }
     seen_changes: set[tuple[str, str]] = set()
+    frequency_changes = [
+        change
+        for change in draft.changes
+        if (
+            isinstance(change, PlanAdjustmentScheduleChange)
+            and "days_per_week" in change.before.model_fields_set
+        )
+    ]
+    if frequency_changes and (
+        len(frequency_changes) != 1 or len(draft.changes) != 1
+    ):
+        raise ValueError(
+            "schedule frequency reduction must be the only proposal change"
+        )
 
     for change in draft.changes:
         change_key = (change.change_type, change.stable_display_key)
@@ -398,7 +428,32 @@ def apply_plan_adjustment_proposal_draft(
         if isinstance(change, PlanAdjustmentScheduleChange):
             changed_fields = change.before.model_fields_set
             if "days_per_week" in changed_fields:
-                raise ValueError("schedule frequency changes require a later cohort")
+                if changed_fields != {"days_per_week"}:
+                    raise ValueError(
+                        "schedule frequency reduction cannot mix fields"
+                    )
+                before_days = change.before.days_per_week
+                after_days = change.after.days_per_week
+                if (
+                    before_days != after_data["days_per_week"]
+                    or after_days != before_days - 1
+                ):
+                    raise ValueError(
+                        "schedule frequency reduction must lower one day"
+                    )
+                removed_day = _deterministic_frequency_reduction_day(before)
+                after_data["exercises"] = [
+                    exercise
+                    for exercise in after_data["exercises"]
+                    if exercise["day_of_week"] != removed_day
+                ]
+                after_data["days_per_week"] = after_days
+                after_data["name"] = (
+                    after_data["name"]
+                    .replace(f"{before_days}日", f"{after_days}日")
+                    .replace(f"{before_days}天", f"{after_days}天")
+                )
+                continue
             for field_name in changed_fields:
                 if after_data[field_name] != getattr(change.before, field_name):
                     raise ValueError("schedule draft does not match active plan")
@@ -493,6 +548,106 @@ def _is_unsupported_frequency_workaround(
     )
 
 
+def _contains_frequency_change(
+    draft: PlanAdjustmentProposalDraft,
+) -> bool:
+    return any(
+        isinstance(change, PlanAdjustmentScheduleChange)
+        and "days_per_week" in change.before.model_fields_set
+        for change in draft.changes
+    )
+
+
+def _is_frequency_only_draft(
+    draft: PlanAdjustmentProposalDraft,
+) -> bool:
+    return (
+        len(draft.changes) == 1
+        and isinstance(draft.changes[0], PlanAdjustmentScheduleChange)
+        and draft.changes[0].before.model_fields_set == {"days_per_week"}
+    )
+
+
+def _has_clear_low_adherence(
+    *,
+    before: PlanAdjustmentPlanSnapshot,
+    observations: list[dict[str, Any]],
+) -> bool:
+    for observation in reversed(observations):
+        if (
+            observation.get("tool_id") != "workout.get_progress"
+            or observation.get("status") != "success"
+        ):
+            continue
+        result = observation.get("result")
+        if not isinstance(result, dict):
+            continue
+        weeks = result.get("weeks")
+        total_sessions = result.get("total_sessions")
+        if (
+            not isinstance(weeks, int)
+            or isinstance(weeks, bool)
+            or weeks < 1
+            or not isinstance(total_sessions, int)
+            or isinstance(total_sessions, bool)
+            or total_sessions < 0
+        ):
+            continue
+        expected_sessions = weeks * before.days_per_week
+        return (
+            expected_sessions >= 4
+            and total_sessions / expected_sessions <= 0.5
+        )
+    return False
+
+
+def _profile_aligned_frequency_draft(
+    *,
+    before: PlanAdjustmentPlanSnapshot,
+    observations: list[dict[str, Any]],
+    requested_ttl_hours: int | None,
+) -> PlanAdjustmentProposalDraft | None:
+    profile_days = _profile_training_days_per_week(observations)
+    if (
+        profile_days is None
+        or profile_days != before.days_per_week - 1
+        or not _has_clear_low_adherence(
+            before=before,
+            observations=observations,
+        )
+    ):
+        return None
+
+    try:
+        removed_day = _deterministic_frequency_reduction_day(before)
+    except ValueError:
+        return None
+    return PlanAdjustmentProposalDraft.model_validate({
+        "proposal_type": "plan_adjustment_v1",
+        "changes": [{
+            "change_type": "update_plan_schedule",
+            "stable_display_key": "plan-schedule",
+            "before": {"days_per_week": before.days_per_week},
+            "after": {"days_per_week": profile_days},
+            "reason": (
+                f"个人训练目标为每周{profile_days}天，当前计划为每周"
+                f"{before.days_per_week}天且近期完成率偏低；按计划总组数"
+                f"最少原则移除周{removed_day}训练日。"
+            ),
+            "safety_priority": False,
+        }],
+        "rationale": [
+            f"个人训练资料目标为每周{profile_days}天，低于当前计划的"
+            f"每周{before.days_per_week}天。",
+            "近期实际完成率不超过计划频率的一半，先减少一个训练日以降低执行压力。",
+        ],
+        "safety_notes": [
+            "本提案会移除一个完整训练日；确认前请核对完整调整后计划。"
+        ],
+        "requested_ttl_hours": requested_ttl_hours,
+    })
+
+
 def build_runtime_plan_adjustment_proposal(
     *,
     feature_enabled: bool,
@@ -581,19 +736,34 @@ def build_runtime_plan_adjustment_proposal(
         return RuntimePlanAdjustmentProposalBuildResult(
             decision=_rejected("proposal_candidate_build_invalid")
         )
-    if (
-        explicit_adjustment_command is None
-        and _is_unsupported_frequency_workaround(
+    if explicit_adjustment_command is None:
+        is_frequency_workaround = _is_unsupported_frequency_workaround(
             before=before,
             draft=parsed_draft,
             observations=observations,
         )
-    ):
-        return RuntimePlanAdjustmentProposalBuildResult(
-            decision=_rejected(
-                "proposal_frequency_restructure_unsupported"
+        contains_frequency_change = _contains_frequency_change(parsed_draft)
+        if contains_frequency_change and not _is_frequency_only_draft(
+            parsed_draft
+        ):
+            return RuntimePlanAdjustmentProposalBuildResult(
+                decision=_rejected("proposal_target_mismatch")
             )
-        )
+        if is_frequency_workaround or contains_frequency_change:
+            normalized_draft = _profile_aligned_frequency_draft(
+                before=before,
+                observations=observations,
+                requested_ttl_hours=parsed_draft.requested_ttl_hours,
+            )
+            if normalized_draft is None:
+                return RuntimePlanAdjustmentProposalBuildResult(
+                    decision=_rejected(
+                        "proposal_frequency_restructure_unsupported"
+                        if is_frequency_workaround
+                        else "proposal_target_mismatch"
+                    )
+                )
+            parsed_draft = normalized_draft
     try:
         after = apply_plan_adjustment_proposal_draft(before, parsed_draft)
     except (ValidationError, TypeError, ValueError):
