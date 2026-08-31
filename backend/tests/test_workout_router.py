@@ -58,18 +58,19 @@ async def test_list_plans_empty(client):
 @pytest.mark.asyncio
 async def test_list_plans_returns_created(client):
     token = await get_token(client, "wo3@example.com")
-    second = await client.post(
+    first = await client.post(
         "/api/v1/workouts/plans",
         json={"name": "计划A"},
         headers={"Authorization": f"Bearer {token}"},
     )
-    await client.post(
+    second = await client.post(
         "/api/v1/workouts/plans",
         json={"name": "计划B"},
         headers={"Authorization": f"Bearer {token}"},
     )
     resp = await client.get("/api/v1/workouts/plans", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
+    assert first.status_code == 201
     assert second.status_code == 409
     assert len(resp.json()) == 1
 

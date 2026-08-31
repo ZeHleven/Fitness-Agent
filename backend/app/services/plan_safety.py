@@ -29,11 +29,11 @@ async def evaluate_plan_safety(
         profile = await db.scalar(
             select(UserProfile).where(UserProfile.user_id == plan.user_id)
         )
-    if profile is None or not profile.onboarding_completed:
-        return PlanSafetyEvaluation(
-            status="needs_review",
-            reasons=("请先完善个人档案和健康筛查",),
-        )
+    # Existing users may have plans created before profile onboarding existed.
+    # Absence of a profile is not itself a known incompatibility.  A partial
+    # profile is still evaluated so any saved injury data takes effect at once.
+    if profile is None:
+        return PlanSafetyEvaluation(status="compatible", reasons=())
 
     planned = planned_exercises
     if planned is None:

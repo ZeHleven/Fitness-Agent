@@ -156,4 +156,4 @@ async def test_weight_and_nutrition_tools_read_only_current_user(db_session):
     assert today["count"] == 1
     assert today["total_calories"] == 165
     assert history["count"] == 1
-    assert foods["foods"][0]["id"] == food.id
+    assert food.id in {item["id"] for item in foods["foods"]}

@@ -131,7 +131,9 @@ def _validate_route_allowlist_fact(fact: dict[str, Any]) -> None:
 
 def _validate_constructed_tools_fact(fact: dict[str, Any]) -> None:
     _require_exact_keys(fact, {"tools"}, location="constructed_tools")
-    tools = _require_list(fact["tools"], location="constructed_tools.tools")
+    tools = _require_list(
+        fact["tools"], location="constructed_tools.tools", max_length=30
+    )
     tool_ids: list[str] = []
     for index, raw_tool in enumerate(tools):
         location = f"constructed_tools.tools[{index}]"
@@ -149,7 +151,9 @@ def _validate_constructed_tools_fact(fact: dict[str, Any]) -> None:
 
 def _validate_argument_schema_fact(fact: dict[str, Any]) -> None:
     _require_exact_keys(fact, {"tools"}, location="argument_schema")
-    tools = _require_list(fact["tools"], location="argument_schema.tools")
+    tools = _require_list(
+        fact["tools"], location="argument_schema.tools", max_length=30
+    )
     tool_ids: list[str] = []
     for tool_index, raw_tool in enumerate(tools):
         location = f"argument_schema.tools[{tool_index}]"
@@ -209,7 +213,9 @@ def _validate_parallel_policy_fact(fact: dict[str, Any]) -> None:
         {"tools", "conditional_pairs"},
         location="parallel_policy",
     )
-    tools = _require_list(fact["tools"], location="parallel_policy.tools")
+    tools = _require_list(
+        fact["tools"], location="parallel_policy.tools", max_length=30
+    )
     tool_ids: list[str] = []
     for index, raw_tool in enumerate(tools):
         location = f"parallel_policy.tools[{index}]"

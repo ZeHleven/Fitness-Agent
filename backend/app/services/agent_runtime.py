@@ -1162,9 +1162,9 @@ async def execute_agent_run(
                     status_value = decision_result.error.code
                 else:
                     reply = (
-                        "已确认并应用提案。"
+                        "已确认并应用调整。"
                         if action == "confirm"
-                        else "已拒绝这份提案，当前数据保持不变。"
+                        else "已拒绝这份调整提案，当前计划保持不变。"
                     )
                     status_value = (
                         decision_result.response.status

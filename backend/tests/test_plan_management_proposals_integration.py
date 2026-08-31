@@ -44,6 +44,7 @@ async def _seed(db_session, suffix: str):
     squat = Exercise(
         id=f"manual-squat-{suffix}",
         name_zh="高脚杯深蹲",
+        name_en=f"Manual Goblet Squat {suffix}",
         category="力量",
         difficulty="初级",
         is_active=True,
@@ -51,6 +52,7 @@ async def _seed(db_session, suffix: str):
     row = Exercise(
         id=f"manual-row-{suffix}",
         name_zh="坐姿划船",
+        name_en=f"Manual Seated Row {suffix}",
         category="力量",
         difficulty="初级",
         is_active=True,

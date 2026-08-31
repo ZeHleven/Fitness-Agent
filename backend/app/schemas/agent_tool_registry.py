@@ -393,8 +393,8 @@ class ToolRegistryShadowCheck(BaseModel):
         default=None,
         pattern=r"^[0-9a-f]{64}$",
     )
-    legacy_tool_ids: tuple[str, ...] = Field(default=(), max_length=8)
-    registry_tool_ids: tuple[str, ...] = Field(default=(), max_length=8)
+    legacy_tool_ids: tuple[str, ...] = Field(default=(), max_length=30)
+    registry_tool_ids: tuple[str, ...] = Field(default=(), max_length=30)
     latency_ms: int = Field(default=0, ge=0)
     skip_reason: str | None = Field(default=None, max_length=120)
     error_category: str | None = Field(default=None, max_length=160)

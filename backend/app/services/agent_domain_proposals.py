@@ -81,10 +81,18 @@ def _fingerprint(value: Any) -> str:
 
 
 def _profile_state(profile: UserProfile) -> dict[str, Any]:
-    return {
+    state = {
         field: getattr(profile, field)
         for field in sorted(_PROFILE_FIELDS)
     }
+    # SQLAlchemy may retain values assigned before a flush as ``int`` while a
+    # later locked reload returns the same database value as ``float``.  The
+    # proposal fingerprint must describe the persisted value, not that
+    # incidental Python representation.
+    for field in ("height_cm", "weight_kg"):
+        if state[field] is not None:
+            state[field] = float(state[field])
+    return state
 
 
 def _reference(proposal: AgentProposal) -> PlanProposalReference:
@@ -1020,7 +1028,11 @@ async def _apply_meal_create(
     for item in meal_data.items:
         db.add(MealItem(meal_id=meal.id, **item.model_dump()))
     await db.flush()
-    return {"meal_log_id": meal.id, "logged_at": meal.logged_at, "meal_type": meal.meal_type}
+    return {
+        "meal_log_id": meal.id,
+        "logged_at": meal.logged_at.isoformat(),
+        "meal_type": meal.meal_type,
+    }
 
 
 async def _apply_meal_delete(
@@ -1195,7 +1207,9 @@ async def decide_agent_domain_proposal(
         await db.refresh(proposal)
         return _decision_response(proposal)
     except PlanProposalError as exc:
-        await db.rollback()
+        # ``begin_nested`` has already rolled back the domain write.  Keep the
+        # outer transaction alive so unrelated ORM instances are not expired
+        # and the stale audit transition can be committed atomically.
         failed = await db.scalar(
             select(AgentProposal).where(AgentProposal.id == proposal_id).with_for_update()
         )
@@ -1212,7 +1226,6 @@ async def decide_agent_domain_proposal(
         # The nested transaction guarantees that a partially applied domain
         # write is rolled back.  Keep a terminal audit record so a retry cannot
         # accidentally execute an uncertain proposal.
-        await db.rollback()
         failed = await db.scalar(
             select(AgentProposal).where(
                 AgentProposal.id == proposal_id,
