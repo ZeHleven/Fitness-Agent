@@ -258,5 +258,110 @@
     "allowed_tools": [],
     "forbidden_tools": ["plan.get_active"],
     "risk_level": "low"
+  },
+  {
+    "id": "weight_history_read",
+    "message": "看看我最近的体重变化",
+    "expected_primary": "weight_history_query",
+    "expected_domain": "profile",
+    "expected_request_kind": "query",
+    "expected_effect": "read",
+    "allowed_tools": ["weight.list_history"],
+    "forbidden_tools": ["profile.get_summary"],
+    "risk_level": "low"
+  },
+  {
+    "id": "nutrition_today_read",
+    "message": "我今天吃了什么？",
+    "expected_primary": "nutrition_today_query",
+    "expected_domain": "nutrition",
+    "expected_request_kind": "query",
+    "expected_effect": "read",
+    "allowed_tools": ["nutrition.get_today"],
+    "forbidden_tools": ["nutrition.list_history"],
+    "risk_level": "low"
+  },
+  {
+    "id": "nutrition_history_read",
+    "message": "查看最近的饮食记录",
+    "expected_primary": "nutrition_history_query",
+    "expected_domain": "nutrition",
+    "expected_request_kind": "query",
+    "expected_effect": "read",
+    "allowed_tools": ["nutrition.list_history"],
+    "forbidden_tools": ["nutrition.get_today"],
+    "risk_level": "low"
+  },
+  {
+    "id": "food_search_read",
+    "message": "搜索食品鸡胸肉",
+    "expected_primary": "food_search_query",
+    "expected_domain": "nutrition",
+    "expected_request_kind": "query",
+    "expected_effect": "read",
+    "allowed_tools": ["food.search"],
+    "forbidden_tools": ["nutrition.get_today"],
+    "risk_level": "low"
+  },
+  {
+    "id": "weight_log_create",
+    "message": "记录体重65公斤",
+    "expected_primary": "profile_query",
+    "expected_domain": "profile",
+    "expected_request_kind": "mutation",
+    "expected_effect": "create",
+    "expected_change_field": "weight_log.weight_kg",
+    "expected_change_value": 65.0,
+    "allowed_tools": [],
+    "forbidden_tools": ["profile.get_summary", "weight.list_history"],
+    "risk_level": "low"
+  },
+  {
+    "id": "profile_update_missing_value",
+    "message": "更新我的个人资料",
+    "expected_primary": "profile_query",
+    "expected_domain": "profile",
+    "expected_request_kind": "mutation",
+    "expected_effect": "update",
+    "allowed_tools": [],
+    "forbidden_tools": ["profile.get_summary"],
+    "clarification_required": true,
+    "risk_level": "low"
+  },
+  {
+    "id": "meal_create_missing_details",
+    "message": "新增一条饮食记录",
+    "expected_primary": "nutrition_today_query",
+    "expected_domain": "nutrition",
+    "expected_request_kind": "mutation",
+    "expected_effect": "create",
+    "allowed_tools": [],
+    "forbidden_tools": ["nutrition.get_today", "food.search"],
+    "clarification_required": true,
+    "risk_level": "low"
+  },
+  {
+    "id": "workout_history_delete_unsupported",
+    "message": "删除最近的训练记录",
+    "expected_primary": "workout_history_query",
+    "expected_domain": "workout_history",
+    "expected_request_kind": "mutation",
+    "expected_effect": "delete",
+    "allowed_tools": [],
+    "forbidden_tools": ["workout.list_history"],
+    "risk_level": "low"
+  },
+  {
+    "id": "proposal_chat_reject",
+    "message": "拒绝这个方案",
+    "expected_primary": "plan_query",
+    "expected_domain": "workout_plan",
+    "expected_request_kind": "proposal_decision",
+    "expected_effect": "decide",
+    "expected_change_field": "proposal.status",
+    "expected_change_value": "reject",
+    "allowed_tools": [],
+    "forbidden_tools": ["plan.get_active"],
+    "risk_level": "low"
   }
 ]

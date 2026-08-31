@@ -1,16 +1,16 @@
 from datetime import date, datetime
-from typing import Optional
-from pydantic import BaseModel, Field
+from typing import Literal, Optional
+from pydantic import BaseModel, Field, model_validator
 
 
 class MealItemCreate(BaseModel):
     food_id: Optional[str] = None
-    food_name: str
-    amount_g: float = Field(gt=0)
-    calories: float = Field(ge=0)
-    protein_g: float = 0.0
-    carbs_g: float = 0.0
-    fat_g: float = 0.0
+    food_name: str = Field(min_length=1, max_length=100)
+    amount_g: float = Field(gt=0, le=10000)
+    calories: float = Field(ge=0, le=50000)
+    protein_g: float = Field(default=0.0, ge=0, le=5000)
+    carbs_g: float = Field(default=0.0, ge=0, le=5000)
+    fat_g: float = Field(default=0.0, ge=0, le=5000)
 
 
 class MealItemResponse(BaseModel):
@@ -29,8 +29,14 @@ class MealItemResponse(BaseModel):
 
 class MealLogCreate(BaseModel):
     logged_at: date
-    meal_type: str = "早餐"
-    items: list[MealItemCreate] = []
+    meal_type: Literal["早餐", "午餐", "晚餐", "加餐"] = "早餐"
+    items: list[MealItemCreate] = Field(min_length=1, max_length=30)
+
+    @model_validator(mode="after")
+    def reject_future_date(self):
+        if self.logged_at > date.today():
+            raise ValueError("不能记录未来的饮食")
+        return self
 
 
 class MealLogResponse(BaseModel):

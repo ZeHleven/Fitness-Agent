@@ -260,6 +260,18 @@ class AgentProposal(Base):
             "decision_client_request_id",
             name="uq_agent_proposals_user_decision_request",
         ),
+        UniqueConstraint(
+            "user_id",
+            "creation_client_request_id",
+            name="uq_agent_proposals_user_creation_request",
+        ),
+        Index(
+            "ix_agent_proposals_target",
+            "user_id",
+            "target_kind",
+            "target_id",
+            "status",
+        ),
         Index(
             "ix_agent_proposals_pending_expiry",
             "expires_at",
@@ -309,16 +321,19 @@ class AgentProposal(Base):
             "status <> 'pending_confirmation' OR "
             "(decision_action IS NULL AND applied_at IS NULL AND "
             "result_plan_id IS NULL AND result_plan_fingerprint IS NULL AND "
-            "last_error_code IS NULL)",
+            "result_data IS NULL AND last_error_code IS NULL)",
             name="ck_agent_proposals_pending_clean",
         ),
         CheckConstraint(
             "(status = 'applied' AND decision_action = 'confirm' AND "
-            "applied_at IS NOT NULL AND result_plan_id IS NOT NULL AND "
-            "result_plan_fingerprint IS NOT NULL AND "
-            "last_error_code IS NULL) OR "
+            "applied_at IS NOT NULL AND last_error_code IS NULL AND ("
+            "(proposal_type IN ('plan_adjustment_v1', 'plan_adjustment_v2') AND "
+            "result_plan_id IS NOT NULL AND result_plan_fingerprint IS NOT NULL) OR "
+            "(proposal_type NOT IN ('plan_adjustment_v1', 'plan_adjustment_v2') AND "
+            "result_data IS NOT NULL))) OR "
             "(status <> 'applied' AND applied_at IS NULL AND "
-            "result_plan_id IS NULL AND result_plan_fingerprint IS NULL)",
+            "result_plan_id IS NULL AND result_plan_fingerprint IS NULL AND "
+            "result_data IS NULL)",
             name="ck_agent_proposals_applied_result",
         ),
         CheckConstraint(
@@ -328,31 +343,60 @@ class AgentProposal(Base):
             name="ck_agent_proposals_rejection_state",
         ),
         CheckConstraint(
-            "proposal_type <> 'plan_adjustment_v1' OR ("
+            "proposal_type NOT IN ('plan_adjustment_v1', 'plan_adjustment_v2', "
+            "'plan_deletion_v1') OR ("
             "payload_fingerprint IS NOT NULL AND "
             "base_plan_id IS NOT NULL AND "
             "base_plan_fingerprint IS NOT NULL AND "
             "expires_at IS NOT NULL AND "
-            "payload_data ->> 'schema_version' IS NOT DISTINCT FROM '1.0.0' "
-            "AND payload_data ->> 'proposal_type' "
+            "((proposal_type = 'plan_adjustment_v1' AND "
+            "(target_kind IS NULL OR target_kind = 'workout_plan') AND "
+            "(target_id IS NULL OR target_id = base_plan_id)) OR "
+            "(proposal_type <> 'plan_adjustment_v1' AND "
+            "target_kind IS NOT DISTINCT FROM 'workout_plan' AND "
+            "target_id IS NOT DISTINCT FROM base_plan_id)) AND "
+            "payload_data ->> 'proposal_type' "
             "IS NOT DISTINCT FROM proposal_type AND "
             "payload_data #>> '{target,base_plan_id}' "
             "IS NOT DISTINCT FROM base_plan_id AND "
             "payload_data #>> '{target,base_plan_fingerprint}' "
-            "IS NOT DISTINCT FROM base_plan_fingerprint)",
+            "IS NOT DISTINCT FROM base_plan_fingerprint AND ("
+            "(proposal_type = 'plan_adjustment_v1' AND "
+            "payload_data ->> 'schema_version' IS NOT DISTINCT FROM '1.0.0') OR "
+            "(proposal_type = 'plan_adjustment_v2' AND "
+            "payload_data ->> 'schema_version' IS NOT DISTINCT FROM '2.0.0') OR "
+            "(proposal_type = 'plan_deletion_v1' AND "
+            "payload_data ->> 'schema_version' IS NOT DISTINCT FROM '1.0.0')))",
             name="ck_agent_proposals_plan_adjustment_fields",
+        ),
+        CheckConstraint(
+            "origin IN ('agent_chat', 'manual_editor') AND "
+            "((origin = 'agent_chat' AND conversation_id IS NOT NULL) OR "
+            "(origin = 'manual_editor' AND conversation_id IS NULL AND run_id IS NULL))",
+            name="ck_agent_proposals_origin",
         ),
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
     user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), index=True)
-    conversation_id: Mapped[str] = mapped_column(
-        String, ForeignKey("agent_conversations.id", ondelete="CASCADE"), index=True
+    conversation_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("agent_conversations.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
     )
     run_id: Mapped[str | None] = mapped_column(
         String, ForeignKey("agent_runs.id", ondelete="SET NULL"), nullable=True
     )
     proposal_type: Mapped[str] = mapped_column(String(60), index=True)
+    origin: Mapped[str] = mapped_column(
+        String(20), default="agent_chat", server_default="agent_chat"
+    )
+    creation_client_request_id: Mapped[str | None] = mapped_column(
+        String(120), nullable=True
+    )
+    target_kind: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    target_id: Mapped[str | None] = mapped_column(String, nullable=True)
     payload_data: Mapped[dict] = mapped_column(JSONB)
     payload_fingerprint: Mapped[str | None] = mapped_column(
         String(64), nullable=True
@@ -394,6 +438,7 @@ class AgentProposal(Base):
     result_plan_fingerprint: Mapped[str | None] = mapped_column(
         String(64), nullable=True
     )
+    result_data: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     last_error_code: Mapped[str | None] = mapped_column(
         String(80), nullable=True
     )

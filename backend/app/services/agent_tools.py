@@ -10,8 +10,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.profile import UserProfile
+from app.models.profile import UserProfile, WeightLog
 from app.models.workout import WorkoutPlan
+from app.services.food import query_nutrition_database
+from app.services.nutrition_queries import (
+    build_daily_nutrition_summary,
+    list_nutrition_history,
+)
 from app.services.workout_queries import (
     build_plan_detail,
     build_session_detail,
@@ -43,6 +48,25 @@ class WorkoutProgressArguments(BaseModel):
     weeks: int = Field(default=8, ge=1, le=52)
 
 
+class WeightHistoryArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    limit: int = Field(default=30, ge=1, le=365)
+
+
+class NutritionHistoryArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    days: int = Field(default=30, ge=1, le=30)
+
+
+class FoodSearchArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(default="常见食品", min_length=1, max_length=50)
+    limit: int = Field(default=10, ge=1, le=20)
+
+
 READ_TOOL_IDS: tuple[str, ...] = (
     "profile.get_summary",
     "health.get_screening_summary",
@@ -51,6 +75,10 @@ READ_TOOL_IDS: tuple[str, ...] = (
     "workout.get_active_session",
     "workout.list_history",
     "workout.get_progress",
+    "weight.list_history",
+    "nutrition.get_today",
+    "nutrition.list_history",
+    "food.search",
 )
 
 
@@ -97,6 +125,10 @@ LANGCHAIN_TOOL_NAMES: dict[str, str] = {
     "workout.get_active_session": "workout_get_active_session",
     "workout.list_history": "workout_list_history",
     "workout.get_progress": "workout_get_progress",
+    "weight.list_history": "weight_list_history",
+    "nutrition.get_today": "nutrition_get_today",
+    "nutrition.list_history": "nutrition_list_history",
+    "food.search": "food_search",
 }
 TOOL_ID_BY_LANGCHAIN_NAME = {
     tool_name: tool_id for tool_id, tool_name in LANGCHAIN_TOOL_NAMES.items()
@@ -289,6 +321,83 @@ def build_read_tools(
         )
         return progress.model_dump(mode="json")
 
+    @tool(
+        LANGCHAIN_TOOL_NAMES["weight.list_history"],
+        args_schema=WeightHistoryArguments,
+        description=(
+            "读取当前登录用户的体重历史，limit 为 1 到 365。仅用于体重记录和趋势；"
+            "不要用个人档案中的当前体重替代历史。"
+        ),
+    )
+    async def weight_list_history(limit: int = 30) -> dict[str, Any]:
+        rows = list((await db.execute(
+            select(WeightLog)
+            .where(WeightLog.user_id == user_id)
+            .order_by(WeightLog.recorded_at.desc())
+            .limit(limit)
+        )).scalars().all())
+        return {
+            "count": len(rows),
+            "records": [{
+                "id": item.id,
+                "weight_kg": item.weight_kg,
+                "recorded_at": item.recorded_at.isoformat(),
+            } for item in rows],
+        }
+
+    @tool(
+        LANGCHAIN_TOOL_NAMES["nutrition.get_today"],
+        args_schema=NoArguments,
+        description="读取当前登录用户今天的营养汇总和餐次明细。",
+    )
+    async def nutrition_get_today() -> dict[str, Any]:
+        summary = await build_daily_nutrition_summary(
+            db, user_id=user_id, target_date=date.today()
+        )
+        return {
+            **summary.model_dump(mode="json"),
+            "count": len(summary.meals),
+        }
+
+    @tool(
+        LANGCHAIN_TOOL_NAMES["nutrition.list_history"],
+        args_schema=NutritionHistoryArguments,
+        description="读取当前登录用户最近有记录的饮食日期及营养汇总，days 为 1 到 30。",
+    )
+    async def nutrition_list_history(days: int = 30) -> dict[str, Any]:
+        summaries = await list_nutrition_history(db, user_id=user_id, days=days)
+        return {
+            "count": len(summaries),
+            "days": [item.model_dump(mode="json") for item in summaries],
+        }
+
+    @tool(
+        LANGCHAIN_TOOL_NAMES["food.search"],
+        args_schema=FoodSearchArguments,
+        description=(
+            "按中英文名称搜索服务端食品库，返回每 100 克营养值。"
+            "仅用于寻找可记录的食品，不代表已经新增饮食记录。"
+        ),
+    )
+    async def food_search(query: str = "常见食品", limit: int = 10) -> dict[str, Any]:
+        foods = await query_nutrition_database(
+            db, query=query, limit=limit
+        )
+        return {
+            "count": len(foods),
+            "foods": [{
+                "id": item.id,
+                "name_zh": item.name_zh,
+                "name_en": item.name_en,
+                "category": item.category,
+                "calories_per_100g": item.calories_per_100g,
+                "protein_g": item.protein_g,
+                "carbs_g": item.carbs_g,
+                "fat_g": item.fat_g,
+                "common_portion_g": item.common_portion_g,
+            } for item in foods],
+        }
+
     factories: dict[str, Callable[[], BaseTool]] = {
         "profile.get_summary": lambda: profile_get_summary,
         "health.get_screening_summary": lambda: health_get_screening_summary,
@@ -297,5 +406,9 @@ def build_read_tools(
         "workout.get_active_session": lambda: workout_get_active_session,
         "workout.list_history": lambda: workout_list_history,
         "workout.get_progress": lambda: workout_get_progress,
+        "weight.list_history": lambda: weight_list_history,
+        "nutrition.get_today": lambda: nutrition_get_today,
+        "nutrition.list_history": lambda: nutrition_list_history,
+        "food.search": lambda: food_search,
     }
     return [factories[tool_id]() for tool_id in allowlist]

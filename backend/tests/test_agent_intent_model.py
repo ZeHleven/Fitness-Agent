@@ -473,6 +473,54 @@ async def test_unsupported_write_request_never_routes_a_read_tool():
 
 
 @pytest.mark.asyncio
+async def test_explicit_red_flag_health_update_can_be_structured_but_stays_high_risk():
+    candidate = IntentResolution.model_validate({
+        "primary_intent": "health_query",
+        "intent_domain": "health",
+        "request_kind": "mutation",
+        "requested_effect": "update",
+        "change_requests": [{
+            "resource": "health",
+            "operation": "update",
+            "field_path": "health.chronic_conditions",
+            "target_reference": None,
+            "value": ["心血管疾病"],
+            "preserve_unspecified": True,
+        }],
+        "resolved_query": "将慢性情况更新为心血管疾病，并优先处理当前胸痛",
+        "references": [],
+        "expanded_intents": [],
+        "subtasks": ["记录健康资料", "显示紧急安全提示"],
+        "missing_slots": [],
+        "clarification_required": False,
+        "clarification_question": None,
+        "risk_level": "high",
+        "confidence": 0.98,
+    })
+    with (
+        patch.object(settings, "AGENT_RULES_FIRST_ENABLED", True),
+        patch.object(settings, "DEEPSEEK_API_KEY", "test-key"),
+        patch(
+            "app.services.agent_intent_model._invoke_model_intent",
+            new=AsyncMock(return_value=candidate),
+        ) as invoked,
+    ):
+        outcome = await resolve_intent_with_fallback(
+            "请把我的慢性情况更新为心血管疾病，我现在胸痛",
+            use_model=True,
+        )
+
+    invoked.assert_awaited_once()
+    assert outcome.resolution.primary_intent == "health_query"
+    assert outcome.resolution.intent_domain == "health"
+    assert outcome.resolution.request_kind == "mutation"
+    assert outcome.resolution.requested_effect == "update"
+    assert outcome.resolution.risk_level == "high"
+    assert len(outcome.resolution.change_requests) == 1
+    assert route_tools(outcome.resolution) == []
+
+
+@pytest.mark.asyncio
 async def test_plan_mutation_uses_model_first_and_safe_structured_fallback():
     with (
         patch.object(settings, "AGENT_RULES_FIRST_ENABLED", True),

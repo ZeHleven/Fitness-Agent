@@ -58,7 +58,7 @@ async def test_list_plans_empty(client):
 @pytest.mark.asyncio
 async def test_list_plans_returns_created(client):
     token = await get_token(client, "wo3@example.com")
-    await client.post(
+    second = await client.post(
         "/api/v1/workouts/plans",
         json={"name": "计划A"},
         headers={"Authorization": f"Bearer {token}"},
@@ -70,7 +70,72 @@ async def test_list_plans_returns_created(client):
     )
     resp = await client.get("/api/v1/workouts/plans", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
-    assert len(resp.json()) == 2
+    assert second.status_code == 409
+    assert len(resp.json()) == 1
+
+
+@pytest.mark.asyncio
+async def test_health_update_marks_active_plan_for_review_and_blocks_new_session(
+    client, db_session
+):
+    from app.models.exercise import Exercise
+
+    exercise = Exercise(
+        id="health-review-squat",
+        name_zh="杠铃深蹲",
+        name_en="Health Review Squat",
+        category="力量",
+        muscle_primary=["quads"],
+        equipment=["barbell"],
+        difficulty="初级",
+        movement_pattern="squat",
+        is_active=True,
+    )
+    db_session.add(exercise)
+    await db_session.commit()
+
+    token = await get_token(client, "health-review@example.com")
+    await complete_onboarding(client, token)
+    headers = {"Authorization": f"Bearer {token}"}
+    plan_response = await client.post(
+        "/api/v1/workouts/plans",
+        json={
+            "name": "健康复核测试",
+            "days_per_week": 1,
+            "exercises": [{
+                "exercise_id": exercise.id,
+                "day_of_week": 1,
+                "sets": 3,
+                "reps": "8-12",
+                "rest_seconds": 90,
+                "order_index": 0,
+            }],
+        },
+        headers=headers,
+    )
+    assert plan_response.status_code == 201
+    assert plan_response.json()["safety_status"] == "compatible"
+
+    profile_response = await client.put(
+        "/api/v1/profile",
+        json={"injuries": ["膝关节"]},
+        headers=headers,
+    )
+    assert profile_response.status_code == 200
+    assert profile_response.json()["active_plan_safety_status"] == "needs_review"
+    assert profile_response.json()["active_plan_safety_reasons"]
+
+    listed = await client.get("/api/v1/workouts/plans", headers=headers)
+    assert listed.status_code == 200
+    assert listed.json()[0]["safety_status"] == "needs_review"
+
+    started = await client.post(
+        "/api/v1/workouts/sessions/start",
+        json={"plan_id": plan_response.json()["id"], "day_of_week": 1},
+        headers=headers,
+    )
+    assert started.status_code == 409
+    assert started.json()["detail"]["code"] == "plan_health_review_required"
 
 
 @pytest.mark.asyncio
@@ -274,9 +339,9 @@ async def test_delete_plan(client):
     )
     plan_id = create_resp.json()["id"]
     del_resp = await client.delete(f"/api/v1/workouts/plans/{plan_id}", headers={"Authorization": f"Bearer {token}"})
-    assert del_resp.status_code == 204
+    assert del_resp.status_code == 409
     get_resp = await client.get(f"/api/v1/workouts/plans/{plan_id}", headers={"Authorization": f"Bearer {token}"})
-    assert get_resp.status_code == 404
+    assert get_resp.status_code == 200
 
 
 @pytest.mark.asyncio
@@ -469,14 +534,14 @@ async def test_workout_execution_lifecycle_and_progress(client, db_session):
     delete_plan_resp = await client.delete(
         f"/api/v1/workouts/plans/{plan_id}", headers=headers
     )
-    assert delete_plan_resp.status_code == 204
+    assert delete_plan_resp.status_code == 409
     history_after_delete = await client.get(
         "/api/v1/workouts/sessions", headers=headers
     )
     saved_session = next(
         item for item in history_after_delete.json() if item["id"] == session_id
     )
-    assert saved_session["plan_id"] is None
+    assert saved_session["plan_id"] == plan_id
     assert saved_session["plan_name"] == "力量训练"
 
 

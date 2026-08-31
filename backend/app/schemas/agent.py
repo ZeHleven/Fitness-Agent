@@ -35,7 +35,16 @@ class AgentCard(BaseModel):
 
 class AgentProposalReference(BaseModel):
     id: str
-    proposal_type: Literal["plan_adjustment_v1"]
+    proposal_type: Literal[
+        "plan_adjustment_v1",
+        "plan_creation_v1",
+        "plan_adjustment_v2",
+        "plan_deletion_v1",
+        "profile_update_v1",
+        "weight_log_create_v1",
+        "meal_log_create_v1",
+        "meal_log_delete_v1",
+    ]
     status: Literal["pending_confirmation"]
     version: int = Field(ge=1)
     expires_at: datetime

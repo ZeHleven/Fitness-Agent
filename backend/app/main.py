@@ -8,7 +8,9 @@ from sqlalchemy import text
 
 from app.config import settings
 from app.database import AsyncSessionLocal
-from app.routers import auth, profile, exercises, foods, chat, workouts, meals, agent
+from app.routers import (
+    agent, auth, chat, exercises, foods, meals, profile, proposals, workouts,
+)
 from app.deps import get_current_user
 from app.models.user import User
 from app.services.ai_client import AIServiceError
@@ -41,7 +43,7 @@ async def lifespan(_app: FastAPI):
                 await asyncio.gather(worker_task, return_exceptions=True)
 
 
-app = FastAPI(title="Fitness Agent API", version="0.5.2", lifespan=lifespan)
+app = FastAPI(title="Fitness Agent API", version="0.5.24", lifespan=lifespan)
 
 
 @app.exception_handler(AIServiceError)
@@ -58,6 +60,7 @@ app.include_router(chat.router, prefix="/api/v1")
 app.include_router(workouts.router, prefix="/api/v1")
 app.include_router(meals.router, prefix="/api/v1")
 app.include_router(agent.router, prefix="/api/v1")
+app.include_router(proposals.router, prefix="/api/v1")
 
 
 @app.get("/health")
@@ -78,9 +81,12 @@ async def ready():
                 db.execute(text(
                     "SELECT r.idempotency_key, r.lease_expires_at, "
                     "r.attempt_count, r.resolved_query, r.references, "
-                    "c.pending_clarification "
+                    "c.pending_clarification, p.origin, "
+                    "p.creation_client_request_id, p.target_kind, "
+                    "p.target_id, p.result_data "
                     "FROM agent_runs AS r "
-                    "CROSS JOIN agent_conversations AS c LIMIT 0"
+                    "CROSS JOIN agent_conversations AS c "
+                    "CROSS JOIN agent_proposals AS p LIMIT 0"
                 )),
                 timeout=3,
             )

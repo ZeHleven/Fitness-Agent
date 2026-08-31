@@ -16,6 +16,10 @@ IntentName = Literal[
     "active_workout_query",
     "workout_history_query",
     "workout_progress_query",
+    "weight_history_query",
+    "nutrition_today_query",
+    "nutrition_history_query",
+    "food_search_query",
 ]
 
 IntentDomain = Literal[
@@ -151,6 +155,10 @@ _INTENT_KEYWORDS: tuple[tuple[IntentName, tuple[str, ...]], ...] = (
     ),
     ("workout_progress_query", ("训练进度", "训练量", "周进度", "完成了多少", "坚持得怎么样")),
     ("workout_history_query", ("训练历史", "训练记录", "最近练", "以前练", "过去训练")),
+    ("weight_history_query", ("体重历史", "体重记录", "体重趋势", "最近体重", "体重变化")),
+    ("nutrition_history_query", ("饮食历史", "饮食记录", "最近吃", "过去吃", "营养历史")),
+    ("nutrition_today_query", ("今天吃", "今日饮食", "今天的饮食", "今日营养", "今天摄入")),
+    ("food_search_query", ("搜索食品", "查找食品", "食品库", "多少热量", "营养成分")),
     ("plan_query", ("训练计划", "当前计划", "计划安排", "一周怎么练", "计划是什么")),
     ("profile_query", ("我的资料", "个人资料", "身高", "体重", "训练目标", "训练偏好", "训练经验")),
 )
@@ -337,6 +345,10 @@ _CANONICAL_QUERY_BY_INTENT: dict[IntentName, str] = {
     "active_workout_query": "查询我正在进行的训练",
     "workout_history_query": "查询我的训练历史",
     "workout_progress_query": "查询我的训练进度",
+    "weight_history_query": "查询我的体重历史",
+    "nutrition_today_query": "查询我今天的饮食与营养汇总",
+    "nutrition_history_query": "查询我的饮食历史",
+    "food_search_query": "搜索食品库",
 }
 
 _DOMAIN_BY_INTENT: dict[IntentName, IntentDomain] = {
@@ -348,6 +360,10 @@ _DOMAIN_BY_INTENT: dict[IntentName, IntentDomain] = {
     "active_workout_query": "workout_session",
     "workout_history_query": "workout_history",
     "workout_progress_query": "workout_progress",
+    "weight_history_query": "profile",
+    "nutrition_today_query": "nutrition",
+    "nutrition_history_query": "nutrition",
+    "food_search_query": "nutrition",
 }
 
 _INTENT_BY_DOMAIN: dict[IntentDomain, IntentName] = {
@@ -358,7 +374,7 @@ _INTENT_BY_DOMAIN: dict[IntentDomain, IntentName] = {
     "workout_session": "active_workout_query",
     "workout_history": "workout_history_query",
     "workout_progress": "workout_progress_query",
-    "nutrition": "general_qa",
+    "nutrition": "nutrition_today_query",
 }
 
 _CHINESE_DIGITS = {
@@ -445,6 +461,8 @@ def _infer_domain(message: str, fallback_intent: IntentName) -> IntentDomain:
         keyword in normalized for keyword in _INTENT_KEYWORDS[0][1]
     ):
         return "health"
+    if "体重" in normalized:
+        return "profile"
     if _PLAN_DOMAIN_PATTERN.search(normalized):
         return "workout_plan"
     if _PROFILE_DOMAIN_PATTERN.search(normalized):
@@ -656,6 +674,17 @@ def _infer_request_semantics(
         return domain, "assessment", "read", [], [], None
 
     mutation_requested = bool(_MUTATION_VERB_PATTERN.search(normalized))
+    if (
+        "记录" in normalized
+        and re.search(r"(?:查看|查询|看看|历史|最近|过去|有哪些|是什么)", normalized)
+        and not re.search(
+            r"(?:调整|修改|更新|改成|改为|改到|设成|设为|设置|增加|新增|"
+            r"新建|添加|写入|录入|减少|降低|调低|调高|缩短|延长|"
+            r"删除|移除|替换|制定|创建|保存)",
+            normalized,
+        )
+    ):
+        mutation_requested = False
     advice_or_question = bool(
         _HOW_TO_PREFIX_PATTERN.search(normalized)
         or re.search(
@@ -678,21 +707,44 @@ def _infer_request_semantics(
         effect: RequestedEffect = (
             "create"
             if _CREATE_VERB_PATTERN.search(normalized)
+            or ("记录" in normalized and domain in {"profile", "nutrition"})
             else "delete"
             if _DELETE_VERB_PATTERN.search(normalized)
             else "update"
         )
-        changes = (
-            _extract_plan_change_requests(message)
-            if domain == "workout_plan"
-            else [ChangeRequest(
+        if domain == "workout_plan":
+            changes = _extract_plan_change_requests(message)
+        elif domain == "profile":
+            weight_match = re.search(
+                r"体重.{0,10}?(?P<value>\d{2,3}(?:\.\d+)?)\s*(?:公斤|kg|千克)?",
+                normalized,
+            )
+            changes = [ChangeRequest(
+                resource="profile",
+                operation="create" if "记录" in normalized else "update",
+                field_path=(
+                    "weight_log.weight_kg" if "记录" in normalized
+                    else "profile.weight_kg"
+                ) if weight_match else None,
+                value=float(weight_match.group("value")) if weight_match else None,
+            )]
+        else:
+            changes = [ChangeRequest(
                 resource=domain,
                 operation=effect,
                 field_path=None,
             )]
-        )
         missing_slots: list[str] = []
         for change in changes:
+            if (
+                change.field_path is None
+                and change.value is None
+                and (
+                    domain in {"profile", "health", "nutrition"}
+                    or (domain == "workout_plan" and change.operation == "update")
+                )
+            ):
+                missing_slots.append("写入对象和具体目标值")
             if (
                 domain == "workout_plan"
                 and change.operation == "update"
@@ -742,6 +794,8 @@ def contains_unsupported_write_request(message: str) -> bool:
         fallback_intent=fallback_intent,
     )
     if request_kind != "mutation":
+        return False
+    if domain in {"profile", "health", "nutrition"}:
         return False
     if domain != "workout_plan" or effect != "update":
         return True
@@ -854,6 +908,9 @@ def resolve_intent(message: str) -> IntentResolution:
     for intent, keywords in _INTENT_KEYWORDS:
         if any(keyword in normalized for keyword in keywords):
             matched.append(intent)
+
+    if "weight_history_query" in matched:
+        matched = [intent for intent in matched if intent != "profile_query"]
 
     if contains_health_red_flag(message) and "health_query" not in matched:
         matched.insert(0, "health_query")
@@ -1276,12 +1333,23 @@ def normalize_resolution(
             if intent != primary and intent not in expanded:
                 expanded.append(intent)
 
+    explicit_health_record = (
+        request_kind == "mutation"
+        and intent_domain in {"profile", "health"}
+        and bool(change_requests)
+        and all(
+            change.resource in {"profile", "health"}
+            and change.operation == "update"
+            for change in change_requests
+        )
+    )
     if contains_health_red_flag(message):
         risk_level = "high"
         intent_domain = "health"
-        request_kind = "query"
-        requested_effect = "read"
-        change_requests = []
+        if not explicit_health_record:
+            request_kind = "query"
+            requested_effect = "read"
+            change_requests = []
         if primary != "health_query":
             if primary not in expanded:
                 expanded.insert(0, primary)
@@ -1366,6 +1434,8 @@ def normalize_resolution(
         "exercise.recommended_weight_kg",
     }
     if request_kind == "mutation":
+        if not change_requests:
+            semantic_missing_slots.append("写入对象和具体目标值")
         for change in change_requests:
             if (
                 change.operation == "update"
@@ -1380,6 +1450,24 @@ def normalize_resolution(
                 and not change.target_reference
             ):
                 semantic_missing_slots.append("要调整的动作名称")
+            if (
+                intent_domain in {"profile", "health"}
+                and (not change.field_path or change.value is None)
+            ):
+                semantic_missing_slots.append("要更新的资料字段和具体值")
+            if (
+                intent_domain == "nutrition"
+                and change.operation == "create"
+                and change.value is None
+            ):
+                semantic_missing_slots.append("餐次、食品和克数")
+            if (
+                intent_domain == "nutrition"
+                and change.operation == "delete"
+                and not change.target_reference
+                and change.value is None
+            ):
+                semantic_missing_slots.append("要删除的具体餐次记录")
     missing_slots = list(dict.fromkeys(
         item.strip()
         for item in [*resolution.missing_slots, *semantic_missing_slots]
@@ -1455,6 +1543,10 @@ INTENT_TOOL_ALLOWLIST: dict[IntentName, tuple[str, ...]] = {
     "active_workout_query": ("workout.get_active_session",),
     "workout_history_query": ("workout.list_history",),
     "workout_progress_query": ("workout.get_progress",),
+    "weight_history_query": ("weight.list_history",),
+    "nutrition_today_query": ("nutrition.get_today",),
+    "nutrition_history_query": ("nutrition.list_history",),
+    "food_search_query": ("food.search",),
 }
 
 MAX_ROUTED_TOOLS = 4

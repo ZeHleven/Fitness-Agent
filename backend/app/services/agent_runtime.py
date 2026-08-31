@@ -26,6 +26,7 @@ from app.schemas.agent import AgentProposalReference
 from app.schemas.agent_plan_adjustment_proposal_api import (
     PlanAdjustmentProposalDecisionRequest,
 )
+from app.schemas.plan_management_proposal import GenericProposalDecisionRequest
 from app.schemas.agent_trace import AgentExecutionTrace
 from app.services.agent_controller import (
     ToolAuditEvent,
@@ -55,6 +56,21 @@ from app.services.agent_plan_adjustment_proposal_trace import (
 )
 from app.services.agent_plan_adjustment_proposals import (
     build_runtime_plan_adjustment_proposal,
+)
+from app.services.agent_domain_proposals import (
+    DOMAIN_PROPOSAL_TYPES,
+    create_agent_meal_create_proposal,
+    create_agent_meal_delete_proposal,
+    create_agent_plan_creation_proposal,
+    create_agent_plan_management_proposal,
+    create_agent_profile_update_proposal,
+    create_agent_weight_proposal,
+    decide_agent_domain_proposal,
+)
+from app.services.plan_management_proposals import (
+    PLAN_MANAGEMENT_TYPES,
+    PlanProposalError,
+    decide_manual_plan_proposal,
 )
 from app.services.agent_structured_errors import safe_error_category
 from app.services.agent_tool_registry_shadow_metric_adapter import (
@@ -86,7 +102,7 @@ SYSTEM_PROMPT = """你是 Fitness Agent，一位中文健身对话助手。
 
 能力边界：
 - 一般健身知识可以直接回答；用户自己的资料、计划、训练和进度必须以工具结果为准。
-- 训练计划修改只能通过服务端生成待确认提案，不能声称已经直接修改；其他写入能力暂不开放。
+- 训练计划、档案、健康、体重和饮食的写入只能通过服务端生成待确认提案，不能声称已经直接修改。
 - 工具无结果时明确说明，不得编造用户数据。
 - 简单问题使用简洁文本；有结构化训练数据时先回答结论，再概括关键数据。
 
@@ -458,6 +474,23 @@ def _audit_result_summary(tool_id: str, content: Any) -> dict[str, Any]:
                 "total_volume_kg",
             )
         }
+    if tool_id == "weight.list_history":
+        return {"count": result.get("count", 0)}
+    if tool_id in {"nutrition.get_today", "nutrition.list_history"}:
+        return {
+            key: result.get(key)
+            for key in (
+                "count",
+                "date",
+                "total_calories",
+                "total_protein_g",
+                "total_carbs_g",
+                "total_fat_g",
+            )
+            if key in result
+        }
+    if tool_id == "food.search":
+        return {"count": result.get("count", 0)}
     return {"keys_returned": sorted(result)}
 
 
@@ -557,6 +590,88 @@ HIGH_RISK_REPLY = (
     "如果正在出现胸痛、呼吸困难、晕厥或严重急性疼痛，请及时联系急救或尽快就医。"
     "我不能在小程序里替代医生诊断。"
 )
+
+
+async def _create_structured_mutation_proposal(
+    db: AsyncSession,
+    *,
+    run: AgentRun,
+    conversation: AgentConversation,
+    resolution: IntentResolution,
+) -> AgentProposalReference:
+    changes = list(resolution.change_requests)
+    common = {
+        "db": db,
+        "user_id": run.user_id,
+        "conversation_id": conversation.id,
+        "run_id": run.id,
+        "changes": changes,
+    }
+    if resolution.intent_domain == "workout_plan":
+        if resolution.requested_effect == "create":
+            reference = await create_agent_plan_creation_proposal(
+                enabled=settings.AGENT_PLAN_MANAGEMENT_PROPOSALS_ENABLED,
+                **common,
+            )
+        elif resolution.requested_effect in {"update", "delete"}:
+            deletes_entire_plan = (
+                resolution.requested_effect == "delete"
+                and all(
+                    change.operation == "delete"
+                    and change.field_path in {None, "plan", "workout_plan"}
+                    for change in changes
+                )
+            )
+            reference = await create_agent_plan_management_proposal(
+                enabled=settings.AGENT_PLAN_MANAGEMENT_PROPOSALS_ENABLED,
+                effect="delete" if deletes_entire_plan else "update",
+                **common,
+            )
+        else:
+            raise PlanProposalError(
+                "proposal_change_unsupported", "这项计划操作暂不支持", status_code=422
+            )
+    elif resolution.intent_domain in {"profile", "health"}:
+        if any(
+            change.operation == "create"
+            and change.field_path in {
+                "weight_log.weight_kg", "profile.weight_kg", "weight_kg"
+            }
+            for change in changes
+        ):
+            reference = await create_agent_weight_proposal(
+                enabled=settings.AGENT_WEIGHT_PROPOSALS_ENABLED,
+                **common,
+            )
+        else:
+            reference = await create_agent_profile_update_proposal(
+                enabled=settings.AGENT_PROFILE_PROPOSALS_ENABLED,
+                **common,
+            )
+    elif resolution.intent_domain == "nutrition":
+        if resolution.requested_effect == "create":
+            reference = await create_agent_meal_create_proposal(
+                enabled=settings.AGENT_NUTRITION_PROPOSALS_ENABLED,
+                **common,
+            )
+        elif resolution.requested_effect == "delete":
+            reference = await create_agent_meal_delete_proposal(
+                enabled=settings.AGENT_NUTRITION_PROPOSALS_ENABLED,
+                **common,
+            )
+        else:
+            raise PlanProposalError(
+                "proposal_change_unsupported",
+                "暂不支持修改既有餐次；可以新增或删除整条饮食记录",
+                status_code=422,
+            )
+    else:
+        raise PlanProposalError(
+            "proposal_change_unsupported",
+            "已识别写入请求，但该领域目前不支持写入",
+            status_code=422,
+        )
+    return AgentProposalReference.model_validate(reference.model_dump(mode="json"))
 
 
 async def _load_history(
@@ -718,6 +833,10 @@ async def execute_agent_run(
             intent_outcome,
             proposal_creation_enabled=(
                 settings.AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED
+                or settings.AGENT_PLAN_MANAGEMENT_PROPOSALS_ENABLED
+                or settings.AGENT_PROFILE_PROPOSALS_ENABLED
+                or settings.AGENT_WEIGHT_PROPOSALS_ENABLED
+                or settings.AGENT_NUTRITION_PROPOSALS_ENABLED
             ),
         )
         run.status = "running"
@@ -850,10 +969,67 @@ async def execute_agent_run(
                 conversation.pending_clarification = {}
             conversation.updated_at = now
             await db.commit()
+            short_proposal = _proposal_reference_from_data(
+                (content_data or {}).get("proposal")
+            )
             return AgentRuntimeResult(
                 reply=reply,
                 run_id=run.id,
                 execution_trace=execution_trace,
+                proposal=short_proposal,
+            )
+
+        domain_mutation_path = (
+            resolution.request_kind == "mutation"
+            and (
+                resolution.intent_domain != "workout_plan"
+                or resolution.requested_effect in {"create", "delete"}
+                or settings.AGENT_PLAN_MANAGEMENT_PROPOSALS_ENABLED
+            )
+        )
+        high_risk_health_record = (
+            resolution.risk_level == "high"
+            and resolution.request_kind == "mutation"
+            and resolution.intent_domain == "health"
+        )
+        if (
+            domain_mutation_path
+            and not resolution.clarification_required
+            and (resolution.risk_level != "high" or high_risk_health_record)
+        ):
+            try:
+                proposal_reference = await _create_structured_mutation_proposal(
+                    db,
+                    run=run,
+                    conversation=conversation,
+                    resolution=resolution,
+                )
+            except PlanProposalError as exc:
+                prefix = f"{HIGH_RISK_REPLY}\n\n" if high_risk_health_record else ""
+                return await complete_semantic_short_circuit(
+                    f"{prefix}{exc.message}。当前数据未作修改。",
+                    terminal_action=(
+                        "safe_stop" if high_risk_health_record else "clarify"
+                        if exc.status_code == 422 else "answer"
+                    ),
+                    termination_reason=exc.code,
+                    missing_slots=(
+                        ["写入目标的完整字段、对象和数值"]
+                        if exc.status_code == 422 else None
+                    ),
+                )
+            proposal_data = proposal_reference.model_dump(mode="json")
+            reply = (
+                f"{HIGH_RISK_REPLY}\n\n我也已把你明确要求记录的健康资料整理成待确认提案；"
+                "当前档案尚未修改，请核对后确认。"
+                if high_risk_health_record
+                else "已根据你的明确请求生成待确认提案。当前数据尚未修改，请核对前后对比后确认。"
+            )
+            return await complete_semantic_short_circuit(
+                reply,
+                terminal_action="safe_stop" if high_risk_health_record else "proposal",
+                termination_reason="structured_mutation_proposal_created",
+                content_data={"proposal": proposal_data},
             )
 
         if resolution.risk_level == "high" or resolution.clarification_required:
@@ -932,7 +1108,6 @@ async def execute_agent_run(
                 .where(
                     AgentProposal.user_id == run.user_id,
                     AgentProposal.conversation_id == conversation.id,
-                    AgentProposal.proposal_type == "plan_adjustment_v1",
                     AgentProposal.status == "pending_confirmation",
                 )
                 .order_by(AgentProposal.created_at.desc())
@@ -955,47 +1130,84 @@ async def execute_agent_run(
                     missing_slots=["要处理的调整提案"],
                 )
             proposal = pending[0]
-            request = PlanAdjustmentProposalDecisionRequest(
-                expected_version=proposal.version,
-                client_request_id=f"agent-chat-decision:{run.id}:{action}",
-            )
+            decision_request_id = f"agent-chat-decision:{run.id}:{action}"
             now = datetime.now(timezone.utc)
-            decision_result = (
-                await apply_confirmed_plan_adjustment_atomically(
-                    db,
-                    enabled=settings.AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED,
-                    user_id=run.user_id,
-                    proposal_id=proposal.id,
-                    request=request,
-                    now=now,
+            if proposal.proposal_type == "plan_adjustment_v1":
+                request = PlanAdjustmentProposalDecisionRequest(
+                    expected_version=proposal.version,
+                    client_request_id=decision_request_id,
                 )
-                if action == "confirm"
-                else await decide_plan_adjustment_proposal(
-                    db,
-                    enabled=settings.AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED,
-                    user_id=run.user_id,
-                    proposal_id=proposal.id,
-                    action="reject",
-                    request=request,
-                    now=now,
-                )
-            )
-            if decision_result.error is not None:
-                reply = (
-                    f"{decision_result.error.message}当前训练计划未发生额外修改。"
-                )
-                status_value = decision_result.error.code
-            else:
-                reply = (
-                    "已确认并应用调整，新的训练计划现已生效。"
+                decision_result = (
+                    await apply_confirmed_plan_adjustment_atomically(
+                        db,
+                        enabled=settings.AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED,
+                        user_id=run.user_id,
+                        proposal_id=proposal.id,
+                        request=request,
+                        now=now,
+                    )
                     if action == "confirm"
-                    else "已拒绝这份调整提案，当前训练计划保持不变。"
+                    else await decide_plan_adjustment_proposal(
+                        db,
+                        enabled=settings.AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED,
+                        user_id=run.user_id,
+                        proposal_id=proposal.id,
+                        action="reject",
+                        request=request,
+                        now=now,
+                    )
                 )
-                status_value = (
-                    decision_result.response.status
-                    if decision_result.response is not None
-                    else "completed"
+                if decision_result.error is not None:
+                    reply = f"{decision_result.error.message}当前数据未发生额外修改。"
+                    status_value = decision_result.error.code
+                else:
+                    reply = (
+                        "已确认并应用提案。"
+                        if action == "confirm"
+                        else "已拒绝这份提案，当前数据保持不变。"
+                    )
+                    status_value = (
+                        decision_result.response.status
+                        if decision_result.response is not None
+                        else "completed"
+                    )
+            else:
+                generic_request = GenericProposalDecisionRequest(
+                    expected_version=proposal.version,
+                    client_request_id=decision_request_id,
                 )
+                try:
+                    if proposal.proposal_type in PLAN_MANAGEMENT_TYPES:
+                        generic_result = await decide_manual_plan_proposal(
+                            db,
+                            user_id=run.user_id,
+                            proposal_id=proposal.id,
+                            action="confirm" if action == "confirm" else "reject",
+                            request=generic_request,
+                            now=now,
+                        )
+                    elif proposal.proposal_type in DOMAIN_PROPOSAL_TYPES:
+                        generic_result = await decide_agent_domain_proposal(
+                            db,
+                            user_id=run.user_id,
+                            proposal_id=proposal.id,
+                            action="confirm" if action == "confirm" else "reject",
+                            request=generic_request,
+                            now=now,
+                        )
+                    else:
+                        raise PlanProposalError(
+                            "proposal_type_unsupported", "这类提案暂不能在对话中处理"
+                        )
+                    reply = (
+                        "已确认并应用提案。"
+                        if action == "confirm"
+                        else "已拒绝这份提案，当前数据保持不变。"
+                    )
+                    status_value = generic_result.status
+                except PlanProposalError as exc:
+                    reply = f"{exc.message}。当前数据未发生额外修改。"
+                    status_value = exc.code
             return await complete_semantic_short_circuit(
                 reply,
                 termination_reason="proposal_decision_completed",

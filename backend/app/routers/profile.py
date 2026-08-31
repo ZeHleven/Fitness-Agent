@@ -5,7 +5,13 @@ from app.database import get_db
 from app.deps import get_current_user
 from app.models.user import User
 from app.models.profile import UserProfile, WeightLog
-from app.schemas.profile import ProfileUpdateRequest, ProfileResponse, WeightLogRequest, WeightLogResponse
+from app.schemas.profile import (
+    ProfileResponse,
+    ProfileUpdateRequest,
+    ProfileUpdateResponse,
+    WeightLogRequest,
+    WeightLogResponse,
+)
 from app.services.profile import calculate_bmi
 
 router = APIRouter(prefix="/profile", tags=["profile"])
@@ -22,7 +28,7 @@ async def get_profile(
     return profile
 
 
-@router.put("", response_model=ProfileResponse)
+@router.put("", response_model=ProfileUpdateResponse)
 async def update_profile(
     body: ProfileUpdateRequest,
     current_user: User = Depends(get_current_user),
@@ -76,7 +82,25 @@ async def update_profile(
 
     await db.commit()
     await db.refresh(profile)
-    return profile
+    from app.models.workout import WorkoutPlan
+    from app.services.plan_safety import evaluate_plan_safety
+
+    active_plan = await db.scalar(select(WorkoutPlan).where(
+        WorkoutPlan.user_id == current_user.id,
+        WorkoutPlan.is_active.is_(True),
+    ).limit(1))
+    safety_status = None
+    safety_reasons: list[str] = []
+    if active_plan is not None:
+        evaluation = await evaluate_plan_safety(
+            db, plan=active_plan, profile=profile
+        )
+        safety_status = evaluation.status
+        safety_reasons = list(evaluation.reasons)
+    return ProfileUpdateResponse.model_validate(profile).model_copy(update={
+        "active_plan_safety_status": safety_status,
+        "active_plan_safety_reasons": safety_reasons,
+    })
 
 
 @router.post("/weight", response_model=WeightLogResponse, status_code=201)

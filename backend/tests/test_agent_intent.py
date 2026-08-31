@@ -304,21 +304,59 @@ def test_unsupported_write_is_recognized_without_becoming_a_read():
 
 
 @pytest.mark.parametrize(
-    ("message", "domain", "effect"),
+    ("message", "domain", "effect", "clarification"),
     [
-        ("更新我的个人资料", "profile", "update"),
-        ("新增一条饮食记录", "nutrition", "create"),
-        ("删除最近的训练记录", "workout_history", "delete"),
+        ("更新我的个人资料", "profile", "update", True),
+        ("新增一条饮食记录", "nutrition", "create", True),
+        ("删除最近的训练记录", "workout_history", "delete", False),
     ],
 )
-def test_other_domain_crud_is_recognized_but_not_authorized(message, domain, effect):
+def test_other_domain_crud_without_target_is_recognized_and_clarified(
+    message, domain, effect, clarification
+):
     resolution = resolve_intent(message)
 
     assert resolution.intent_domain == domain
     assert resolution.request_kind == "mutation"
     assert resolution.requested_effect == effect
-    assert resolution.clarification_required is False
+    assert resolution.clarification_required is clarification
     assert route_tools(resolution) == []
+
+
+@pytest.mark.parametrize(
+    ("message", "intent", "tool_id"),
+    [
+        ("查看我的体重历史", "weight_history_query", "weight.list_history"),
+        ("看看我今天吃了什么", "nutrition_today_query", "nutrition.get_today"),
+        ("查看最近饮食记录", "nutrition_history_query", "nutrition.list_history"),
+        ("搜索食品鸡胸肉", "food_search_query", "food.search"),
+    ],
+)
+def test_new_private_read_domains_route_to_narrow_read_tools(message, intent, tool_id):
+    resolution = resolve_intent(message)
+
+    assert resolution.primary_intent == intent
+    assert resolution.request_kind == "query"
+    assert route_tools(resolution) == [tool_id]
+
+
+def test_weight_log_write_is_structured_without_becoming_profile_query():
+    resolution = resolve_intent("记录体重65公斤")
+
+    assert resolution.intent_domain == "profile"
+    assert resolution.request_kind == "mutation"
+    assert resolution.requested_effect == "create"
+    assert resolution.change_requests[0].field_path == "weight_log.weight_kg"
+    assert resolution.change_requests[0].value == 65.0
+    assert route_tools(resolution) == []
+
+
+def test_three_day_training_advice_is_consultation_not_write():
+    resolution = resolve_intent("怎样安排三天训练")
+
+    assert resolution.request_kind == "query"
+    assert resolution.requested_effect == "read"
+    assert resolution.change_requests == []
 
 
 @pytest.mark.parametrize(

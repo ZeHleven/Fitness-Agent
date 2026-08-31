@@ -24,6 +24,7 @@ import {
 import type { PendingAgentRequest } from '../../core/storage'
 import { agentApi } from '../../services/agent'
 import { proposalsApi } from '../../services/proposals'
+import { planManagementApi } from '../../services/plan-management'
 import type { AgentCard, AgentMessage } from '../../types/api'
 import type { PlanAdjustmentProposalReference } from '../../types/plan-adjustment-proposal'
 import './index.scss'
@@ -40,14 +41,16 @@ interface DisplayMessage {
 
 const quickPrompts = [
   '我下一练做什么？',
-  '总结我最近 8 周的训练进度',
-  '查看我的当前训练计划'
+  '查看我的当前训练计划',
+  '查看我的健康筛查资料',
+  '我今天吃了什么？',
+  '查看我的体重变化'
 ]
 
 const welcomeMessage: DisplayMessage = {
   id: 'welcome',
   role: 'assistant',
-  content: '你好，我是训练搭子。现在可以帮你查询训练计划、下一练、进行中的训练、历史和进度，也可以回答一般健身问题。涉及修改训练计划时，我会先生成提案，只有你确认后才会执行。',
+  content: '你好，我是训练搭子。现在可以读取训练计划与记录、个人档案、健康筛查、体重和饮食数据，也可以回答一般健身问题。凡是支持的数据写入，我都会先生成前后对比提案，只有你确认后才会执行。',
   cards: [],
   proposal: null
 }
@@ -137,8 +140,13 @@ export default function AgentPage () {
       const updates = new Map<string, PlanAdjustmentProposalReference>()
       await Promise.all([...references.entries()].map(async ([id, reference]) => {
         try {
-          const proposal = await proposalsApi.get(id)
-          updates.set(id, proposalReferenceFromRead(proposal))
+          if (reference.proposal_type === 'plan_adjustment_v1') {
+            const proposal = await proposalsApi.get(id)
+            updates.set(id, proposalReferenceFromRead(proposal))
+          } else {
+            const proposal = await planManagementApi.proposal(id)
+            updates.set(id, proposalReferenceFromUnknown(proposal) || reference)
+          }
         } catch (requestError) {
           const candidate = requestError as { code?: unknown } | null
           const code = candidate && candidate.code
@@ -415,18 +423,22 @@ function ProposalReferenceCard ({
     localExpiryState
   )
   const open = () => Taro.navigateTo({
-    url: `/pages/proposal-detail/index?id=${encodeURIComponent(proposal.id)}`
+    url: proposal.proposal_type === 'plan_adjustment_v1'
+      ? `/pages/proposal-detail/index?id=${encodeURIComponent(proposal.id)}`
+      : proposal.proposal_type === 'plan_adjustment_v2' || proposal.proposal_type === 'plan_deletion_v1'
+        ? `/pages/plan-proposal-detail/index?id=${encodeURIComponent(proposal.id)}`
+        : `/pages/domain-proposal-detail/index?id=${encodeURIComponent(proposal.id)}`
   })
   return (
     <View className='proposal-reference-card' onClick={open}>
       <View className='proposal-reference-heading'>
-        <Text className='proposal-reference-title'>训练计划调整提案</Text>
+        <Text className='proposal-reference-title'>{proposalTitle(proposal.proposal_type)}</Text>
         <Text className={`proposal-reference-status ${presentation.tone}`}>
           {presentation.label}
         </Text>
       </View>
       <Text className='proposal-reference-copy'>
-        查看完整调整前后计划、调整理由与安全提示
+        查看完整前后对比、影响与安全提示
       </Text>
       <View className='proposal-reference-footer'>
         <Text className='proposal-reference-expiry'>
@@ -440,6 +452,19 @@ function ProposalReferenceCard ({
       </View>
     </View>
   )
+}
+
+function proposalTitle (type: PlanAdjustmentProposalReference['proposal_type']): string {
+  return ({
+    plan_adjustment_v1: '训练计划调整提案',
+    plan_adjustment_v2: '训练计划调整提案',
+    plan_deletion_v1: '训练计划删除提案',
+    plan_creation_v1: '训练计划创建提案',
+    profile_update_v1: '个人档案更新提案',
+    weight_log_create_v1: '体重记录提案',
+    meal_log_create_v1: '饮食记录提案',
+    meal_log_delete_v1: '饮食删除提案'
+  })[type]
 }
 
 function formatProposalDate (value: string): string {

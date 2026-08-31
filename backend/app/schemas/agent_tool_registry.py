@@ -13,6 +13,10 @@ ToolIntentName = Literal[
     "active_workout_query",
     "workout_history_query",
     "workout_progress_query",
+    "weight_history_query",
+    "nutrition_today_query",
+    "nutrition_history_query",
+    "food_search_query",
 ]
 
 

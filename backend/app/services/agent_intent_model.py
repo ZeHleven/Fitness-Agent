@@ -111,6 +111,10 @@ requested_effect 只能是：read、create、update、delete、decide。
 - active_workout_query：正在进行的训练和已记录组
 - workout_history_query：近期具体训练记录
 - workout_progress_query：周期训练次数、组数、次数、容量或趋势
+- weight_history_query：体重记录和体重趋势
+- nutrition_today_query：今天的饮食记录与营养汇总
+- nutrition_history_query：近 30 日饮食历史
+- food_search_query：搜索食品库及查看食品营养
 
 规则：
 0. 先判断用户是读取/咨询，还是要求创建、修改、删除数据。不要把“改成、调整为、设置、增加、减少、删除、保存、记录”等明确写入要求当作查询。
@@ -131,8 +135,10 @@ requested_effect 只能是：read、create、update、delete、decide。
 11. 如果提供了待澄清状态，判断当前消息是在填槽、取消还是提出独立新问题；填槽后恢复原任务，独立新问题不应被旧状态劫持。
 12. references 中 reference_type 只能是 message、exercise、plan、time_range、metric、other；source 只能是 current_message、recent_conversation、pending_clarification。不要翻译或发明枚举值。
 13. change_requests 只记录用户明确要求的变化，每项字段为 resource、operation、field_path、target_reference、value、preserve_unspecified。不要自行推断缺失目标值。
-14. 训练计划当前可表达的 field_path 包括 schedule.duration_weeks、schedule.days_per_week、exercise.sets、exercise.reps、exercise.rest_seconds、exercise.recommended_weight_kg。动作字段必须在 target_reference 填动作名称。新增、删除、替换仍需如实表达，不能伪装成查询。
-15. mutation 缺少目标值或动作名称时，填写 missing_slots 并要求澄清。proposal_decision 的 change_requests 使用 field_path=proposal.status，value=confirm 或 reject。
+14. 训练计划可表达 schedule.duration_weeks、schedule.days_per_week、exercise.sets、exercise.reps、exercise.rest_seconds、exercise.recommended_weight_kg、exercise.add、exercise.delete、exercise.exercise_id、exercise.day_of_week；动作字段必须在 target_reference 填当前计划中的完整动作名称。新增动作的 value 为包含 exercise_name、day_of_week、sets、reps、rest_seconds 的对象；替换动作的 value 为新动作名称或对象。
+15. 档案更新使用 profile.age、profile.gender、profile.height_cm、profile.weight_kg、profile.experience_level、profile.primary_goal、profile.training_days_per_week、profile.session_duration_min、profile.training_location、profile.diet_restriction。健康更新使用 health.injuries 或 health.chronic_conditions，value 必须是完整的新列表。记录体重使用 operation=create、field_path=weight_log.weight_kg。
+16. 新增饮食使用 operation=create、field_path=meal，value 为包含 logged_at、meal_type、items 的对象；每项食品包含 food_name 或 food_id 和 amount_g。自定义食品还必须给出 calories、protein_g、carbs_g、fat_g。删除饮食使用 operation=delete、field_path=meal，target_reference 填饮食记录 ID；若只说今天某个餐次，可填早餐、午餐、晚餐或加餐，由服务端唯一性校验。
+17. mutation 缺少目标值、克数、动作或餐次标识时，填写 missing_slots 并要求澄清。proposal_decision 的 change_requests 使用 field_path=proposal.status，value=confirm 或 reject；提案决策的 resource 使用用户所指领域，无法判断时可用 general。
 
 顶层字段只能是 primary_intent、intent_domain、request_kind、requested_effect、change_requests、resolved_query、references、expanded_intents、subtasks、missing_slots、clarification_required、clarification_question、risk_level、confidence。
 
@@ -263,6 +269,18 @@ def _should_use_rules_first(
     ):
         return False
     if resolution.request_kind in {"mutation", "proposal_decision"}:
+        return False
+    # A red flag normally short-circuits immediately.  The one exception is an
+    # explicit request to record a fully specified health/profile update: let
+    # the structured model extract it, after which normalize_resolution still
+    # forces high risk and the runtime shows the urgent safe-stop before the
+    # optional Proposal.  If the model fails, the deterministic fallback stays
+    # read-only and therefore performs zero writes.
+    if (
+        resolution.risk_level == "high"
+        and any(marker in message for marker in ("健康资料", "健康情况", "伤病", "慢性"))
+        and any(marker in message for marker in ("更新", "修改", "记录", "保存", "设为", "改为"))
+    ):
         return False
     intents = frozenset({
         resolution.primary_intent,

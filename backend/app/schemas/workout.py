@@ -9,12 +9,12 @@ PlanExplanation = Annotated[str, Field(min_length=1, max_length=1000)]
 # ── Planned Exercise ──────────────────────────────────────────────────────────
 
 class PlannedExerciseCreate(BaseModel):
-    exercise_id: str
-    day_of_week: int
-    sets: int = 3
-    reps: str = "10"
-    rest_seconds: int = 90
-    order_index: int = 0
+    exercise_id: str = Field(min_length=1, max_length=100)
+    day_of_week: int = Field(ge=1, le=7)
+    sets: int = Field(default=3, ge=1, le=8)
+    reps: str = Field(default="10", min_length=1, max_length=20)
+    rest_seconds: int = Field(default=90, ge=15, le=600)
+    order_index: int = Field(default=0, ge=0, le=49)
 
 
 class PlannedExerciseResponse(BaseModel):
@@ -34,12 +34,12 @@ class PlannedExerciseResponse(BaseModel):
 # ── Workout Plan ──────────────────────────────────────────────────────────────
 
 class WorkoutPlanCreate(BaseModel):
-    name: str
-    goal: str | None = None
-    duration_weeks: int = 4
-    days_per_week: int = 3
-    notes: str | None = None
-    exercises: list[PlannedExerciseCreate] = Field(default_factory=list)
+    name: str = Field(min_length=1, max_length=100)
+    goal: str | None = Field(default=None, max_length=50)
+    duration_weeks: int = Field(default=4, ge=2, le=12)
+    days_per_week: int = Field(default=3, ge=1, le=7)
+    notes: str | None = Field(default=None, max_length=5000)
+    exercises: list[PlannedExerciseCreate] = Field(default_factory=list, max_length=50)
 
 
 class WorkoutPlanResponse(BaseModel):
@@ -53,6 +53,9 @@ class WorkoutPlanResponse(BaseModel):
     ai_generated: bool
     notes: str | None
     created_at: datetime
+    safety_status: Literal["compatible", "needs_review"] = "compatible"
+    safety_reasons: list[str] = Field(default_factory=list)
+    manual_proposals_enabled: bool = False
     model_config = {"from_attributes": True}
 
 

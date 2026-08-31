@@ -15,10 +15,7 @@ async def test_log_meal_no_items(client):
         json={"logged_at": str(date.today()), "meal_type": "早餐", "items": []},
         headers={"Authorization": f"Bearer {token}"},
     )
-    assert resp.status_code == 201
-    data = resp.json()
-    assert data["meal_type"] == "早餐"
-    assert data["items"] == []
+    assert resp.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -78,7 +75,10 @@ async def test_delete_meal(client):
     token = await get_token(client, "meal5@example.com")
     create_resp = await client.post(
         "/api/v1/meals",
-        json={"logged_at": str(date.today()), "meal_type": "晚餐", "items": []},
+        json={"logged_at": str(date.today()), "meal_type": "晚餐", "items": [
+            {"food_name": "米饭", "amount_g": 100, "calories": 130,
+             "protein_g": 2.5, "carbs_g": 28, "fat_g": 0.3}
+        ]},
         headers={"Authorization": f"Bearer {token}"},
     )
     meal_id = create_resp.json()["id"]
@@ -99,7 +99,10 @@ async def test_meals_isolated_between_users(client):
     token2 = await get_token(client, "meal7b@example.com")
     await client.post(
         "/api/v1/meals",
-        json={"logged_at": str(date.today()), "meal_type": "早餐", "items": []},
+        json={"logged_at": str(date.today()), "meal_type": "早餐", "items": [
+            {"food_name": "燕麦", "amount_g": 50, "calories": 190,
+             "protein_g": 6, "carbs_g": 32, "fat_g": 4}
+        ]},
         headers={"Authorization": f"Bearer {token1}"},
     )
     resp = await client.get("/api/v1/meals/today", headers={"Authorization": f"Bearer {token2}"})
@@ -112,12 +115,18 @@ async def test_history_returns_dates(client):
     today = str(date.today())
     await client.post(
         "/api/v1/meals",
-        json={"logged_at": today, "meal_type": "早餐", "items": []},
+        json={"logged_at": today, "meal_type": "早餐", "items": [
+            {"food_name": "燕麦", "amount_g": 50, "calories": 190,
+             "protein_g": 6, "carbs_g": 32, "fat_g": 4}
+        ]},
         headers={"Authorization": f"Bearer {token}"},
     )
     await client.post(
         "/api/v1/meals",
-        json={"logged_at": today, "meal_type": "午餐", "items": []},
+        json={"logged_at": today, "meal_type": "午餐", "items": [
+            {"food_name": "米饭", "amount_g": 100, "calories": 130,
+             "protein_g": 2.5, "carbs_g": 28, "fat_g": 0.3}
+        ]},
         headers={"Authorization": f"Bearer {token}"},
     )
     resp = await client.get("/api/v1/meals/history", headers={"Authorization": f"Bearer {token}"})

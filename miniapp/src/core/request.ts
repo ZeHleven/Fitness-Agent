@@ -46,7 +46,12 @@ export class ApiRequestError extends Error {
     super(message)
     this.name = 'ApiRequestError'
     this.statusCode = statusCode
-    this.code = typeof payload.code === 'string' ? payload.code : undefined
+    const nested = payload.detail && typeof payload.detail === 'object'
+      ? payload.detail as ApiErrorPayload
+      : null
+    this.code = typeof payload.code === 'string'
+      ? payload.code
+      : typeof nested?.code === 'string' ? nested.code : undefined
     this.payload = payload
   }
 }
@@ -218,6 +223,11 @@ function apiErrorPayloadMessage (
   }
   if (payload && typeof payload.detail === 'string' && payload.detail) {
     return payload.detail
+  }
+  if (payload?.detail && typeof payload.detail === 'object') {
+    const nested = payload.detail as ApiErrorPayload
+    if (typeof nested.message === 'string' && nested.message) return nested.message
+    if (typeof nested.detail === 'string' && nested.detail) return nested.detail
   }
   return fallback
 }

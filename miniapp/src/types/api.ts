@@ -32,19 +32,30 @@ export interface UserProfile {
 }
 
 export interface ProfileUpdate {
-  age: number
-  gender: string
-  height_cm: number
+  age?: number
+  gender?: string
+  height_cm?: number
+  weight_kg?: number
+  experience_level?: string
+  primary_goal?: string
+  training_days_per_week?: number
+  session_duration_min?: number
+  training_location?: string
+  diet_restriction?: string
+  injuries?: string[]
+  chronic_conditions?: string[]
+  onboarding_completed?: boolean
+}
+
+export interface ProfileUpdateResult extends UserProfile {
+  active_plan_safety_status?: 'compatible' | 'needs_review' | null
+  active_plan_safety_reasons?: string[]
+}
+
+export interface WeightLog {
+  id: string
   weight_kg: number
-  experience_level: string
-  primary_goal: string
-  training_days_per_week: number
-  session_duration_min: number
-  training_location: string
-  diet_restriction: string
-  injuries: string[]
-  chronic_conditions: string[]
-  onboarding_completed: boolean
+  recorded_at: string
 }
 
 export interface PlannedExercise {
@@ -69,7 +80,56 @@ export interface WorkoutPlan {
   is_active: boolean
   ai_generated: boolean
   notes?: string | null
+  safety_status: 'compatible' | 'needs_review'
+  safety_reasons: string[]
+  manual_proposals_enabled: boolean
   exercises: PlannedExercise[]
+}
+
+export interface Food {
+  id: string
+  name_zh: string
+  name_en?: string | null
+  category: string
+  calories_per_100g: number
+  protein_g: number
+  carbs_g: number
+  fat_g: number
+  fiber_g?: number | null
+  common_portion_g?: number | null
+  diet_tags?: string[] | null
+}
+
+export interface MealItemInput {
+  food_id?: string | null
+  food_name: string
+  amount_g: number
+  calories: number
+  protein_g: number
+  carbs_g: number
+  fat_g: number
+}
+
+export interface MealItem extends MealItemInput {
+  id: string
+  meal_id: string
+}
+
+export interface MealLog {
+  id: string
+  logged_at: string
+  meal_type: '早餐' | '午餐' | '晚餐' | '加餐'
+  created_at: string
+  items: MealItem[]
+}
+
+export interface DailyNutritionSummary {
+  date: string
+  total_calories: number
+  total_protein_g: number
+  total_carbs_g: number
+  total_fat_g: number
+  meals: MealLog[]
 }
 
 export interface PersonalizedExerciseOption {

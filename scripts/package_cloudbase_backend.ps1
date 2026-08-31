@@ -1,6 +1,6 @@
 param(
     [ValidatePattern('^[0-9A-Za-z][0-9A-Za-z._-]{0,39}$')]
-    [string]$Version = "0.5.21",
+    [string]$Version = "0.5.24",
     [ValidateRange(0.01, 1024)]
     [double]$MaxPackageSizeMB = 25
 )
@@ -337,10 +337,12 @@ $required = @(
     "./alembic/versions/0019_agent_intent_error_category.py",
     "./alembic/versions/0020_agent_proposal_lifecycle.py",
     "./alembic/versions/0021_agent_intent_semantics.py",
+    "./alembic/versions/0022_general_proposals.py",
     "./app/config.py",
     "./app/build_metadata.json",
     "./app/startup_diagnostics.py",
     "./app/routers/agent.py",
+    "./app/routers/proposals.py",
     "./app/schemas/agent_plan_adjustment_proposal.py",
     "./app/schemas/agent_plan_adjustment_proposal_api.py",
     "./app/services/agent_jobs.py",
@@ -351,6 +353,8 @@ $required = @(
     "./app/services/agent_plan_adjustment_proposal_persistence.py",
     "./app/services/agent_plan_adjustment_proposals.py",
     "./app/services/agent_runtime.py",
+    "./app/services/agent_domain_proposals.py",
+    "./app/services/plan_management_proposals.py",
     "./app/services/agent_tool_registry.py",
     "./app/services/agent_tool_registry_read_authority.py",
     "./app/services/agent_tool_registry_read_enforcement.py",

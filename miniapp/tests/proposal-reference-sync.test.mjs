@@ -51,6 +51,22 @@ test('historical proposal references retain authoritative terminal states', () =
   }
 })
 
+test('agent proposal references accept every supported domain type', () => {
+  for (const proposalType of [
+    'plan_adjustment_v1',
+    'plan_creation_v1',
+    'plan_adjustment_v2',
+    'plan_deletion_v1',
+    'profile_update_v1',
+    'weight_log_create_v1',
+    'meal_log_create_v1',
+    'meal_log_delete_v1'
+  ]) {
+    const value = { ...pendingReference, proposal_type: proposalType }
+    assert.deepEqual(runtime.proposalReferenceFromUnknown(value), value)
+  }
+})
+
 test('proposal reads replace the message snapshot with server authority', () => {
   const authoritative = runtime.proposalReferenceFromRead({
     ...pendingReference,

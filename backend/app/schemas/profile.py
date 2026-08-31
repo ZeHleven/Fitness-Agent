@@ -56,8 +56,13 @@ class ProfileResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ProfileUpdateResponse(ProfileResponse):
+    active_plan_safety_status: Literal["compatible", "needs_review"] | None = None
+    active_plan_safety_reasons: list[str] = Field(default_factory=list)
+
+
 class WeightLogRequest(BaseModel):
-    weight_kg: float
+    weight_kg: float = Field(ge=25, le=350)
 
 
 class WeightLogResponse(BaseModel):

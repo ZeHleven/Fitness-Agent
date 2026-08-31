@@ -3,9 +3,9 @@ import { Button, Text, View } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
 
 import { errorMessage } from '../../core/request'
-import { clearTokens } from '../../core/storage'
 import { workoutApi } from '../../services/workouts'
 import { profileApi } from '../../services/profile'
+import { planManagementApi } from '../../services/plan-management'
 import type { WorkoutPlan, WorkoutProgress, WorkoutSession } from '../../types/api'
 import './index.scss'
 
@@ -17,6 +17,7 @@ export default function WorkoutsPage () {
   const [progress, setProgress] = useState<WorkoutProgress | null>(null)
   const [loading, setLoading] = useState(true)
   const [startingKey, setStartingKey] = useState('')
+  const [deletingPlanId, setDeletingPlanId] = useState('')
   const [error, setError] = useState('')
 
   const load = async () => {
@@ -61,11 +62,30 @@ export default function WorkoutsPage () {
     }
   }
 
-  const logout = async () => {
-    const result = await Taro.showModal({ title: '退出登录？', content: '本机保存的登录状态将被清除。' })
-    if (!result.confirm) return
-    clearTokens()
-    await Taro.reLaunch({ url: '/pages/login/index' })
+  const activePlan = plans.find(plan => plan.is_active)
+
+  const proposeDeletion = async (planId: string) => {
+    const answer = await Taro.showModal({
+      title: '删除当前训练计划？',
+      content: '下一步会先生成删除提案；还需要在提案详情中再次确认才会永久删除计划。'
+    })
+    if (!answer.confirm) return
+    setDeletingPlanId(planId)
+    setError('')
+    try {
+      const context = await planManagementApi.editContext(planId)
+      const proposal = await planManagementApi.createDeletion(
+        planId,
+        context.base_plan_fingerprint
+      )
+      await Taro.navigateTo({
+        url: `/pages/plan-proposal-detail/index?id=${encodeURIComponent(proposal.id)}`
+      })
+    } catch (requestError) {
+      setError(errorMessage(requestError, '删除提案创建失败'))
+    } finally {
+      setDeletingPlanId('')
+    }
   }
 
   return (
@@ -75,14 +95,13 @@ export default function WorkoutsPage () {
           <Text className='eyebrow'>今天也要稳稳进步</Text>
           <Text className='page-title'>开始训练</Text>
         </View>
-        <View className='logout' onClick={logout}>退出</View>
       </View>
 
       {error && <View className='error-banner'>{error}</View>}
 
       <View
         className='agent-entry card'
-        onClick={() => Taro.navigateTo({ url: '/pages/agent/index' })}
+        onClick={() => Taro.switchTab({ url: '/pages/agent/index' })}
       >
         <View className='agent-entry-mark'>练</View>
         <View className='agent-entry-copy'>
@@ -119,9 +138,9 @@ export default function WorkoutsPage () {
 
       <Text className='section-heading'>我的计划</Text>
       {loading && <View className='loading-state'>正在加载训练计划…</View>}
-      {!loading && plans.length === 0 && (
+      {!loading && !activePlan && (
         <View className='card empty-state plan-empty'>
-          <Text>还没有训练计划，先生成一份基础计划再开始记录。</Text>
+          <Text>当前没有活动训练计划，先生成一份个性化计划再开始记录。</Text>
           <Button
             className='primary-button generate-button'
             onClick={() => Taro.navigateTo({ url: '/pages/plan-builder/index' })}
@@ -143,6 +162,35 @@ export default function WorkoutsPage () {
                 ? plan.ai_generated && <Text className='ai-tag'>智能</Text>
                 : <Text className='archived-tag'>已归档</Text>}
             </View>
+            {plan.is_active && plan.safety_status === 'needs_review' && (
+              <View className='plan-safety-warning'>
+                <Text className='plan-safety-title'>计划需复核</Text>
+                {plan.safety_reasons.map(reason => (
+                  <Text className='plan-safety-reason' key={reason}>· {reason}</Text>
+                ))}
+              </View>
+            )}
+            {plan.is_active && plan.manual_proposals_enabled && (
+              <View className='plan-actions'>
+                <Button
+                  className='edit-plan-button'
+                  size='mini'
+                  onClick={() => Taro.navigateTo({
+                    url: `/pages/plan-editor/index?id=${encodeURIComponent(plan.id)}`
+                  })}
+                >
+                  编辑计划
+                </Button>
+                <Button
+                  className='delete-plan-button'
+                  size='mini'
+                  disabled={Boolean(deletingPlanId)}
+                  onClick={() => proposeDeletion(plan.id)}
+                >
+                  {deletingPlanId === plan.id ? '创建提案中…' : '删除计划'}
+                </Button>
+              </View>
+            )}
             {days.map(day => {
               const exercises = plan.exercises.filter(item => item.day_of_week === day)
               const key = `${plan.id}-${day}`
@@ -155,10 +203,19 @@ export default function WorkoutsPage () {
                   <Button
                     className='start-button'
                     size='mini'
-                    disabled={!plan.is_active || Boolean(active) || Boolean(startingKey)}
+                    disabled={
+                      !plan.is_active ||
+                      plan.safety_status === 'needs_review' ||
+                      Boolean(active) ||
+                      Boolean(startingKey)
+                    }
                     onClick={() => start(plan.id, day)}
                   >
-                    {!plan.is_active ? '已归档' : startingKey === key ? '启动中' : '开始'}
+                    {!plan.is_active
+                      ? '已归档'
+                      : plan.safety_status === 'needs_review'
+                        ? '待复核'
+                        : startingKey === key ? '启动中' : '开始'}
                   </Button>
                 </View>
               )

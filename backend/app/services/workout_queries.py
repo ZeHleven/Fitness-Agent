@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.exercise import Exercise
+from app.models.profile import UserProfile
 from app.models.workout import PlannedExercise, SessionExercise, WorkoutPlan, WorkoutSession
 from app.schemas.workout import (
     PlannedExerciseResponse,
@@ -114,7 +115,10 @@ async def get_user_plan(
 
 
 async def build_plan_detail(
-    db: AsyncSession, plan: WorkoutPlan
+    db: AsyncSession,
+    plan: WorkoutPlan,
+    *,
+    profile: UserProfile | None = None,
 ) -> WorkoutPlanDetail:
     exercises = (await db.execute(
         select(PlannedExercise)
@@ -146,6 +150,19 @@ async def build_plan_detail(
         )
         for item in exercises
     ]
+    from app.services.plan_safety import evaluate_plan_safety
+
+    safety = await evaluate_plan_safety(
+        db,
+        plan=plan,
+        profile=profile,
+        planned_exercises=list(exercises),
+    )
+    result.safety_status = safety.status
+    result.safety_reasons = list(safety.reasons)
+    from app.config import settings
+
+    result.manual_proposals_enabled = settings.MANUAL_PLAN_PROPOSALS_ENABLED
     return result
 
 

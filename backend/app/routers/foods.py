@@ -9,6 +9,7 @@ router = APIRouter(prefix="/foods", tags=["foods"])
 
 @router.get("", response_model=list[FoodResponse])
 async def list_foods(
+    q: str | None = Query(None, min_length=1, max_length=50),
     category: str | None = Query(None),
     diet_tag: str | None = Query(None),
     min_protein_g: float | None = Query(None, ge=0),
@@ -20,5 +21,6 @@ async def list_foods(
         category=category,
         diet_tag=diet_tag,
         min_protein_g=min_protein_g,
+        query=q,
         limit=limit,
     )

@@ -24,6 +24,7 @@ export default function ActiveWorkoutPage () {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const [safetyReasons, setSafetyReasons] = useState<string[]>([])
   const [rest, setRest] = useState<RestState | null>(null)
   const [remaining, setRemaining] = useState(0)
   const [feedbackOpen, setFeedbackOpen] = useState(false)
@@ -34,7 +35,19 @@ export default function ActiveWorkoutPage () {
     setLoading(true)
     setError('')
     try {
-      setSession(await workoutApi.active())
+      const [activeSession, plans] = await Promise.all([
+        workoutApi.active(),
+        workoutApi.plans()
+      ])
+      setSession(activeSession)
+      const sourcePlan = activeSession?.plan_id
+        ? plans.find(plan => plan.id === activeSession.plan_id)
+        : null
+      setSafetyReasons(
+        sourcePlan?.safety_status === 'needs_review'
+          ? sourcePlan.safety_reasons
+          : []
+      )
     } catch (requestError) {
       setError(errorMessage(requestError, '训练数据加载失败'))
     } finally {
@@ -191,6 +204,12 @@ export default function ActiveWorkoutPage () {
       </View>
 
       {error && <View className='error-banner'>{error}</View>}
+      {safetyReasons.length > 0 && (
+        <View className='active-safety-warning'>
+          <Text className='active-safety-title'>健康资料已变化，请停止训练并复核计划</Text>
+          <Text className='active-safety-copy'>{safetyReasons.join('；')}。已经开始的训练不会被系统自动取消；如有疼痛、胸闷或明显不适，请立即停止并寻求专业意见。</Text>
+        </View>
+      )}
 
       {session.exercises.map(exercise => (
         <ExerciseCard

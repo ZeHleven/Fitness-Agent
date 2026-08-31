@@ -63,12 +63,15 @@ class Settings(BaseSettings):
     )
     AGENT_TOOL_REGISTRY_SHADOW_PERSIST_TRACE: bool = False
     AGENT_TOOL_REGISTRY_SHADOW_EMIT_METRICS: bool = False
-    # Reserved for the separately gated read-only authority transition.
-    # No runtime path consumes this switch until enforce is implemented.
+    # Separately gated read-only Registry authority transition.
     AGENT_TOOL_REGISTRY_ENFORCE_READS_ENABLED: bool = False
-    # Independent from read-tool Registry enforcement. No Controller path
-    # consumes this switch until optional proposal persistence is wired.
+    # Independent write-Proposal rollout gates. All remain disabled by default.
     AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED: bool = False
+    MANUAL_PLAN_PROPOSALS_ENABLED: bool = False
+    AGENT_PLAN_MANAGEMENT_PROPOSALS_ENABLED: bool = False
+    AGENT_PROFILE_PROPOSALS_ENABLED: bool = False
+    AGENT_WEIGHT_PROPOSALS_ENABLED: bool = False
+    AGENT_NUTRITION_PROPOSALS_ENABLED: bool = False
 
 
 settings = Settings()

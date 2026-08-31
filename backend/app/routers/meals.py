@@ -1,14 +1,19 @@
 from datetime import date
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import delete, select
 from app.database import get_db
 from app.deps import get_current_user
 from app.models.user import User
 from app.models.meal import MealLog, MealItem
+from app.models.food import Food
 from app.schemas.meal import (
-    MealLogCreate, MealLogResponse, MealLogDetail,
-    MealItemResponse, DailySummary, NutritionAdviceResponse,
+    MealLogCreate, MealLogDetail, MealItemResponse, DailySummary,
+    NutritionAdviceResponse,
+)
+from app.services.nutrition_queries import (
+    build_daily_nutrition_summary,
+    list_nutrition_history,
 )
 
 router = APIRouter(prefix="/meals", tags=["meals"])
@@ -28,11 +33,33 @@ async def log_meal(
     db.add(meal)
     await db.flush()
 
+    food_ids = {item.food_id for item in body.items if item.food_id}
+    foods = list((await db.execute(
+        select(Food).where(
+            Food.id.in_(food_ids),
+            Food.is_active.is_(True),
+        )
+    )).scalars().all()) if food_ids else []
+    foods_by_id = {item.id: item for item in foods}
+    if len(foods_by_id) != len(food_ids):
+        raise HTTPException(status_code=400, detail="饮食记录包含不存在或已停用的食品")
+
     items = []
     for item_data in body.items:
+        values = item_data.model_dump()
+        if item_data.food_id:
+            food = foods_by_id[item_data.food_id]
+            factor = item_data.amount_g / 100
+            values.update({
+                "food_name": food.name_zh,
+                "calories": round(food.calories_per_100g * factor, 1),
+                "protein_g": round(food.protein_g * factor, 1),
+                "carbs_g": round(food.carbs_g * factor, 1),
+                "fat_g": round(food.fat_g * factor, 1),
+            })
         item = MealItem(
             meal_id=meal.id,
-            **item_data.model_dump(),
+            **values,
         )
         db.add(item)
         items.append(item)
@@ -50,7 +77,9 @@ async def today_summary(
     db: AsyncSession = Depends(get_db),
 ):
     today = date.today()
-    return await _build_summary(db, current_user.id, today)
+    return await build_daily_nutrition_summary(
+        db, user_id=current_user.id, target_date=today
+    )
 
 
 @router.get("/history", response_model=list[DailySummary])
@@ -58,18 +87,7 @@ async def meal_history(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    rows = (await db.execute(
-        select(MealLog.logged_at)
-        .where(MealLog.user_id == current_user.id)
-        .distinct()
-        .order_by(MealLog.logged_at.desc())
-        .limit(30)
-    )).scalars().all()
-
-    summaries = []
-    for d in rows:
-        summaries.append(await _build_summary(db, current_user.id, d))
-    return summaries
+    return await list_nutrition_history(db, user_id=current_user.id, days=30)
 
 
 @router.delete("/{meal_id}", status_code=204)
@@ -86,6 +104,7 @@ async def delete_meal(
     )
     if not meal:
         raise HTTPException(status_code=404, detail="饮食记录不存在")
+    await db.execute(delete(MealItem).where(MealItem.meal_id == meal.id))
     await db.delete(meal)
     await db.commit()
 
@@ -98,38 +117,3 @@ async def nutrition_advice(
     from app.services.nutritionist import get_daily_nutrition_advice
     advice = await get_daily_nutrition_advice(db, user_id=current_user.id)
     return NutritionAdviceResponse(advice=advice)
-
-
-async def _build_summary(db: AsyncSession, user_id: str, target_date: date) -> DailySummary:
-    meals = (await db.execute(
-        select(MealLog)
-        .where(MealLog.user_id == user_id, MealLog.logged_at == target_date)
-        .order_by(MealLog.created_at.asc())
-    )).scalars().all()
-
-    meal_details = []
-    total_cal = total_prot = total_carbs = total_fat = 0.0
-
-    for meal in meals:
-        items_rows = (await db.execute(
-            select(MealItem).where(MealItem.meal_id == meal.id)
-        )).scalars().all()
-
-        for item in items_rows:
-            total_cal += item.calories
-            total_prot += item.protein_g
-            total_carbs += item.carbs_g
-            total_fat += item.fat_g
-
-        detail = MealLogDetail.model_validate(meal)
-        detail.items = [MealItemResponse.model_validate(i) for i in items_rows]
-        meal_details.append(detail)
-
-    return DailySummary(
-        date=target_date,
-        total_calories=round(total_cal, 1),
-        total_protein_g=round(total_prot, 1),
-        total_carbs_g=round(total_carbs, 1),
-        total_fat_g=round(total_fat, 1),
-        meals=meal_details,
-    )

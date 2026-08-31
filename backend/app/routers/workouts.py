@@ -2,8 +2,9 @@ import json
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select
 from app.database import get_db
 from app.deps import get_current_user
 from app.models.user import User
@@ -17,6 +18,12 @@ from app.schemas.workout import (
     WorkoutProgressResponse, WorkoutSessionComplete, WorkoutSessionCreate,
     WorkoutFeedback, WorkoutSessionDetail,
     WorkoutSessionStart, WorkoutSetRecord,
+)
+from app.schemas.plan_management_proposal import (
+    CreatePlanAdjustmentProposalRequest,
+    CreatePlanDeletionProposalRequest,
+    PlanEditContext,
+    PlanProposalReference,
 )
 from app.services.workout_queries import (
     build_plan_detail,
@@ -44,6 +51,15 @@ async def create_plan(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    existing_active = await db.scalar(select(WorkoutPlan.id).where(
+        WorkoutPlan.user_id == current_user.id,
+        WorkoutPlan.is_active.is_(True),
+    ).limit(1))
+    if existing_active is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="已有活动计划，请通过计划编辑器生成调整提案",
+        )
     plan = WorkoutPlan(
         user_id=current_user.id,
         name=body.name,
@@ -68,7 +84,13 @@ async def list_plans(
     db: AsyncSession = Depends(get_db),
 ):
     rows = await list_user_plans(db, user_id=current_user.id)
-    return [await build_plan_detail(db, plan) for plan in rows]
+    profile = await db.scalar(
+        select(UserProfile).where(UserProfile.user_id == current_user.id)
+    )
+    return [
+        await build_plan_detail(db, plan, profile=profile)
+        for plan in rows
+    ]
 
 
 @router.post("/plans/personalized/preview", response_model=PersonalizedPlanPreview)
@@ -112,6 +134,15 @@ async def confirm_personalized_workout_plan(
     )
     if profile is None or not profile.onboarding_completed:
         raise HTTPException(status_code=400, detail="请先完成新用户资料与健康筛查")
+    existing_active = await db.scalar(select(WorkoutPlan.id).where(
+        WorkoutPlan.user_id == current_user.id,
+        WorkoutPlan.is_active.is_(True),
+    ).limit(1))
+    if existing_active is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="已有活动计划，请通过计划编辑器调整",
+        )
 
     scheduled_days = {item.day_of_week for item in body.exercises}
     if len(scheduled_days) != body.days_per_week:
@@ -137,14 +168,6 @@ async def confirm_personalized_workout_plan(
     except PersonalizedPlanError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    await db.execute(
-        update(WorkoutPlan)
-        .where(
-            WorkoutPlan.user_id == current_user.id,
-            WorkoutPlan.is_active.is_(True),
-        )
-        .values(is_active=False)
-    )
     plan = WorkoutPlan(
         user_id=current_user.id,
         name=body.name,
@@ -179,6 +202,97 @@ async def confirm_personalized_workout_plan(
     return await build_plan_detail(db, plan)
 
 
+def _plan_proposal_error(exc) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"code": exc.code, "message": exc.message},
+    )
+
+
+@router.get(
+    "/plans/{plan_id}/edit-context",
+    response_model=PlanEditContext,
+)
+async def get_plan_edit_context(
+    plan_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.config import settings
+    from app.services.plan_management_proposals import (
+        PlanProposalError,
+        build_plan_edit_context,
+    )
+
+    try:
+        return await build_plan_edit_context(
+            db,
+            user_id=current_user.id,
+            plan_id=plan_id,
+            proposals_enabled=settings.MANUAL_PLAN_PROPOSALS_ENABLED,
+        )
+    except PlanProposalError as exc:
+        return _plan_proposal_error(exc)
+
+
+@router.post(
+    "/plans/{plan_id}/adjustment-proposals",
+    response_model=PlanProposalReference,
+    status_code=201,
+)
+async def create_plan_adjustment_proposal(
+    plan_id: str,
+    body: CreatePlanAdjustmentProposalRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.config import settings
+    from app.services.plan_management_proposals import (
+        PlanProposalError,
+        create_manual_plan_adjustment_proposal,
+    )
+
+    try:
+        return await create_manual_plan_adjustment_proposal(
+            db,
+            enabled=settings.MANUAL_PLAN_PROPOSALS_ENABLED,
+            user_id=current_user.id,
+            plan_id=plan_id,
+            request=body,
+        )
+    except PlanProposalError as exc:
+        return _plan_proposal_error(exc)
+
+
+@router.post(
+    "/plans/{plan_id}/deletion-proposals",
+    response_model=PlanProposalReference,
+    status_code=201,
+)
+async def create_plan_deletion_proposal(
+    plan_id: str,
+    body: CreatePlanDeletionProposalRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.config import settings
+    from app.services.plan_management_proposals import (
+        PlanProposalError,
+        create_manual_plan_deletion_proposal,
+    )
+
+    try:
+        return await create_manual_plan_deletion_proposal(
+            db,
+            enabled=settings.MANUAL_PLAN_PROPOSALS_ENABLED,
+            user_id=current_user.id,
+            plan_id=plan_id,
+            request=body,
+        )
+    except PlanProposalError as exc:
+        return _plan_proposal_error(exc)
+
+
 @router.get("/plans/{plan_id}", response_model=WorkoutPlanDetail)
 async def get_plan(
     plan_id: str,
@@ -206,16 +320,12 @@ async def delete_plan(
     )
     if not plan:
         raise HTTPException(status_code=404, detail="训练计划不存在")
-    await db.execute(
-        update(WorkoutSession)
-        .where(WorkoutSession.plan_id == plan.id)
-        .values(plan_id=None, plan_name=plan.name)
-    )
-    await db.execute(
-        delete(PlannedExercise).where(PlannedExercise.plan_id == plan.id)
-    )
-    await db.delete(plan)
-    await db.commit()
+    if plan.is_active:
+        raise HTTPException(
+            status_code=409,
+            detail="活动计划必须通过删除提案确认后删除",
+        )
+    raise HTTPException(status_code=409, detail="历史计划为训练审计记录，不能删除")
 
 
 @router.post("/plans/generate", response_model=WorkoutPlanDetail, status_code=201)
@@ -224,6 +334,15 @@ async def generate_plan(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    existing_active = await db.scalar(select(WorkoutPlan.id).where(
+        WorkoutPlan.user_id == current_user.id,
+        WorkoutPlan.is_active.is_(True),
+    ).limit(1))
+    if existing_active is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="已有活动计划，请通过计划编辑器调整",
+        )
     from app.services.planner import generate_workout_plan
     plan = await generate_workout_plan(
         db,
@@ -264,6 +383,19 @@ async def start_session(
         raise HTTPException(status_code=404, detail="训练计划不存在")
     if not plan.is_active:
         raise HTTPException(status_code=400, detail="训练计划已归档，请选择当前计划")
+
+    from app.services.plan_safety import evaluate_plan_safety
+
+    safety = await evaluate_plan_safety(db, plan=plan)
+    if safety.status == "needs_review":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "plan_health_review_required",
+                "message": "当前计划与最新健康或训练条件不兼容，请先复核计划",
+                "reasons": list(safety.reasons),
+            },
+        )
 
     planned = (await db.execute(
         select(PlannedExercise)

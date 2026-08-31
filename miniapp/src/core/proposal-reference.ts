@@ -13,6 +13,16 @@ const PROPOSAL_STATUSES: ReadonlySet<string> = new Set([
   'stale',
   'failed'
 ])
+const PROPOSAL_TYPES: ReadonlySet<string> = new Set([
+  'plan_adjustment_v1',
+  'plan_creation_v1',
+  'plan_adjustment_v2',
+  'plan_deletion_v1',
+  'profile_update_v1',
+  'weight_log_create_v1',
+  'meal_log_create_v1',
+  'meal_log_delete_v1'
+])
 
 function isProposalStatus (value: unknown): value is PlanAdjustmentProposalStatus {
   return typeof value === 'string' && PROPOSAL_STATUSES.has(value)
@@ -25,7 +35,8 @@ export function proposalReferenceFromUnknown (
   const proposal = value as Record<string, unknown>
   if (
     typeof proposal.id !== 'string' ||
-    proposal.proposal_type !== 'plan_adjustment_v1' ||
+    typeof proposal.proposal_type !== 'string' ||
+    !PROPOSAL_TYPES.has(proposal.proposal_type) ||
     !isProposalStatus(proposal.status) ||
     typeof proposal.version !== 'number' ||
     !Number.isInteger(proposal.version) ||
