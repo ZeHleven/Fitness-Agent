@@ -11,7 +11,7 @@ import pytest
 from app.schemas.agent_plan_adjustment_proposal import (
     PlanAdjustmentProposalPayload,
 )
-from app.services.agent_intent import ExplicitPlanAdjustmentCommand
+from app.services.agent_intent import ChangeRequest, ExplicitPlanAdjustmentCommand
 from app.services.agent_plan_adjustment_proposals import (
     PlanAdjustmentProposalCreationRejected,
     PlanAdjustmentProposalPayloadRejected,
@@ -381,6 +381,281 @@ def test_explicit_duration_command_accepts_plan_only_and_owns_exact_diff():
     assert {item.tool_id for item in payload.evidence} == {
         "plan.get_active"
     }
+
+
+def test_structured_frequency_mutation_builds_four_to_three_proposal_from_plan_only():
+    observations = _profile_frequency_runtime_observations()
+    plan_only = [
+        item for item in observations if item["tool_id"] == "plan.get_active"
+    ]
+
+    result = build_runtime_plan_adjustment_proposal(
+        feature_enabled=True,
+        run_owned=True,
+        selected_outcome="adjustment_proposal",
+        terminal_action="proposal",
+        intent_allows_adjustment=True,
+        risk_level="low",
+        clarification_required=False,
+        observations=plan_only,
+        proposal_draft=None,
+        change_requests=[ChangeRequest(
+            resource="workout_plan",
+            operation="update",
+            field_path="schedule.days_per_week",
+            value=3,
+        )],
+        created_at=_CREATED_AT,
+    )
+
+    assert result.decision.eligible is True
+    assert result.built is not None
+    assert result.built.payload.before.days_per_week == 4
+    assert result.built.payload.after.days_per_week == 3
+    assert {item.tool_id for item in result.built.payload.evidence} == {
+        "plan.get_active"
+    }
+    assert len(result.built.payload.after.exercises) == 3
+
+
+def test_structured_frequency_mutation_rejects_more_than_one_day_change():
+    observations = _profile_frequency_runtime_observations()
+    plan_only = [
+        item for item in observations if item["tool_id"] == "plan.get_active"
+    ]
+
+    result = build_runtime_plan_adjustment_proposal(
+        feature_enabled=True,
+        run_owned=True,
+        selected_outcome="adjustment_proposal",
+        terminal_action="proposal",
+        intent_allows_adjustment=True,
+        risk_level="low",
+        clarification_required=False,
+        observations=plan_only,
+        proposal_draft=None,
+        change_requests=[ChangeRequest(
+            resource="workout_plan",
+            operation="update",
+            field_path="schedule.days_per_week",
+            value=2,
+        )],
+        created_at=_CREATED_AT,
+    )
+
+    assert result.built is None
+    assert result.decision.reason_code == (
+        "proposal_frequency_restructure_unsupported"
+    )
+    assert result.reply is not None
+    assert "不能直接调整为2天" in result.reply
+
+
+def test_structured_exercise_mutation_resolves_one_named_target():
+    observations = _runtime_observations()[:1]
+    exercise = observations[0]["result"]["plan"]["exercises"][0]
+
+    result = build_runtime_plan_adjustment_proposal(
+        feature_enabled=True,
+        run_owned=True,
+        selected_outcome="adjustment_proposal",
+        terminal_action="proposal",
+        intent_allows_adjustment=True,
+        risk_level="low",
+        clarification_required=False,
+        observations=observations,
+        proposal_draft=None,
+        change_requests=[ChangeRequest(
+            resource="workout_plan",
+            operation="update",
+            field_path="exercise.sets",
+            target_reference=exercise["exercise_name"],
+            value=3,
+        )],
+        created_at=_CREATED_AT,
+    )
+
+    assert result.decision.eligible is True
+    assert result.built is not None
+    change = result.built.payload.changes[0]
+    assert change.change_type == "adjust_exercise_target"
+    assert change.before.sets == 4
+    assert change.after.sets == 3
+
+
+@pytest.mark.parametrize(
+    ("field_path", "target_value", "attribute", "expected_value"),
+    [
+        ("exercise.reps", "10～12", "reps", "10-12"),
+        ("exercise.rest_seconds", 90, "rest_seconds", 90),
+        (
+            "exercise.recommended_weight_kg",
+            42.5,
+            "recommended_weight_kg",
+            42.5,
+        ),
+    ],
+)
+def test_structured_exercise_mutation_compiles_each_supported_target(
+    field_path,
+    target_value,
+    attribute,
+    expected_value,
+):
+    observations = _runtime_observations()[:1]
+    exercise_name = observations[0]["result"]["plan"]["exercises"][0][
+        "exercise_name"
+    ]
+
+    result = build_runtime_plan_adjustment_proposal(
+        feature_enabled=True,
+        run_owned=True,
+        selected_outcome="adjustment_proposal",
+        terminal_action="proposal",
+        intent_allows_adjustment=True,
+        risk_level="low",
+        clarification_required=False,
+        observations=observations,
+        proposal_draft=None,
+        change_requests=[ChangeRequest(
+            resource="workout_plan",
+            operation="update",
+            field_path=field_path,
+            target_reference=exercise_name,
+            value=target_value,
+        )],
+        created_at=_CREATED_AT,
+    )
+
+    assert result.decision.eligible is True
+    assert result.built is not None
+    change = result.built.payload.changes[0]
+    assert getattr(change.after, attribute) == expected_value
+    assert len(result.built.payload.evidence) == 1
+
+
+def test_structured_duration_mutation_compiles_from_authoritative_plan():
+    result = build_runtime_plan_adjustment_proposal(
+        feature_enabled=True,
+        run_owned=True,
+        selected_outcome="adjustment_proposal",
+        terminal_action="proposal",
+        intent_allows_adjustment=True,
+        risk_level="low",
+        clarification_required=False,
+        observations=_runtime_observations()[:1],
+        proposal_draft=None,
+        change_requests=[ChangeRequest(
+            resource="workout_plan",
+            operation="update",
+            field_path="schedule.duration_weeks",
+            value=6,
+        )],
+        created_at=_CREATED_AT,
+    )
+
+    assert result.decision.eligible is True
+    assert result.built is not None
+    assert result.built.payload.before.duration_weeks == 4
+    assert result.built.payload.after.duration_weeks == 6
+
+
+@pytest.mark.parametrize(
+    ("change", "reason_code"),
+    [
+        (
+            ChangeRequest(
+                resource="workout_plan",
+                operation="update",
+                field_path="schedule.duration_weeks",
+                value=4,
+            ),
+            "proposal_no_change",
+        ),
+        (
+            ChangeRequest(
+                resource="workout_plan",
+                operation="update",
+                field_path="schedule.duration_weeks",
+                value=13,
+            ),
+            "proposal_target_mismatch",
+        ),
+        (
+            ChangeRequest(
+                resource="workout_plan",
+                operation="update",
+                field_path="schedule.duration_weeks",
+                value=None,
+            ),
+            "proposal_target_value_required",
+        ),
+        (
+            ChangeRequest(
+                resource="workout_plan",
+                operation="create",
+                field_path="exercises",
+                value={"exercise_name": "弓步蹲"},
+            ),
+            "proposal_operation_unsupported",
+        ),
+    ],
+)
+def test_structured_mutation_rejections_are_explicit_and_write_free(
+    change,
+    reason_code,
+):
+    result = build_runtime_plan_adjustment_proposal(
+        feature_enabled=True,
+        run_owned=True,
+        selected_outcome="adjustment_proposal",
+        terminal_action="proposal",
+        intent_allows_adjustment=True,
+        risk_level="low",
+        clarification_required=False,
+        observations=_runtime_observations()[:1],
+        proposal_draft=None,
+        change_requests=[change],
+        created_at=_CREATED_AT,
+    )
+
+    assert result.built is None
+    assert result.decision.reason_code == reason_code
+    assert result.reply is not None
+
+
+def test_structured_exercise_mutation_requires_a_unique_plan_match():
+    observations = _runtime_observations()[:1]
+    plan = observations[0]["result"]["plan"]
+    duplicate = copy.deepcopy(plan["exercises"][0])
+    duplicate["day_of_week"] = 2
+    plan["days_per_week"] = 2
+    plan["exercises"].append(duplicate)
+
+    result = build_runtime_plan_adjustment_proposal(
+        feature_enabled=True,
+        run_owned=True,
+        selected_outcome="adjustment_proposal",
+        terminal_action="proposal",
+        intent_allows_adjustment=True,
+        risk_level="low",
+        clarification_required=False,
+        observations=observations,
+        proposal_draft=None,
+        change_requests=[ChangeRequest(
+            resource="workout_plan",
+            operation="update",
+            field_path="exercise.sets",
+            target_reference=duplicate["exercise_name"],
+            value=3,
+        )],
+        created_at=_CREATED_AT,
+    )
+
+    assert result.built is None
+    assert result.decision.reason_code == "proposal_target_ambiguous"
+    assert result.reply is not None
+    assert "没有唯一匹配" in result.reply
 
 
 def test_evidence_derived_adjustment_still_rejects_plan_only_observation():

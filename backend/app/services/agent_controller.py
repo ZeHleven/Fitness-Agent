@@ -386,6 +386,7 @@ def _finalization_outcomes_for_observations(
     subtasks: list[str],
     observations: list[dict[str, Any]],
     proposal_creation_enabled: bool = False,
+    force_adjustment_proposal: bool = False,
 ) -> list[FinalizationOutcome]:
     allowed_outcomes = _allowed_finalization_outcomes(goal, subtasks)
     active_plan = _latest_successful_observation_result(
@@ -394,7 +395,10 @@ def _finalization_outcomes_for_observations(
     )
     if (
         proposal_creation_enabled
-        and parse_explicit_plan_adjustment_command(goal) is not None
+        and (
+            force_adjustment_proposal
+            or parse_explicit_plan_adjustment_command(goal) is not None
+        )
         and active_plan is not None
         and active_plan.get("found") is True
     ):
@@ -1103,6 +1107,7 @@ async def execute_planned_agent(
     parallel_tool_invoker: ParallelToolInvoker | None = None,
     shadow_session: ToolRegistryShadowSession | None = None,
     proposal_creation_enabled: bool = False,
+    force_adjustment_proposal: bool = False,
 ) -> PlannedExecutionResult:
     """Execute one small linear plan with explicit, planner-owned boundaries."""
     sink = event_sink or _noop_event_sink
@@ -1900,8 +1905,21 @@ async def execute_planned_agent(
             subtasks=subtasks,
             observations=raw_observations,
             proposal_creation_enabled=proposal_creation_enabled,
+            force_adjustment_proposal=force_adjustment_proposal,
         )
     )
+    if force_adjustment_proposal:
+        active_plan = _latest_successful_observation_result(
+            raw_observations,
+            "plan.get_active",
+        )
+        allowed_outcomes = (
+            ["adjustment_proposal"]
+            if proposal_creation_enabled
+            and active_plan is not None
+            and active_plan.get("found") is True
+            else ["insufficient_evidence"]
+        )
     trace = trace.model_copy(update={
         "finalization_contract": AgentFinalizationContractTrace(
             allowed_outcomes=allowed_outcomes,
@@ -1910,7 +1928,13 @@ async def execute_planned_agent(
     await sink(trace, None)
 
     deadline_finalizer_fallback = False
-    if trace.budget_usage.model_calls >= settings.AGENT_MAX_MODEL_CALLS:
+    if force_adjustment_proposal and allowed_outcomes == ["adjustment_proposal"]:
+        response = FinalResponse(
+            terminal_action="proposal",
+            reply="已读取当前训练计划，正在生成待确认的调整提案。",
+            outcome="adjustment_proposal",
+        )
+    elif trace.budget_usage.model_calls >= settings.AGENT_MAX_MODEL_CALLS:
         response = FinalResponse(
             terminal_action="answer",
             reply="我已经完成可用数据的查询，但本轮决策预算已用尽，暂时无法可靠形成完整结论。",

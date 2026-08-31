@@ -473,6 +473,59 @@ async def test_unsupported_write_request_never_routes_a_read_tool():
 
 
 @pytest.mark.asyncio
+async def test_plan_mutation_uses_model_first_and_safe_structured_fallback():
+    with (
+        patch.object(settings, "AGENT_RULES_FIRST_ENABLED", True),
+        patch.object(settings, "DEEPSEEK_API_KEY", "test-key"),
+        patch(
+            "app.services.agent_intent_model._invoke_model_intent",
+            new=AsyncMock(side_effect=RuntimeError("provider unavailable")),
+        ) as invoked,
+    ):
+        outcome = await resolve_intent_with_fallback(
+            "把我的训练计划调整为每周 3 天",
+            use_model=True,
+        )
+
+    assert invoked.await_count == 1
+    assert outcome.source == "rules"
+    assert outcome.resolution.request_kind == "mutation"
+    assert outcome.resolution.change_requests[0].field_path == (
+        "schedule.days_per_week"
+    )
+    assert outcome.resolution.change_requests[0].value == 3
+    assert route_tools(outcome.resolution) == ["plan.get_active"]
+
+
+@pytest.mark.asyncio
+async def test_server_overlay_blocks_model_from_downgrading_mutation_to_query():
+    unsafe_candidate = IntentResolution(
+        primary_intent="plan_query",
+        intent_domain="workout_plan",
+        request_kind="query",
+        requested_effect="read",
+        subtasks=["回答计划问题"],
+        confidence=0.95,
+    )
+    with (
+        patch.object(settings, "DEEPSEEK_API_KEY", "test-key"),
+        patch(
+            "app.services.agent_intent_model._invoke_model_intent",
+            new=AsyncMock(return_value=unsafe_candidate),
+        ),
+    ):
+        outcome = await resolve_intent_with_fallback(
+            "把我的训练计划调整为每周 3 天",
+            use_model=True,
+        )
+
+    assert outcome.resolution.request_kind == "mutation"
+    assert outcome.resolution.requested_effect == "update"
+    assert outcome.resolution.change_requests[0].value == 3
+    assert route_tools(outcome.resolution) == ["plan.get_active"]
+
+
+@pytest.mark.asyncio
 async def test_next_workout_removes_redundant_plan_tool_without_explicit_plan_request():
     candidate = IntentResolution(
         primary_intent="next_workout_query",

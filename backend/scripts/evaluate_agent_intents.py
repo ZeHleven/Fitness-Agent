@@ -34,6 +34,8 @@ async def evaluate(case_file: Path, *, use_model: bool) -> dict[str, Any]:
     forbidden_total = 0
     forbidden_leaks = 0
     clarification_correct = 0
+    semantic_expected = 0
+    semantic_correct = 0
 
     for case in cases:
         outcome = await resolve_intent_with_fallback(
@@ -55,6 +57,28 @@ async def evaluate(case_file: Path, *, use_model: bool) -> dict[str, Any]:
             resolution.clarification_required
             == case.get("clarification_required", False)
         )
+        semantic_checks: list[bool] = []
+        if "expected_domain" in case:
+            semantic_checks.append(
+                resolution.intent_domain == case["expected_domain"]
+            )
+        if "expected_request_kind" in case:
+            semantic_checks.append(
+                resolution.request_kind == case["expected_request_kind"]
+            )
+        if "expected_effect" in case:
+            semantic_checks.append(
+                resolution.requested_effect == case["expected_effect"]
+            )
+        if "expected_change_field" in case:
+            semantic_checks.append(
+                len(resolution.change_requests) == 1
+                and resolution.change_requests[0].field_path
+                == case["expected_change_field"]
+                and resolution.change_requests[0].value
+                == case.get("expected_change_value")
+            )
+        semantic_ok = all(semantic_checks)
 
         primary_correct += int(primary_ok)
         risk_correct += int(risk_ok)
@@ -63,6 +87,8 @@ async def evaluate(case_file: Path, *, use_model: bool) -> dict[str, Any]:
         forbidden_total += len(forbidden)
         forbidden_leaks += len(leaks)
         clarification_correct += int(clarification_ok)
+        semantic_expected += int(bool(semantic_checks))
+        semantic_correct += int(bool(semantic_checks) and semantic_ok)
         source_counts[outcome.source] += 1
         results.append({
             "id": case["id"],
@@ -76,6 +102,14 @@ async def evaluate(case_file: Path, *, use_model: bool) -> dict[str, Any]:
             "subtasks": resolution.subtasks,
             "clarification_required": resolution.clarification_required,
             "clarification_ok": clarification_ok,
+            "intent_domain": resolution.intent_domain,
+            "request_kind": resolution.request_kind,
+            "requested_effect": resolution.requested_effect,
+            "change_requests": [
+                item.model_dump(mode="json")
+                for item in resolution.change_requests
+            ],
+            "semantic_ok": semantic_ok,
             "tools": routed,
             "missing_allowed_tools": sorted(allowed - routed_set),
             "forbidden_tool_leaks": leaks,
@@ -91,6 +125,9 @@ async def evaluate(case_file: Path, *, use_model: bool) -> dict[str, Any]:
         "risk_accuracy": risk_correct / total if total else 0,
         "clarification_accuracy": (
             clarification_correct / total if total else 0
+        ),
+        "semantic_accuracy": (
+            semantic_correct / semantic_expected if semantic_expected else 1
         ),
         "allowed_tool_recall": (
             allowed_matched / expected_allowed if expected_allowed else 1
@@ -124,6 +161,7 @@ def main() -> int:
         or report["forbidden_tool_leakage"] > 0
         or report["risk_accuracy"] < 1
         or report["clarification_accuracy"] < 1
+        or report["semantic_accuracy"] < 1
     ):
         return 1
     return 0

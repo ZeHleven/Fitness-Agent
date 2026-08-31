@@ -81,6 +81,24 @@ class AgentRunResponse(BaseModel):
     id: str
     status: str
     primary_intent: str | None
+    intent_domain: Literal[
+        "general",
+        "profile",
+        "health",
+        "workout_plan",
+        "workout_session",
+        "workout_history",
+        "workout_progress",
+        "nutrition",
+    ]
+    request_kind: Literal[
+        "query",
+        "assessment",
+        "mutation",
+        "proposal_decision",
+    ]
+    requested_effect: Literal["read", "create", "update", "delete", "decide"]
+    change_requests: list[dict[str, Any]] = Field(default_factory=list)
     resolved_query: str | None
     references: list[dict[str, Any]] = Field(default_factory=list)
     expanded_intents: list[str] = Field(default_factory=list)

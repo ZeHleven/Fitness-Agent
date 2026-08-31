@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from copy import deepcopy
 from dataclasses import dataclass
 from collections.abc import Mapping
@@ -26,7 +27,7 @@ from app.schemas.agent_plan_adjustment_proposal import (
     ValidatedPlanAdjustmentProposal,
     plan_adjustment_proposal_payload_error_codes,
 )
-from app.services.agent_intent import ExplicitPlanAdjustmentCommand
+from app.services.agent_intent import ChangeRequest, ExplicitPlanAdjustmentCommand
 from app.services.agent_trace import observation_fingerprint
 
 
@@ -60,6 +61,18 @@ class PlanAdjustmentProposalPayloadRejected(ValueError):
 class RuntimePlanAdjustmentProposalBuildResult:
     decision: PlanAdjustmentProposalCreationDecision
     built: ValidatedPlanAdjustmentProposal | None = None
+    reply: str | None = None
+
+
+class PlanMutationCompilationRejected(ValueError):
+    def __init__(
+        self,
+        reason_code: PlanAdjustmentProposalCreationReasonCode,
+        reply: str,
+    ) -> None:
+        self.reason_code = reason_code
+        self.reply = reply
+        super().__init__(reason_code)
 
 
 def _rejected(
@@ -312,6 +325,267 @@ def _explicit_duration_proposal_draft(
         "safety_notes": [],
         "requested_ttl_hours": 24,
     })
+
+
+_SUPPORTED_MUTATION_FIELDS = frozenset({
+    "schedule.duration_weeks",
+    "schedule.days_per_week",
+    "exercise.sets",
+    "exercise.reps",
+    "exercise.rest_seconds",
+    "exercise.recommended_weight_kg",
+})
+
+
+def _normalized_exercise_name(value: str) -> str:
+    return "".join(value.lower().split())
+
+
+def _resolve_exercise_target(
+    before: PlanAdjustmentPlanSnapshot,
+    reference: str | None,
+) -> Any:
+    if not reference:
+        raise PlanMutationCompilationRejected(
+            "proposal_target_value_required",
+            "请说明要调整哪个动作，我再为你生成待确认提案。",
+        )
+    normalized_reference = _normalized_exercise_name(reference)
+    exact = [
+        exercise for exercise in before.exercises
+        if _normalized_exercise_name(exercise.exercise_name)
+        == normalized_reference
+    ]
+    candidates = exact or [
+        exercise for exercise in before.exercises
+        if normalized_reference in _normalized_exercise_name(exercise.exercise_name)
+        or _normalized_exercise_name(exercise.exercise_name)
+        in normalized_reference
+    ]
+    if len(candidates) != 1:
+        raise PlanMutationCompilationRejected(
+            "proposal_target_ambiguous",
+            (
+                f"当前计划中没有唯一匹配“{reference}”的动作，"
+                "请提供计划里的完整动作名称。"
+            ),
+        )
+    return candidates[0]
+
+
+def _require_mutation_value(change: ChangeRequest) -> Any:
+    if change.value is None:
+        raise PlanMutationCompilationRejected(
+            "proposal_target_value_required",
+            "请补充计划调整后的具体目标值，我再为你生成待确认提案。",
+        )
+    return change.value
+
+
+def _integer_mutation_value(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return None
+
+
+def _structured_plan_mutation_draft(
+    change_requests: list[ChangeRequest],
+    *,
+    before: PlanAdjustmentPlanSnapshot,
+) -> PlanAdjustmentProposalDraft:
+    if not change_requests:
+        raise PlanMutationCompilationRejected(
+            "proposal_target_value_required",
+            "请说明希望修改训练计划的哪个项目和目标值。",
+        )
+    if any(
+        change.resource != "workout_plan"
+        or change.operation != "update"
+        or change.field_path not in _SUPPORTED_MUTATION_FIELDS
+        or not change.preserve_unspecified
+        for change in change_requests
+    ):
+        raise PlanMutationCompilationRejected(
+            "proposal_operation_unsupported",
+            "我识别到了写入请求，但这类训练计划变更目前还不能执行，当前计划未作修改。",
+        )
+
+    semantic_targets = [
+        (
+            change.field_path,
+            _normalized_exercise_name(change.target_reference or ""),
+        )
+        for change in change_requests
+    ]
+    if len(semantic_targets) != len(set(semantic_targets)):
+        raise PlanMutationCompilationRejected(
+            "proposal_target_ambiguous",
+            "同一个计划字段出现了多个目标值，请只保留一个明确目标。",
+        )
+
+    frequency_changes = [
+        change for change in change_requests
+        if change.field_path == "schedule.days_per_week"
+    ]
+    if frequency_changes and len(change_requests) != 1:
+        raise PlanMutationCompilationRejected(
+            "proposal_operation_unsupported",
+            "调整每周训练频率暂时不能和其他变更合并，请单独发起频率调整。",
+        )
+
+    draft_changes: list[dict[str, Any]] = []
+    rationale: list[str] = []
+    safety_notes: list[str] = []
+    schedule_before: dict[str, Any] = {}
+    schedule_after: dict[str, Any] = {}
+    exercise_updates: dict[str, dict[str, Any]] = {}
+
+    for change in change_requests:
+        field_path = change.field_path
+        value = _require_mutation_value(change)
+        if field_path == "schedule.duration_weeks":
+            integer_value = _integer_mutation_value(value)
+            if integer_value is None or not 2 <= integer_value <= 12:
+                raise PlanMutationCompilationRejected(
+                    "proposal_target_mismatch",
+                    "计划周期需要是 2 到 12 周之间的整数，当前计划未作修改。",
+                )
+            value = integer_value
+            if value == before.duration_weeks:
+                raise PlanMutationCompilationRejected(
+                    "proposal_no_change",
+                    f"当前计划周期已经是{value}周，无需生成调整提案。",
+                )
+            schedule_before["duration_weeks"] = before.duration_weeks
+            schedule_after["duration_weeks"] = value
+            rationale.append(
+                f"用户明确要求将计划周期从{before.duration_weeks}周调整为{value}周。"
+            )
+            continue
+        if field_path == "schedule.days_per_week":
+            integer_value = _integer_mutation_value(value)
+            if integer_value is None or not 1 <= integer_value <= 7:
+                raise PlanMutationCompilationRejected(
+                    "proposal_target_mismatch",
+                    "每周训练天数需要是 1 到 7 之间的整数，当前计划未作修改。",
+                )
+            value = integer_value
+            if value == before.days_per_week:
+                raise PlanMutationCompilationRejected(
+                    "proposal_no_change",
+                    f"当前计划已经是每周{value}天，无需生成调整提案。",
+                )
+            if value != before.days_per_week - 1:
+                raise PlanMutationCompilationRejected(
+                    "proposal_frequency_restructure_unsupported",
+                    (
+                        f"当前只支持把每周训练频率从{before.days_per_week}天"
+                        f"减少为{before.days_per_week - 1}天；"
+                        f"不能直接调整为{value}天，当前计划未作修改。"
+                    ),
+                )
+            removed_day = _deterministic_frequency_reduction_day(before)
+            schedule_before["days_per_week"] = before.days_per_week
+            schedule_after["days_per_week"] = value
+            rationale.append(
+                f"用户明确要求将每周训练频率从{before.days_per_week}天调整为{value}天。"
+            )
+            safety_notes.append(
+                f"将按总组数最少原则移除周{removed_day}训练日；确认前请核对完整计划。"
+            )
+            continue
+
+        exercise = _resolve_exercise_target(before, change.target_reference)
+        field_name = str(field_path).split(".", 1)[1]
+        before_value = getattr(exercise, field_name)
+        normalized_value = value
+        if field_name in {"sets", "rest_seconds"}:
+            integer_value = _integer_mutation_value(value)
+            if integer_value is None:
+                raise PlanMutationCompilationRejected(
+                    "proposal_target_mismatch",
+                    "动作组数和休息秒数需要使用整数，当前计划未作修改。",
+                )
+            normalized_value = integer_value
+        elif field_name == "recommended_weight_kg":
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise PlanMutationCompilationRejected(
+                    "proposal_target_mismatch",
+                    "动作重量需要使用有效数字，当前计划未作修改。",
+                )
+            normalized_value = float(value)
+        elif field_name == "reps":
+            if isinstance(value, int) and not isinstance(value, bool):
+                normalized_value = str(value)
+            elif isinstance(value, str) and value.strip():
+                normalized_value = re.sub(
+                    r"[~～至到]",
+                    "-",
+                    value.strip(),
+                )
+            else:
+                raise PlanMutationCompilationRejected(
+                    "proposal_target_mismatch",
+                    "动作次数需要是明确的次数或次数范围，当前计划未作修改。",
+                )
+        if normalized_value == before_value:
+            raise PlanMutationCompilationRejected(
+                "proposal_no_change",
+                f"{exercise.exercise_name}的{field_name}已经是目标值，无需生成调整提案。",
+            )
+        update = exercise_updates.setdefault(exercise.slot_key, {
+            "exercise": exercise,
+            "before": {},
+            "after": {},
+        })
+        if field_name in update["after"]:
+            raise PlanMutationCompilationRejected(
+                "proposal_target_ambiguous",
+                "同一个动作字段出现了多个目标值，请只保留一个明确目标。",
+            )
+        update["before"][field_name] = before_value
+        update["after"][field_name] = normalized_value
+        rationale.append(
+            f"用户明确要求调整{exercise.exercise_name}的{field_name}。"
+        )
+
+    if schedule_before:
+        draft_changes.append({
+            "change_type": "update_plan_schedule",
+            "stable_display_key": "plan-schedule",
+            "before": schedule_before,
+            "after": schedule_after,
+            "reason": "按用户明确请求调整训练计划日程，未指定内容保持不变。",
+            "safety_priority": False,
+        })
+    for slot_key, update in exercise_updates.items():
+        draft_changes.append({
+            "change_type": "adjust_exercise_target",
+            "stable_display_key": slot_key,
+            "before": update["before"],
+            "after": update["after"],
+            "reason": (
+                f"按用户明确请求调整{update['exercise'].exercise_name}的训练目标。"
+            ),
+            "safety_priority": False,
+        })
+    try:
+        return PlanAdjustmentProposalDraft.model_validate({
+            "proposal_type": "plan_adjustment_v1",
+            "changes": draft_changes,
+            "rationale": rationale,
+            "safety_notes": safety_notes,
+            "requested_ttl_hours": 24,
+        })
+    except ValidationError as exc:
+        raise PlanMutationCompilationRejected(
+            "proposal_target_mismatch",
+            "目标值超出训练计划允许范围，当前计划未作修改。",
+        ) from exc
 
 
 def _plan_snapshot_from_observation(
@@ -660,6 +934,7 @@ def build_runtime_plan_adjustment_proposal(
     observations: list[dict[str, Any]],
     proposal_draft: Mapping[str, Any] | None,
     explicit_adjustment_command: ExplicitPlanAdjustmentCommand | None = None,
+    change_requests: list[ChangeRequest] | None = None,
     created_at: datetime,
 ) -> RuntimePlanAdjustmentProposalBuildResult:
     """Build a server-owned full payload from one compact Finalizer draft."""
@@ -671,10 +946,30 @@ def build_runtime_plan_adjustment_proposal(
         and terminal_action == "proposal"
     )
     draft_rejection_reason: PlanAdjustmentProposalCreationReasonCode | None = None
+    rejection_reply: str | None = None
     if feature_enabled and explicit_adjustment_command is not None:
         parsed_draft = _explicit_duration_proposal_draft(
             explicit_adjustment_command
         )
+    elif feature_enabled and change_requests:
+        plan_observation = _active_plan_observation(observations)
+        if plan_observation is not None:
+            try:
+                _, mutation_before = _plan_snapshot_from_observation(
+                    plan_observation
+                )
+                parsed_draft = _structured_plan_mutation_draft(
+                    change_requests,
+                    before=mutation_before,
+                )
+            except PlanMutationCompilationRejected as exc:
+                draft_rejection_reason = exc.reason_code
+                rejection_reply = exc.reply
+            except (KeyError, ValidationError, TypeError, ValueError):
+                draft_rejection_reason = "proposal_candidate_build_invalid"
+                rejection_reply = (
+                    "当前训练计划数据不完整，无法安全生成调整提案，计划未作修改。"
+                )
     elif feature_enabled and isinstance(proposal_draft, Mapping):
         try:
             parsed_draft = PlanAdjustmentProposalDraft.model_validate(
@@ -706,7 +1001,7 @@ def build_runtime_plan_adjustment_proposal(
         evidence_state=_runtime_evidence_state(
             observations,
             supporting_evidence_required=(
-                explicit_adjustment_command is None
+                explicit_adjustment_command is None and not change_requests
             ),
         ),
         draft_state="valid" if parsed_draft is not None else "invalid",
@@ -719,7 +1014,12 @@ def build_runtime_plan_adjustment_proposal(
             and draft_rejection_reason is not None
         ):
             decision = _rejected(draft_rejection_reason)
-        return RuntimePlanAdjustmentProposalBuildResult(decision=decision)
+        elif draft_rejection_reason is not None:
+            decision = _rejected(draft_rejection_reason)
+        return RuntimePlanAdjustmentProposalBuildResult(
+            decision=decision,
+            reply=rejection_reply,
+        )
     if parsed_draft is None:  # pragma: no cover - gate/draft parity
         return RuntimePlanAdjustmentProposalBuildResult(
             decision=_rejected("proposal_draft_invalid")
@@ -736,7 +1036,7 @@ def build_runtime_plan_adjustment_proposal(
         return RuntimePlanAdjustmentProposalBuildResult(
             decision=_rejected("proposal_candidate_build_invalid")
         )
-    if explicit_adjustment_command is None:
+    if explicit_adjustment_command is None and not change_requests:
         is_frequency_workaround = _is_unsupported_frequency_workaround(
             before=before,
             draft=parsed_draft,
@@ -798,7 +1098,7 @@ def build_runtime_plan_adjustment_proposal(
             expected_base_plan_fingerprint=base_fingerprint,
             created_at=created_at,
             supporting_evidence_required=(
-                explicit_adjustment_command is None
+                explicit_adjustment_command is None and not change_requests
             ),
         )
     except (

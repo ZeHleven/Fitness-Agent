@@ -67,6 +67,26 @@ class AgentRun(Base):
             "('direct', 'planned', 'clarify', 'safe_stop')",
             name="ck_agent_runs_execution_mode",
         ),
+        CheckConstraint(
+            "intent_domain IN ('general', 'profile', 'health', "
+            "'workout_plan', 'workout_session', 'workout_history', "
+            "'workout_progress', 'nutrition')",
+            name="ck_agent_runs_intent_domain",
+        ),
+        CheckConstraint(
+            "request_kind IN ('query', 'assessment', 'mutation', "
+            "'proposal_decision')",
+            name="ck_agent_runs_request_kind",
+        ),
+        CheckConstraint(
+            "requested_effect IN ('read', 'create', 'update', 'delete', "
+            "'decide')",
+            name="ck_agent_runs_requested_effect",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(change_requests) = 'array'",
+            name="ck_agent_runs_change_requests_array",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
@@ -93,6 +113,18 @@ class AgentRun(Base):
         Integer, default=0, server_default="0"
     )
     primary_intent: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    intent_domain: Mapped[str] = mapped_column(
+        String(40), default="general", server_default="general"
+    )
+    request_kind: Mapped[str] = mapped_column(
+        String(30), default="query", server_default="query"
+    )
+    requested_effect: Mapped[str] = mapped_column(
+        String(20), default="read", server_default="read"
+    )
+    change_requests: Mapped[list] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'::jsonb")
+    )
     resolved_query: Mapped[str | None] = mapped_column(Text, nullable=True)
     references: Mapped[list] = mapped_column(
         JSONB, default=list, server_default=text("'[]'::jsonb")
@@ -123,7 +155,7 @@ class AgentRun(Base):
     )
     clarification_question: Mapped[str | None] = mapped_column(Text, nullable=True)
     understanding_version: Mapped[str | None] = mapped_column(
-        String(20), default="v2", nullable=True
+        String(20), default="v3", nullable=True
     )
     intent_source: Mapped[str] = mapped_column(
         String(20), default="rules", server_default="rules"

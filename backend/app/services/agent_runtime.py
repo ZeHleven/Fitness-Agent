@@ -18,10 +18,14 @@ from app.database import AsyncSessionLocal
 from app.models.agent import (
     AgentConversation,
     AgentMessage,
+    AgentProposal,
     AgentRun,
     AgentToolCall,
 )
 from app.schemas.agent import AgentProposalReference
+from app.schemas.agent_plan_adjustment_proposal_api import (
+    PlanAdjustmentProposalDecisionRequest,
+)
 from app.schemas.agent_trace import AgentExecutionTrace
 from app.services.agent_controller import (
     ToolAuditEvent,
@@ -31,6 +35,12 @@ from app.services.agent_intent import (
     IntentResolution,
     parse_explicit_plan_adjustment_command,
     route_tools,
+)
+from app.services.agent_plan_adjustment_proposal_decisions import (
+    decide_plan_adjustment_proposal,
+)
+from app.services.agent_plan_adjustment_proposal_execution import (
+    apply_confirmed_plan_adjustment_atomically,
 )
 from app.services.agent_intent_model import resolve_intent_with_fallback
 from app.services.agent_plan_adjustment_proposal_persistence import (
@@ -76,7 +86,7 @@ SYSTEM_PROMPT = """你是 Fitness Agent，一位中文健身对话助手。
 
 能力边界：
 - 一般健身知识可以直接回答；用户自己的资料、计划、训练和进度必须以工具结果为准。
-- 当前只允许查询，不能声称已经开始训练、记录训练组、完成训练、修改资料或保存计划。
+- 训练计划修改只能通过服务端生成待确认提案，不能声称已经直接修改；其他写入能力暂不开放。
 - 工具无结果时明确说明，不得编造用户数据。
 - 简单问题使用简洁文本；有结构化训练数据时先回答结论，再概括关键数据。
 
@@ -94,6 +104,14 @@ _PROPOSAL_NOT_CREATED_REPLY = (
 _PROPOSAL_REJECTED_SAFE_ANSWER_REASON = (
     "proposal_creation_rejected_safe_answer"
 )
+_SUPPORTED_PLAN_MUTATION_FIELDS = frozenset({
+    "schedule.duration_weeks",
+    "schedule.days_per_week",
+    "exercise.sets",
+    "exercise.reps",
+    "exercise.rest_seconds",
+    "exercise.recommended_weight_kg",
+})
 
 
 def _explicit_proposal_created_reply(
@@ -104,6 +122,32 @@ def _explicit_proposal_created_reply(
     return (
         f"已按你的明确要求生成待确认提案：计划周期将从{before_weeks}周"
         f"调整为{after_weeks}周，其他内容保持不变。当前计划尚未修改，"
+        "请查看详情后确认。"
+    )
+
+
+def _mutation_proposal_created_reply(built: Any) -> str:
+    payload = built.payload
+    change = payload.changes[0]
+    if change.change_type == "update_plan_schedule":
+        if "days_per_week" in change.before.model_fields_set:
+            summary = (
+                f"每周训练频率将从{change.before.days_per_week}天调整为"
+                f"{change.after.days_per_week}天"
+            )
+        else:
+            summary = (
+                f"计划周期将从{change.before.duration_weeks}周调整为"
+                f"{change.after.duration_weeks}周"
+            )
+    else:
+        exercise = next(
+            item for item in payload.before.exercises
+            if item.slot_key == change.stable_display_key
+        )
+        summary = f"将调整{exercise.exercise_name}的训练目标"
+    return (
+        f"已按你的要求生成待确认提案：{summary}。当前计划尚未修改，"
         "请查看详情后确认。"
     )
 
@@ -655,8 +699,8 @@ async def execute_agent_run(
             pending_clarification=(conversation.pending_clarification or None),
         )
         resolution = intent_outcome.resolution
-        explicit_adjustment_command = (
-            parse_explicit_plan_adjustment_command(user_message)
+        legacy_explicit_command = parse_explicit_plan_adjustment_command(
+            user_message
         )
         legacy_tool_allowlist = route_tools(resolution)
         if shadow_session is not None:
@@ -678,6 +722,12 @@ async def execute_agent_run(
         )
         run.status = "running"
         run.primary_intent = resolution.primary_intent
+        run.intent_domain = resolution.intent_domain or "general"
+        run.request_kind = resolution.request_kind
+        run.requested_effect = resolution.requested_effect
+        run.change_requests = [
+            item.model_dump(mode="json") for item in resolution.change_requests
+        ]
         run.resolved_query = resolution.resolved_query
         run.references = [item.model_dump() for item in resolution.references]
         run.expanded_intents = resolution.expanded_intents
@@ -689,7 +739,7 @@ async def execute_agent_run(
         run.risk_level = resolution.risk_level
         run.clarification_required = resolution.clarification_required
         run.clarification_question = resolution.clarification_question
-        run.understanding_version = "v2"
+        run.understanding_version = "v3"
         run.intent_source = intent_outcome.source
         run.intent_confidence = resolution.confidence
         run.intent_attempt_count = intent_outcome.attempt_count
@@ -708,13 +758,20 @@ async def execute_agent_run(
                     item.model_dump() for item in resolution.references
                 ],
                 "primary_intent": resolution.primary_intent,
+                "intent_domain": resolution.intent_domain,
+                "request_kind": resolution.request_kind,
+                "requested_effect": resolution.requested_effect,
+                "change_requests": [
+                    item.model_dump(mode="json")
+                    for item in resolution.change_requests
+                ],
                 "expanded_intents": resolution.expanded_intents,
                 "subtasks": resolution.subtasks,
                 "missing_slots": resolution.missing_slots,
                 "clarification_question": resolution.clarification_question,
                 "risk_level": resolution.risk_level,
                 "confidence": resolution.confidence,
-                "understanding_version": "v2",
+                "understanding_version": "v3",
             }
         else:
             conversation.pending_clarification = {}
@@ -724,6 +781,80 @@ async def execute_agent_run(
             expected_attempt_count=expected_attempt_count,
         )
         await db.commit()
+
+        async def complete_semantic_short_circuit(
+            reply: str,
+            *,
+            terminal_action: str = "answer",
+            termination_reason: str,
+            content_data: dict[str, Any] | None = None,
+            missing_slots: list[str] | None = None,
+        ) -> AgentRuntimeResult:
+            nonlocal execution_trace
+            execution_trace = terminate_execution_trace(
+                execution_trace,
+                terminal_action=terminal_action,
+                termination_reason=termination_reason,
+            ).model_copy(update={
+                "mode_reasons": [
+                    *execution_trace.mode_reasons,
+                    termination_reason,
+                ][-8:],
+            })
+            execution_trace = _finalize_registry_shadow_trace(
+                execution_trace,
+                shadow_session,
+            )
+            await _lock_run_ownership(
+                db,
+                run_id=run.id,
+                expected_attempt_count=expected_attempt_count,
+            )
+            db.add(AgentMessage(
+                conversation_id=conversation.id,
+                run_id=run.id,
+                role="assistant",
+                content=reply,
+                content_data=content_data or {},
+            ))
+            now = datetime.now(timezone.utc)
+            run.status = "completed"
+            run.completed_at = now
+            run.duration_ms = round((time.perf_counter() - started) * 1000)
+            run.lease_expires_at = None
+            run.execution_trace = execution_trace.model_dump(mode="json")
+            if terminal_action == "clarify":
+                slots = missing_slots or ["要处理的具体对象"]
+                run.clarification_required = True
+                run.clarification_question = reply
+                run.missing_slots = slots
+                conversation.pending_clarification = {
+                    "origin_run_id": run.id,
+                    "original_message": user_message,
+                    "resolved_query": resolution.resolved_query,
+                    "primary_intent": resolution.primary_intent,
+                    "intent_domain": resolution.intent_domain,
+                    "request_kind": resolution.request_kind,
+                    "requested_effect": resolution.requested_effect,
+                    "change_requests": [
+                        item.model_dump(mode="json")
+                        for item in resolution.change_requests
+                    ],
+                    "missing_slots": slots,
+                    "clarification_question": reply,
+                    "risk_level": resolution.risk_level,
+                    "confidence": resolution.confidence,
+                    "understanding_version": "v3",
+                }
+            else:
+                conversation.pending_clarification = {}
+            conversation.updated_at = now
+            await db.commit()
+            return AgentRuntimeResult(
+                reply=reply,
+                run_id=run.id,
+                execution_trace=execution_trace,
+            )
 
         if resolution.risk_level == "high" or resolution.clarification_required:
             reply = (
@@ -780,6 +911,134 @@ async def execute_agent_run(
                 run_id=run.id,
                 execution_trace=execution_trace,
             )
+
+        if resolution.request_kind == "proposal_decision":
+            decision_values = {
+                str(change.value)
+                for change in resolution.change_requests
+                if change.field_path == "proposal.status"
+                and change.value in {"confirm", "reject"}
+            }
+            if len(decision_values) != 1:
+                return await complete_semantic_short_circuit(
+                    "请明确告诉我是确认还是拒绝当前待确认的调整提案。",
+                    terminal_action="clarify",
+                    termination_reason="proposal_decision_action_ambiguous",
+                    missing_slots=["提案决策动作"],
+                )
+            action = decision_values.pop()
+            pending = list((await db.execute(
+                select(AgentProposal)
+                .where(
+                    AgentProposal.user_id == run.user_id,
+                    AgentProposal.conversation_id == conversation.id,
+                    AgentProposal.proposal_type == "plan_adjustment_v1",
+                    AgentProposal.status == "pending_confirmation",
+                )
+                .order_by(AgentProposal.created_at.desc())
+                .limit(2)
+            )).scalars().all())
+            if len(pending) != 1:
+                reply = (
+                    "当前会话没有待确认的训练计划调整提案，请先发起一次明确的计划调整。"
+                    if not pending
+                    else "当前会话有多个待确认提案，请打开提案详情选择要处理的那一个。"
+                )
+                return await complete_semantic_short_circuit(
+                    reply,
+                    terminal_action="clarify",
+                    termination_reason=(
+                        "proposal_decision_candidate_missing"
+                        if not pending
+                        else "proposal_decision_candidate_ambiguous"
+                    ),
+                    missing_slots=["要处理的调整提案"],
+                )
+            proposal = pending[0]
+            request = PlanAdjustmentProposalDecisionRequest(
+                expected_version=proposal.version,
+                client_request_id=f"agent-chat-decision:{run.id}:{action}",
+            )
+            now = datetime.now(timezone.utc)
+            decision_result = (
+                await apply_confirmed_plan_adjustment_atomically(
+                    db,
+                    enabled=settings.AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED,
+                    user_id=run.user_id,
+                    proposal_id=proposal.id,
+                    request=request,
+                    now=now,
+                )
+                if action == "confirm"
+                else await decide_plan_adjustment_proposal(
+                    db,
+                    enabled=settings.AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED,
+                    user_id=run.user_id,
+                    proposal_id=proposal.id,
+                    action="reject",
+                    request=request,
+                    now=now,
+                )
+            )
+            if decision_result.error is not None:
+                reply = (
+                    f"{decision_result.error.message}当前训练计划未发生额外修改。"
+                )
+                status_value = decision_result.error.code
+            else:
+                reply = (
+                    "已确认并应用调整，新的训练计划现已生效。"
+                    if action == "confirm"
+                    else "已拒绝这份调整提案，当前训练计划保持不变。"
+                )
+                status_value = (
+                    decision_result.response.status
+                    if decision_result.response is not None
+                    else "completed"
+                )
+            return await complete_semantic_short_circuit(
+                reply,
+                termination_reason="proposal_decision_completed",
+                content_data={
+                    "proposal_decision": {
+                        "proposal_id": proposal.id,
+                        "action": action,
+                        "status": status_value,
+                    }
+                },
+            )
+
+        if resolution.request_kind == "mutation":
+            plan_mutation_supported = (
+                resolution.intent_domain == "workout_plan"
+                and resolution.requested_effect == "update"
+                and bool(resolution.change_requests)
+                and all(
+                    change.resource == "workout_plan"
+                    and change.operation == "update"
+                    and change.field_path in _SUPPORTED_PLAN_MUTATION_FIELDS
+                    and change.preserve_unspecified
+                    for change in resolution.change_requests
+                )
+            )
+            if not plan_mutation_supported:
+                return await complete_semantic_short_circuit(
+                    "我识别到了写入请求，但这类操作目前还不能执行，当前数据未作修改。",
+                    termination_reason="mutation_capability_unsupported",
+                )
+            if not settings.AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED:
+                return await complete_semantic_short_circuit(
+                    "训练计划调整提案功能暂时未开启，当前计划未作修改。",
+                    termination_reason="proposal_feature_disabled",
+                )
+            if (
+                not settings.AGENT_PLANNED_EXECUTION_ENABLED
+                or tool_allowlist != ["plan.get_active"]
+            ):
+                return await complete_semantic_short_circuit(
+                    "训练计划调整所需的安全读取链路暂时不可用，当前计划未作修改。",
+                    termination_reason="mutation_read_route_unavailable",
+                )
 
         if (
             execution_trace.execution_mode == "planned"
@@ -851,6 +1110,10 @@ async def execute_agent_run(
                 proposal_creation_enabled=(
                     settings.AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED
                 ),
+                force_adjustment_proposal=(
+                    resolution.request_kind == "mutation"
+                    and resolution.intent_domain == "workout_plan"
+                ),
             )
             execution_trace = planned_result.execution_trace
             execution_trace = _finalize_registry_shadow_trace(
@@ -874,13 +1137,20 @@ async def execute_agent_run(
                         item.model_dump() for item in resolution.references
                     ],
                     "primary_intent": resolution.primary_intent,
+                    "intent_domain": resolution.intent_domain,
+                    "request_kind": resolution.request_kind,
+                    "requested_effect": resolution.requested_effect,
+                    "change_requests": [
+                        item.model_dump(mode="json")
+                        for item in resolution.change_requests
+                    ],
                     "expanded_intents": resolution.expanded_intents,
                     "subtasks": resolution.subtasks,
                     "missing_slots": planned_result.missing_slots,
                     "clarification_question": reply,
                     "risk_level": resolution.risk_level,
                     "confidence": resolution.confidence,
-                    "understanding_version": "v2",
+                    "understanding_version": "v3",
                 }
             elif execution_trace.terminal_action == "safe_stop":
                 run.risk_level = "high"
@@ -909,7 +1179,11 @@ async def execute_agent_run(
                     clarification_required=run.clarification_required,
                     observations=planned_result.proposal_observations,
                     proposal_draft=planned_result.proposal_draft,
-                    explicit_adjustment_command=explicit_adjustment_command,
+                    change_requests=(
+                        resolution.change_requests
+                        if resolution.request_kind == "mutation"
+                        else None
+                    ),
                     created_at=datetime.now(timezone.utc),
                 )
                 execution_trace = attach_proposal_creation_decision(
@@ -971,16 +1245,27 @@ async def execute_agent_run(
                     )
             if (
                 proposal_reference is not None
-                and explicit_adjustment_command is not None
+                and legacy_explicit_command is not None
             ):
                 reply = _explicit_proposal_created_reply(
-                    before_weeks=(
-                        explicit_adjustment_command.expected_duration_weeks
-                    ),
-                    after_weeks=(
-                        explicit_adjustment_command.target_duration_weeks
-                    ),
+                    before_weeks=legacy_explicit_command.expected_duration_weeks,
+                    after_weeks=legacy_explicit_command.target_duration_weeks,
                 )
+            elif (
+                proposal_reference is not None
+                and resolution.request_kind == "mutation"
+                and runtime_proposal is not None
+                and runtime_proposal.built is not None
+            ):
+                reply = _mutation_proposal_created_reply(
+                    runtime_proposal.built
+                )
+            elif (
+                resolution.request_kind == "mutation"
+                and runtime_proposal is not None
+                and runtime_proposal.reply
+            ):
+                reply = runtime_proposal.reply
             reply, execution_trace = _normalize_unpersisted_proposal_result(
                 reply=reply,
                 execution_trace=execution_trace,
@@ -989,9 +1274,16 @@ async def execute_agent_run(
                 ),
                 proposal_reference=proposal_reference,
                 proposal_expected=(
-                    explicit_adjustment_command is not None
+                    resolution.request_kind == "mutation"
                 ),
             )
+            if (
+                proposal_reference is None
+                and resolution.request_kind == "mutation"
+                and runtime_proposal is not None
+                and runtime_proposal.reply
+            ):
+                reply = runtime_proposal.reply
             message_content_data: dict[str, Any] = {}
             if cards:
                 message_content_data["cards"] = cards
@@ -1077,7 +1369,7 @@ async def execute_agent_run(
             ),
             proposal_reference=None,
             proposal_expected=(
-                explicit_adjustment_command is not None
+                resolution.request_kind == "mutation"
             ),
         )
         await _lock_run_ownership(

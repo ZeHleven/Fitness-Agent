@@ -41,6 +41,9 @@ PlanAdjustmentProposalCreationReasonCode = Literal[
     "proposal_frequency_restructure_unsupported",
     "proposal_candidate_build_invalid",
     "proposal_target_ambiguous",
+    "proposal_operation_unsupported",
+    "proposal_target_value_required",
+    "proposal_no_change",
     "proposal_type_not_allowed",
     "proposal_ttl_out_of_range",
 ]

@@ -1,3 +1,4 @@
+from app.models.agent import AgentRun
 from app.models.exercise import Exercise
 from app.models.food import Food
 from app.models.knowledge import KnowledgeChunk
@@ -39,3 +40,12 @@ def test_knowledge_chunk_model_fields():
     )
     assert k.topic == "渐进超负荷"
     assert k.embedding is None
+
+
+def test_agent_run_persists_v3_intent_semantics():
+    columns = AgentRun.__table__.columns
+
+    assert "intent_domain" in columns
+    assert "request_kind" in columns
+    assert "requested_effect" in columns
+    assert "change_requests" in columns

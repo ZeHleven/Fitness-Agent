@@ -185,5 +185,78 @@
     "forbidden_tools": ["workout.get_progress", "workout.list_history"],
     "clarification_required": true,
     "risk_level": "low"
+  },
+  {
+    "id": "plan_frequency_read_contrast",
+    "message": "我每周练几天？",
+    "expected_primary": "plan_query",
+    "expected_domain": "workout_plan",
+    "expected_request_kind": "query",
+    "expected_effect": "read",
+    "allowed_tools": ["plan.get_active"],
+    "forbidden_tools": ["workout.get_progress"],
+    "risk_level": "low"
+  },
+  {
+    "id": "plan_frequency_mutation_paraphrase",
+    "message": "把我的训练计划调整为每周 3 天",
+    "expected_primary": "plan_query",
+    "expected_domain": "workout_plan",
+    "expected_request_kind": "mutation",
+    "expected_effect": "update",
+    "expected_change_field": "schedule.days_per_week",
+    "expected_change_value": 3,
+    "allowed_tools": ["plan.get_active"],
+    "forbidden_tools": ["workout.get_progress", "profile.get_summary"],
+    "risk_level": "low"
+  },
+  {
+    "id": "three_day_plan_advice_not_mutation",
+    "message": "怎样安排三天训练？",
+    "expected_primary": "general_qa",
+    "expected_domain": "general",
+    "expected_request_kind": "query",
+    "expected_effect": "read",
+    "allowed_tools": [],
+    "forbidden_tools": ["plan.get_active"],
+    "risk_level": "low"
+  },
+  {
+    "id": "plan_frequency_missing_target",
+    "message": "把训练频率降低一点",
+    "expected_primary": "plan_query",
+    "expected_domain": "workout_plan",
+    "expected_request_kind": "mutation",
+    "expected_effect": "update",
+    "expected_change_field": "schedule.days_per_week",
+    "expected_change_value": null,
+    "allowed_tools": [],
+    "forbidden_tools": ["plan.get_active"],
+    "clarification_required": true,
+    "risk_level": "low"
+  },
+  {
+    "id": "plan_delete_recognized_unsupported",
+    "message": "删除这个训练计划",
+    "expected_primary": "plan_query",
+    "expected_domain": "workout_plan",
+    "expected_request_kind": "mutation",
+    "expected_effect": "delete",
+    "allowed_tools": [],
+    "forbidden_tools": ["plan.get_active"],
+    "risk_level": "low"
+  },
+  {
+    "id": "proposal_chat_confirm",
+    "message": "确认刚才的调整",
+    "expected_primary": "plan_query",
+    "expected_domain": "workout_plan",
+    "expected_request_kind": "proposal_decision",
+    "expected_effect": "decide",
+    "expected_change_field": "proposal.status",
+    "expected_change_value": "confirm",
+    "allowed_tools": [],
+    "forbidden_tools": ["plan.get_active"],
+    "risk_level": "low"
   }
 ]

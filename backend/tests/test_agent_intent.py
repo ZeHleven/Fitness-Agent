@@ -205,3 +205,135 @@ def test_plain_plan_question_does_not_become_a_proposal_candidate():
     assert resolution.primary_intent == "plan_query"
     assert resolution.subtasks == ["查询并回答：plan_query"]
     assert route_tools(resolution) == ["plan.get_active"]
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "把我的训练计划调整为每周 3 天",
+        "请将当前计划改成一周练三天",
+        "我的计划每周训练天数设为3天",
+        "可以把我的计划改成每周三天吗？",
+    ],
+)
+def test_plan_frequency_paraphrases_share_structured_mutation_semantics(message):
+    resolution = resolve_intent(message)
+
+    assert resolution.intent_domain == "workout_plan"
+    assert resolution.request_kind == "mutation"
+    assert resolution.requested_effect == "update"
+    assert [item.model_dump() for item in resolution.change_requests] == [{
+        "resource": "workout_plan",
+        "operation": "update",
+        "field_path": "schedule.days_per_week",
+        "target_reference": None,
+        "value": 3,
+        "preserve_unspecified": True,
+    }]
+    assert route_tools(resolution) == ["plan.get_active"]
+
+
+def test_read_advice_and_mutation_frequency_requests_are_not_conflated():
+    read = resolve_intent("我每周练几天？")
+    advice = resolve_intent("怎样安排三天训练？")
+    mutation = resolve_intent("把训练计划改成每周三天")
+
+    assert (read.request_kind, read.requested_effect) == ("query", "read")
+    assert route_tools(read) == ["plan.get_active"]
+    assert (advice.request_kind, advice.requested_effect) == ("query", "read")
+    assert advice.change_requests == []
+    assert (mutation.request_kind, mutation.requested_effect) == (
+        "mutation",
+        "update",
+    )
+
+
+def test_qualitative_plan_mutation_requires_a_concrete_target():
+    resolution = resolve_intent("把训练频率降低一点")
+
+    assert resolution.request_kind == "mutation"
+    assert resolution.change_requests[0].field_path == "schedule.days_per_week"
+    assert resolution.change_requests[0].value is None
+    assert resolution.clarification_required is True
+    assert "目标值" in resolution.missing_slots[0]
+    assert route_tools(resolution) == []
+
+
+@pytest.mark.parametrize(
+    ("message", "field_path", "target_reference", "value"),
+    [
+        ("把计划周期改成8周", "schedule.duration_weeks", None, 8),
+        ("把高脚杯深蹲组数改成3组", "exercise.sets", "高脚杯深蹲", 3),
+        ("将深蹲每组次数调整为10-12次", "exercise.reps", "深蹲", "10-12"),
+        ("把深蹲休息时间改成90秒", "exercise.rest_seconds", "深蹲", 90),
+        (
+            "把深蹲重量改为30公斤",
+            "exercise.recommended_weight_kg",
+            "深蹲",
+            30.0,
+        ),
+    ],
+)
+def test_supported_plan_targets_are_extracted_as_structured_changes(
+    message,
+    field_path,
+    target_reference,
+    value,
+):
+    resolution = resolve_intent(message)
+
+    assert resolution.request_kind == "mutation"
+    assert resolution.requested_effect == "update"
+    assert resolution.clarification_required is False
+    assert len(resolution.change_requests) == 1
+    change = resolution.change_requests[0]
+    assert change.field_path == field_path
+    assert change.target_reference == target_reference
+    assert change.value == value
+    assert route_tools(resolution) == ["plan.get_active"]
+
+
+def test_unsupported_write_is_recognized_without_becoming_a_read():
+    resolution = resolve_intent("删除这个训练计划")
+
+    assert resolution.intent_domain == "workout_plan"
+    assert resolution.request_kind == "mutation"
+    assert resolution.requested_effect == "delete"
+    assert resolution.clarification_required is False
+    assert route_tools(resolution) == []
+
+
+@pytest.mark.parametrize(
+    ("message", "domain", "effect"),
+    [
+        ("更新我的个人资料", "profile", "update"),
+        ("新增一条饮食记录", "nutrition", "create"),
+        ("删除最近的训练记录", "workout_history", "delete"),
+    ],
+)
+def test_other_domain_crud_is_recognized_but_not_authorized(message, domain, effect):
+    resolution = resolve_intent(message)
+
+    assert resolution.intent_domain == domain
+    assert resolution.request_kind == "mutation"
+    assert resolution.requested_effect == effect
+    assert resolution.clarification_required is False
+    assert route_tools(resolution) == []
+
+
+@pytest.mark.parametrize(
+    ("message", "expected_action"),
+    [
+        ("确认刚才的调整", "confirm"),
+        ("拒绝这个方案", "reject"),
+    ],
+)
+def test_natural_language_proposal_decision_is_structured(message, expected_action):
+    resolution = resolve_intent(message)
+
+    assert resolution.intent_domain == "workout_plan"
+    assert resolution.request_kind == "proposal_decision"
+    assert resolution.requested_effect == "decide"
+    assert resolution.change_requests[0].field_path == "proposal.status"
+    assert resolution.change_requests[0].value == expected_action
+    assert route_tools(resolution) == []

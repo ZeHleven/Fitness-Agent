@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -17,6 +17,38 @@ IntentName = Literal[
     "workout_history_query",
     "workout_progress_query",
 ]
+
+IntentDomain = Literal[
+    "general",
+    "profile",
+    "health",
+    "workout_plan",
+    "workout_session",
+    "workout_history",
+    "workout_progress",
+    "nutrition",
+]
+RequestKind = Literal["query", "assessment", "mutation", "proposal_decision"]
+RequestedEffect = Literal["read", "create", "update", "delete", "decide"]
+ChangeOperation = Literal["create", "update", "delete"]
+
+
+class ChangeRequest(BaseModel):
+    """Untrusted semantic change request produced by the understanding layer.
+
+    This is deliberately domain-generic. A separate server-owned capability
+    compiler decides whether a request is executable and converts it to a
+    narrow Proposal draft.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    resource: IntentDomain
+    operation: ChangeOperation
+    field_path: str | None = Field(default=None, max_length=120)
+    target_reference: str | None = Field(default=None, max_length=120)
+    value: Any = None
+    preserve_unspecified: bool = True
 
 
 class ResolvedReference(BaseModel):
@@ -43,6 +75,10 @@ class IntentResolution(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     primary_intent: IntentName
+    intent_domain: IntentDomain | None = None
+    request_kind: RequestKind = "query"
+    requested_effect: RequestedEffect = "read"
+    change_requests: list[ChangeRequest] = Field(default_factory=list, max_length=12)
     resolved_query: str = Field(default="", max_length=4000)
     references: list[ResolvedReference] = Field(default_factory=list, max_length=12)
     expanded_intents: list[IntentName] = Field(default_factory=list, max_length=7)
@@ -52,6 +88,12 @@ class IntentResolution(BaseModel):
     clarification_question: str | None = Field(default=None, max_length=500)
     risk_level: Literal["low", "medium", "high"] = "low"
     confidence: float = Field(ge=0, le=1)
+
+    @model_validator(mode="after")
+    def fill_compatible_semantics(self) -> "IntentResolution":
+        if self.intent_domain is None:
+            self.intent_domain = _DOMAIN_BY_INTENT[self.primary_intent]
+        return self
 
 
 class ExplicitPlanAdjustmentCommand(BaseModel):
@@ -297,6 +339,382 @@ _CANONICAL_QUERY_BY_INTENT: dict[IntentName, str] = {
     "workout_progress_query": "查询我的训练进度",
 }
 
+_DOMAIN_BY_INTENT: dict[IntentName, IntentDomain] = {
+    "general_qa": "general",
+    "profile_query": "profile",
+    "health_query": "health",
+    "plan_query": "workout_plan",
+    "next_workout_query": "workout_session",
+    "active_workout_query": "workout_session",
+    "workout_history_query": "workout_history",
+    "workout_progress_query": "workout_progress",
+}
+
+_INTENT_BY_DOMAIN: dict[IntentDomain, IntentName] = {
+    "general": "general_qa",
+    "profile": "profile_query",
+    "health": "health_query",
+    "workout_plan": "plan_query",
+    "workout_session": "active_workout_query",
+    "workout_history": "workout_history_query",
+    "workout_progress": "workout_progress_query",
+    "nutrition": "general_qa",
+}
+
+_CHINESE_DIGITS = {
+    "一": 1,
+    "二": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
+    "十一": 11,
+    "十二": 12,
+}
+
+_MUTATION_VERB_PATTERN = re.compile(
+    r"(?:调整|修改|更新|改成|改为|改到|设成|设为|设置|增加|新增|"
+    r"新建|添加|写入|录入|减少|降低|调低|调高|降一点|缩短|延长|"
+    r"删除|移除|替换|制定|创建|保存|记录|开始|完成)"
+)
+_CREATE_VERB_PATTERN = re.compile(r"(?:新增|新建|添加|制定|创建|写入|录入)")
+_DELETE_VERB_PATTERN = re.compile(r"(?:删除|移除)")
+_HOW_TO_PREFIX_PATTERN = re.compile(r"^(?:怎样|怎么|如何|应该怎样|应该怎么)")
+_CONFIRM_DECISION_PATTERN = re.compile(r"(?<!待)(?:确认|同意|接受|应用|执行)")
+_REJECT_DECISION_PATTERN = re.compile(r"(?:拒绝|不同意|取消|放弃)")
+_PROPOSAL_REFERENCE_PATTERN = re.compile(
+    r"(?:提案|方案|调整|改动|变更|刚才|上一个|这个)"
+)
+_PLAN_DOMAIN_PATTERN = re.compile(
+    r"(?:训练计划|当前计划|我的计划|计划周期|训练频率|训练天数|"
+    r"每周.{0,6}(?:天|次)|\d{1,2}组|组数|每组|次数|休息|重量|公斤|kg)"
+)
+_PROFILE_DOMAIN_PATTERN = re.compile(
+    r"(?:个人资料|我的资料|身高|体重|训练目标|训练偏好|训练经验)"
+)
+_NUTRITION_DOMAIN_PATTERN = re.compile(
+    r"(?:饮食|营养|餐食|早餐|午餐|晚餐|热量|蛋白质)"
+)
+_SESSION_DOMAIN_PATTERN = re.compile(
+    r"(?:这次训练|当前训练|进行中的训练|训练组|开始训练|完成训练|保存训练|记录训练)"
+)
+_HISTORY_DOMAIN_PATTERN = re.compile(r"(?:训练历史|训练记录|过去训练|最近练过)")
+_PROGRESS_DOMAIN_PATTERN = re.compile(r"(?:训练进度|周进度|完成率|训练量|容量趋势)")
+_ASSESSMENT_PATTERN = re.compile(
+    r"(?:评估|分析|是否适合|合不合适|太激进|完成情况|执行情况)"
+)
+
+_FREQUENCY_TARGET_PATTERNS = (
+    re.compile(
+        r"(?:每周|一周)\s*(?:训练|练)?\s*"
+        r"(?P<value>[1-7一二三四五六七])\s*(?:天|次)"
+    ),
+    re.compile(
+        r"(?:训练频率|训练天数|每周天数).{0,12}?"
+        r"(?P<value>[1-7一二三四五六七])\s*(?:天|次)"
+    ),
+)
+_DURATION_TARGET_PATTERN = re.compile(
+    r"(?P<value>\d{1,2}|十一|十二|[一二三四五六七八九十])\s*周"
+)
+_EXERCISE_REFERENCE_PATTERNS = (
+    re.compile(
+        r"(?:把|将)\s*(?P<name>[\u4e00-\u9fffA-Za-z0-9·_-]{1,30}?)"
+        r"(?:的)?(?:组数|次数|每组|休息(?:时间)?|重量|调整|修改|改|设)"
+    ),
+    re.compile(
+        r"(?P<name>[\u4e00-\u9fffA-Za-z0-9·_-]{1,30}?)(?:的)?"
+        r"(?:组数|每组次数|休息时间|训练重量)"
+    ),
+)
+
+
+def _semantic_number(raw: str) -> int | None:
+    if raw.isdigit():
+        return int(raw)
+    return _CHINESE_DIGITS.get(raw)
+
+
+def _infer_domain(message: str, fallback_intent: IntentName) -> IntentDomain:
+    normalized = message.strip().lower()
+    if contains_health_red_flag(message) or any(
+        keyword in normalized for keyword in _INTENT_KEYWORDS[0][1]
+    ):
+        return "health"
+    if _PLAN_DOMAIN_PATTERN.search(normalized):
+        return "workout_plan"
+    if _PROFILE_DOMAIN_PATTERN.search(normalized):
+        return "profile"
+    if _NUTRITION_DOMAIN_PATTERN.search(normalized):
+        return "nutrition"
+    if _SESSION_DOMAIN_PATTERN.search(normalized):
+        return "workout_session"
+    if _HISTORY_DOMAIN_PATTERN.search(normalized):
+        return "workout_history"
+    if _PROGRESS_DOMAIN_PATTERN.search(normalized):
+        return "workout_progress"
+    return _DOMAIN_BY_INTENT[fallback_intent]
+
+
+def _proposal_decision_action(message: str) -> Literal["confirm", "reject"] | None:
+    normalized = message.strip().lower()
+    if not _PROPOSAL_REFERENCE_PATTERN.search(normalized):
+        return None
+    confirms = bool(_CONFIRM_DECISION_PATTERN.search(normalized))
+    rejects = bool(_REJECT_DECISION_PATTERN.search(normalized))
+    if confirms == rejects:
+        return None
+    return "confirm" if confirms else "reject"
+
+
+def _exercise_reference(message: str) -> str | None:
+    for pattern in _EXERCISE_REFERENCE_PATTERNS:
+        match = pattern.search(message)
+        if match is not None:
+            value = match.group("name").strip(" 的")
+            if value:
+                return value[:120]
+    return None
+
+
+def _extract_plan_change_requests(message: str) -> list[ChangeRequest]:
+    normalized = re.sub(r"\s+", "", message.strip().lower())
+    operation: ChangeOperation = (
+        "create"
+        if _CREATE_VERB_PATTERN.search(normalized)
+        else "delete"
+        if _DELETE_VERB_PATTERN.search(normalized)
+        else "update"
+    )
+    changes: list[ChangeRequest] = []
+
+    frequency_value: int | None = None
+    for pattern in _FREQUENCY_TARGET_PATTERNS:
+        match = pattern.search(normalized)
+        if match is not None:
+            frequency_value = _semantic_number(match.group("value"))
+            break
+    if frequency_value is not None or any(
+        marker in normalized
+        for marker in ("训练频率", "训练天数", "每周练", "每周训练")
+    ):
+        changes.append(ChangeRequest(
+            resource="workout_plan",
+            operation="update",
+            field_path="schedule.days_per_week",
+            value=frequency_value,
+        ))
+
+    if any(marker in normalized for marker in ("周期", "延长", "缩短")):
+        duration_values = [
+            _semantic_number(match.group("value"))
+            for match in _DURATION_TARGET_PATTERN.finditer(normalized)
+        ]
+        changes.append(ChangeRequest(
+            resource="workout_plan",
+            operation="update",
+            field_path="schedule.duration_weeks",
+            value=duration_values[-1] if duration_values else None,
+        ))
+
+    exercise_reference = _exercise_reference(message)
+    exercise_fields: tuple[tuple[str, re.Pattern[str]], ...] = (
+        ("exercise.sets", re.compile(r"(?P<value>\d{1,2})组")),
+        (
+            "exercise.reps",
+            re.compile(r"(?:每组)?(?P<value>\d{1,3}(?:[-~～至到]\d{1,3})?)次"),
+        ),
+        (
+            "exercise.rest_seconds",
+            re.compile(r"(?:休息(?:时间)?(?:改|调|设)?(?:成|为|到)?)?(?P<value>\d{1,3})秒"),
+        ),
+        (
+            "exercise.recommended_weight_kg",
+            re.compile(r"(?P<value>\d{1,3}(?:\.\d+)?)\s*(?:kg|公斤|千克)"),
+        ),
+    )
+    for field_path, pattern in exercise_fields:
+        field_marker = field_path.rsplit(".", 1)[-1]
+        marker_present = {
+            "sets": (
+                "组数" in normalized
+                or re.search(r"\d{1,2}组(?!次)", normalized) is not None
+            ),
+            "reps": "次数" in normalized or "每组" in normalized,
+            "rest_seconds": "休息" in normalized,
+            "recommended_weight_kg": (
+                "重量" in normalized or "kg" in normalized or "公斤" in normalized
+            ),
+        }[field_marker]
+        if not marker_present or frequency_value is not None and field_path == "exercise.reps":
+            continue
+        match = pattern.search(normalized)
+        value: Any = match.group("value") if match is not None else None
+        if value is not None:
+            if field_path in {"exercise.sets", "exercise.rest_seconds"}:
+                value = int(value)
+            elif field_path == "exercise.recommended_weight_kg":
+                value = float(value)
+            elif field_path == "exercise.reps":
+                value = re.sub(r"[~～至到]", "-", value)
+        changes.append(ChangeRequest(
+            resource="workout_plan",
+            operation="update",
+            field_path=field_path,
+            target_reference=exercise_reference,
+            value=value,
+        ))
+
+    if any(marker in normalized for marker in ("替换动作", "更换动作")):
+        changes.append(ChangeRequest(
+            resource="workout_plan",
+            operation="update",
+            field_path="exercises.replace",
+            target_reference=exercise_reference,
+        ))
+    elif any(marker in normalized for marker in ("新增动作", "添加动作")):
+        changes.append(ChangeRequest(
+            resource="workout_plan",
+            operation="create",
+            field_path="exercises",
+        ))
+    elif any(marker in normalized for marker in ("删除动作", "移除动作")):
+        changes.append(ChangeRequest(
+            resource="workout_plan",
+            operation="delete",
+            field_path="exercises",
+            target_reference=exercise_reference,
+        ))
+    elif any(marker in normalized for marker in ("新增训练日", "添加训练日")):
+        changes.append(ChangeRequest(
+            resource="workout_plan",
+            operation="create",
+            field_path="schedule.training_days",
+        ))
+    elif any(marker in normalized for marker in ("删除训练日", "移除训练日")):
+        changes.append(ChangeRequest(
+            resource="workout_plan",
+            operation="delete",
+            field_path="schedule.training_days",
+        ))
+
+    if not changes:
+        changes.append(ChangeRequest(
+            resource="workout_plan",
+            operation=operation,
+            field_path=None,
+        ))
+    return changes[:12]
+
+
+def _infer_request_semantics(
+    message: str,
+    *,
+    fallback_intent: IntentName,
+) -> tuple[
+    IntentDomain,
+    RequestKind,
+    RequestedEffect,
+    list[ChangeRequest],
+    list[str],
+    str | None,
+]:
+    normalized = message.strip().lower()
+    domain = _infer_domain(message, fallback_intent)
+    decision_action = _proposal_decision_action(message)
+    if decision_action is not None and not contains_health_red_flag(message):
+        return (
+            "workout_plan",
+            "proposal_decision",
+            "decide",
+            [ChangeRequest(
+                resource="workout_plan",
+                operation="update",
+                field_path="proposal.status",
+                target_reference="latest_pending_in_conversation",
+                value=decision_action,
+            )],
+            [],
+            None,
+        )
+
+    if _is_active_continuation_comparison(message):
+        return domain, "query", "read", [], [], None
+    if (
+        _ASSESSMENT_PATTERN.search(normalized)
+        and re.search(r"(?:是否|判断|看看|建议|评估|分析)", normalized)
+        and not re.search(
+            r"(?:改成|改为|改到|设成|设为|设置|增加|减少|降低|调低|"
+            r"调高|缩短|延长|删除|移除|替换)",
+            normalized,
+        )
+    ):
+        return domain, "assessment", "read", [], [], None
+
+    mutation_requested = bool(_MUTATION_VERB_PATTERN.search(normalized))
+    advice_or_question = bool(
+        _HOW_TO_PREFIX_PATTERN.search(normalized)
+        or re.search(
+            r"(?:怎样|怎么|如何|是否|能否|还能|应该|什么|多少|第几|"
+            r"哪里|哪一|吗[？?。]?$)",
+            normalized,
+        )
+    )
+    direct_polite_mutation = bool(re.search(
+        r"(?:把|将).{0,80}?"
+        r"(?:改成|改为|改到|设成|设为|设置为|调整为|调整到).{0,30}?"
+        r"(?:\d|[一二三四五六七八九十])",
+        normalized,
+    ))
+    if advice_or_question and not direct_polite_mutation and not re.search(
+        r"(?:请|帮我|替我|给我|直接帮我)", normalized
+    ):
+        mutation_requested = False
+    if mutation_requested and not contains_health_red_flag(message):
+        effect: RequestedEffect = (
+            "create"
+            if _CREATE_VERB_PATTERN.search(normalized)
+            else "delete"
+            if _DELETE_VERB_PATTERN.search(normalized)
+            else "update"
+        )
+        changes = (
+            _extract_plan_change_requests(message)
+            if domain == "workout_plan"
+            else [ChangeRequest(
+                resource=domain,
+                operation=effect,
+                field_path=None,
+            )]
+        )
+        missing_slots: list[str] = []
+        for change in changes:
+            if (
+                domain == "workout_plan"
+                and change.operation == "update"
+                and change.value is None
+            ):
+                missing_slots.append("计划调整的具体目标值")
+            if (
+                change.field_path is not None
+                and change.field_path.startswith("exercise.")
+                and change.target_reference is None
+            ):
+                missing_slots.append("要调整的动作名称")
+        missing_slots = list(dict.fromkeys(missing_slots))[:8]
+        question = None
+        if missing_slots:
+            question = f"请补充{'、'.join(missing_slots)}，我再为你生成待确认的调整提案。"
+        return domain, "mutation", effect, changes, missing_slots, question
+
+    if _ASSESSMENT_PATTERN.search(normalized):
+        return domain, "assessment", "read", [], [], None
+    return domain, "query", "read", [], [], None
+
 _CONTEXT_REFERENCE_MARKERS = (
     "那个",
     "这个",
@@ -316,7 +734,26 @@ def contains_health_red_flag(message: str) -> bool:
 
 def contains_unsupported_write_request(message: str) -> bool:
     normalized = message.strip().lower()
-    return any(keyword in normalized for keyword in _UNSUPPORTED_WRITE_KEYWORDS)
+    if any(keyword in normalized for keyword in _UNSUPPORTED_WRITE_KEYWORDS):
+        return True
+    fallback_intent: IntentName = "general_qa"
+    domain, request_kind, effect, changes, _, _ = _infer_request_semantics(
+        message,
+        fallback_intent=fallback_intent,
+    )
+    if request_kind != "mutation":
+        return False
+    if domain != "workout_plan" or effect != "update":
+        return True
+    supported = {
+        "schedule.duration_weeks",
+        "schedule.days_per_week",
+        "exercise.sets",
+        "exercise.reps",
+        "exercise.rest_seconds",
+        "exercise.recommended_weight_kg",
+    }
+    return any(change.field_path not in supported for change in changes)
 
 
 def _is_active_continuation_comparison(message: str) -> bool:
@@ -387,11 +824,22 @@ def is_explicit_plan_adjustment_request(message: str) -> bool:
 def is_explicit_plan_adjustment_resolution(
     resolution: IntentResolution,
 ) -> bool:
-    """Return whether normalized intent explicitly requests Proposal creation."""
+    """Backward-compatible name for an explicit workout-plan mutation."""
     return (
         resolution.primary_intent == "plan_query"
-        and _EXPLICIT_PROPOSAL_SUBTASK in resolution.subtasks
+        and resolution.intent_domain == "workout_plan"
+        and (
+            (
+                resolution.request_kind == "mutation"
+                and resolution.requested_effect == "update"
+            )
+            or _EXPLICIT_PROPOSAL_SUBTASK in resolution.subtasks
+        )
     )
+
+
+def is_plan_mutation_resolution(resolution: IntentResolution) -> bool:
+    return is_explicit_plan_adjustment_resolution(resolution)
 
 
 def _asks_personal_plan_fit(message: str) -> bool:
@@ -407,23 +855,33 @@ def resolve_intent(message: str) -> IntentResolution:
         if any(keyword in normalized for keyword in keywords):
             matched.append(intent)
 
-    if (
-        contains_unsupported_write_request(message)
-        and not is_explicit_plan_adjustment_request(message)
-        and "health_query" not in matched
-    ):
-        return IntentResolution(
-            primary_intent="general_qa",
-            resolved_query=message.strip(),
-            expanded_intents=[],
-            subtasks=["说明当前不能直接执行写操作"],
-            confidence=0.95,
-        )
-
     if contains_health_red_flag(message) and "health_query" not in matched:
         matched.insert(0, "health_query")
 
-    if (
+    fallback_intent = matched[0] if matched else "general_qa"
+    (
+        intent_domain,
+        request_kind,
+        requested_effect,
+        change_requests,
+        semantic_missing_slots,
+        semantic_question,
+    ) = _infer_request_semantics(message, fallback_intent=fallback_intent)
+
+    if request_kind in {"mutation", "proposal_decision"}:
+        matched = [
+            "general_qa"
+            if request_kind == "mutation"
+            and intent_domain != "workout_plan"
+            and any(
+                keyword in normalized for keyword in _UNSUPPORTED_WRITE_KEYWORDS
+            )
+            else _INTENT_BY_DOMAIN[intent_domain]
+        ]
+    elif not matched and intent_domain not in {"general", "nutrition"}:
+        matched = [_INTENT_BY_DOMAIN[intent_domain]]
+
+    if request_kind == "query" and (
         is_explicit_plan_adjustment_request(message)
         and "health_query" not in matched
     ):
@@ -448,9 +906,20 @@ def resolve_intent(message: str) -> IntentResolution:
     if not matched:
         return IntentResolution(
             primary_intent="general_qa",
+            intent_domain=intent_domain,
+            request_kind=request_kind,
+            requested_effect=requested_effect,
+            change_requests=change_requests,
             resolved_query=message.strip(),
             expanded_intents=[],
-            subtasks=["回答一般健身问题"],
+            subtasks=(
+                ["识别写入请求并进行能力校验"]
+                if request_kind == "mutation"
+                else ["回答一般健身问题"]
+            ),
+            missing_slots=semantic_missing_slots,
+            clarification_required=bool(semantic_missing_slots),
+            clarification_question=semantic_question,
             confidence=0.65,
         )
 
@@ -464,6 +933,16 @@ def resolve_intent(message: str) -> IntentResolution:
     )
     resolved_query = message.strip()
     subtasks = [f"查询并回答：{intent}" for intent in matched]
+    if request_kind == "mutation":
+        subtasks = (
+            ["读取当前训练计划", _EXPLICIT_PROPOSAL_SUBTASK]
+            if is_explicit_plan_adjustment_request(message)
+            else ["读取当前训练计划", "校验变更并形成待确认提案"]
+            if intent_domain == "workout_plan" and requested_effect == "update"
+            else ["识别写入请求并进行能力校验"]
+        )
+    elif request_kind == "proposal_decision":
+        subtasks = ["定位当前会话唯一待确认提案", "安全执行提案决策"]
     if (
         _is_active_continuation_comparison(message)
         and primary != "health_query"
@@ -495,9 +974,16 @@ def resolve_intent(message: str) -> IntentResolution:
         ])
     return IntentResolution(
         primary_intent=primary,
+        intent_domain=intent_domain,
+        request_kind=request_kind,
+        requested_effect=requested_effect,
+        change_requests=change_requests,
         resolved_query=resolved_query,
         expanded_intents=matched[1:],
         subtasks=subtasks,
+        missing_slots=semantic_missing_slots,
+        clarification_required=bool(semantic_missing_slots),
+        clarification_question=semantic_question,
         risk_level=risk_level,
         confidence=0.9 if len(matched) == 1 else 0.82,
     )
@@ -612,6 +1098,35 @@ def resolve_pending_clarification(
     if inherited is None:
         return None
 
+    if inherited.request_kind == "mutation":
+        original_message = str(
+            pending_clarification.get("original_message") or ""
+        ).strip()
+        combined = resolve_intent(
+            f"{original_message}，目标值是{message.strip()}"
+        )
+        if (
+            combined.request_kind == "mutation"
+            and not combined.clarification_required
+            and combined.change_requests
+        ):
+            return (
+                combined.model_copy(update={
+                    "resolved_query": (
+                        f"{inherited.resolved_query}；{slot}：{message.strip()}"
+                    )[:4000],
+                    "references": [*inherited.references, ResolvedReference(
+                        expression=message.strip()[:120],
+                        resolved_value=f"{slot}：{message.strip()}"[:500],
+                        reference_type="other",
+                        source="pending_clarification",
+                    )][:12],
+                    "confidence": min(max(combined.confidence, 0.72), 0.9),
+                }),
+                "clarification_filled",
+            )
+        return None
+
     references = [*inherited.references, ResolvedReference(
         expression=message.strip()[:120],
         resolved_value=f"{slot}：{message.strip()}"[:500],
@@ -645,6 +1160,12 @@ def pending_clarification_to_resolution(
         missing_slots = pending_clarification.get("missing_slots") or []
         return IntentResolution(
             primary_intent=primary_intent,
+            intent_domain=pending_clarification.get("intent_domain"),
+            request_kind=pending_clarification.get("request_kind") or "query",
+            requested_effect=(
+                pending_clarification.get("requested_effect") or "read"
+            ),
+            change_requests=pending_clarification.get("change_requests") or [],
             resolved_query=str(
                 pending_clarification.get("resolved_query")
                 or _CANONICAL_QUERY_BY_INTENT[primary_intent]
@@ -684,6 +1205,40 @@ def normalize_resolution(
     primary = resolution.primary_intent
     risk_level = resolution.risk_level
     rules_resolution = resolve_intent(message)
+    intent_domain = resolution.intent_domain or _DOMAIN_BY_INTENT[primary]
+    request_kind = resolution.request_kind
+    requested_effect = resolution.requested_effect
+    change_requests = list(resolution.change_requests)
+    if rules_resolution.request_kind in {"mutation", "proposal_decision"} and (
+        request_kind not in {"mutation", "proposal_decision"}
+        or not change_requests
+    ):
+        intent_domain = rules_resolution.intent_domain
+        request_kind = rules_resolution.request_kind
+        requested_effect = rules_resolution.requested_effect
+        change_requests = list(rules_resolution.change_requests)
+    elif (
+        rules_resolution.request_kind == "assessment"
+        and request_kind == "query"
+    ):
+        intent_domain = rules_resolution.intent_domain
+        request_kind = "assessment"
+        requested_effect = "read"
+        change_requests = []
+    elif request_kind in {"mutation", "proposal_decision"}:
+        primary = _INTENT_BY_DOMAIN[intent_domain]
+        expanded = []
+
+    if request_kind == "proposal_decision":
+        intent_domain = "workout_plan"
+        requested_effect = "decide"
+    elif request_kind == "mutation":
+        operations = {change.operation for change in change_requests}
+        if len(operations) == 1:
+            requested_effect = operations.pop()
+    else:
+        requested_effect = "read"
+        change_requests = []
     risk_rank = {"low": 0, "medium": 1, "high": 2}
     if risk_rank[rules_resolution.risk_level] > risk_rank[risk_level]:
         risk_level = rules_resolution.risk_level
@@ -693,13 +1248,6 @@ def normalize_resolution(
         and rules_resolution.primary_intent != "health_query"
     ):
         primary = "plan_query"
-        expanded = []
-    elif (
-        contains_unsupported_write_request(message)
-        and rules_resolution.primary_intent == "general_qa"
-        and rules_resolution.risk_level == "low"
-    ):
-        primary = "general_qa"
         expanded = []
     elif (
         _is_active_continuation_comparison(message)
@@ -730,6 +1278,10 @@ def normalize_resolution(
 
     if contains_health_red_flag(message):
         risk_level = "high"
+        intent_domain = "health"
+        request_kind = "query"
+        requested_effect = "read"
+        change_requests = []
         if primary != "health_query":
             if primary not in expanded:
                 expanded.insert(0, primary)
@@ -760,6 +1312,25 @@ def normalize_resolution(
             "判断现在应该继续上次训练还是开始下一练"
         )
         subtasks = ["检查活动训练", "必要时查询下一练"]
+    elif request_kind == "mutation" and primary != "health_query":
+        primary = (
+            "general_qa"
+            if intent_domain != "workout_plan"
+            and contains_unsupported_write_request(message)
+            else _INTENT_BY_DOMAIN[intent_domain]
+        )
+        expanded = []
+        subtasks = (
+            ["读取当前训练计划", _EXPLICIT_PROPOSAL_SUBTASK]
+            if is_explicit_plan_adjustment_request(message)
+            else ["读取当前训练计划", "校验变更并形成待确认提案"]
+            if intent_domain == "workout_plan" and requested_effect == "update"
+            else ["识别写入请求并进行能力校验"]
+        )
+    elif request_kind == "proposal_decision" and primary != "health_query":
+        primary = "plan_query"
+        expanded = []
+        subtasks = ["定位当前会话唯一待确认提案", "安全执行提案决策"]
     elif (
         is_explicit_plan_adjustment_request(message)
         and rules_resolution.primary_intent != "health_query"
@@ -780,8 +1351,39 @@ def normalize_resolution(
             "读取近期训练进度，失败时改查历史记录",
             "评估并形成待确认的调整建议",
         ])
+    semantic_missing_slots = (
+        rules_resolution.missing_slots
+        if request_kind == rules_resolution.request_kind
+        and rules_resolution.missing_slots
+        else []
+    )
+    supported_value_fields = {
+        "schedule.duration_weeks",
+        "schedule.days_per_week",
+        "exercise.sets",
+        "exercise.reps",
+        "exercise.rest_seconds",
+        "exercise.recommended_weight_kg",
+    }
+    if request_kind == "mutation":
+        for change in change_requests:
+            if (
+                change.operation == "update"
+                and change.field_path in supported_value_fields
+                and change.value is None
+            ):
+                semantic_missing_slots.append("计划调整的具体目标值")
+            if (
+                change.field_path is not None
+                and change.field_path.startswith("exercise.")
+                and change.field_path in supported_value_fields
+                and not change.target_reference
+            ):
+                semantic_missing_slots.append("要调整的动作名称")
     missing_slots = list(dict.fromkeys(
-        item.strip() for item in resolution.missing_slots if item.strip()
+        item.strip()
+        for item in [*resolution.missing_slots, *semantic_missing_slots]
+        if item.strip()
     ))[:8]
     clarification_required = bool(
         resolution.clarification_required or missing_slots
@@ -829,6 +1431,10 @@ def normalize_resolution(
     return IntentResolution.model_validate({
         **resolution.model_dump(),
         "primary_intent": primary,
+        "intent_domain": intent_domain,
+        "request_kind": request_kind,
+        "requested_effect": requested_effect,
+        "change_requests": change_requests,
         "expanded_intents": expanded,
         "risk_level": risk_level,
         "resolved_query": resolved_query,
@@ -858,6 +1464,15 @@ def route_tools(resolution: IntentResolution) -> list[str]:
     """Return a stable, deduplicated allowlist. Unknown tools can never be added."""
     if resolution.clarification_required or resolution.risk_level == "high":
         return []
+    if resolution.request_kind == "proposal_decision":
+        return []
+    if resolution.request_kind == "mutation":
+        return (
+            ["plan.get_active"]
+            if resolution.intent_domain == "workout_plan"
+            and resolution.requested_effect == "update"
+            else []
+        )
     routed: list[str] = []
     for intent in [resolution.primary_intent, *resolution.expanded_intents]:
         for tool_id in INTENT_TOOL_ALLOWLIST[intent]:

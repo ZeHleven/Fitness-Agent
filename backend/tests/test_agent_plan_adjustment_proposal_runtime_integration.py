@@ -47,6 +47,7 @@ _EXPLICIT_DURATION_PROPOSAL_MESSAGE = (
 class _ExecutableProposalSeed:
     token: str
     user_id: str
+    conversation_id: str
     proposal_id: str
     base_plan_id: str
     payload_fingerprint: str
@@ -121,6 +122,7 @@ async def _seed_active_plan(
     email: str,
     suffix: str,
     duration_weeks: int = 4,
+    days_per_week: int = 1,
 ) -> tuple[str, dict]:
     token = await _token(client, email)
     return token, {
@@ -128,17 +130,17 @@ async def _seed_active_plan(
         "name": "基础力量计划",
         "goal": "strength",
         "duration_weeks": duration_weeks,
-        "days_per_week": 1,
+        "days_per_week": days_per_week,
         "exercises": [{
             "exercise_id": f"proposal-runtime-exercise-{suffix}",
             "exercise_name": "高脚杯深蹲",
-            "day_of_week": 1,
+            "day_of_week": day_of_week,
             "sets": 4,
             "reps": "8-10",
             "rest_seconds": 120,
             "recommended_weight_kg": None,
             "order_index": 0,
-        }],
+        } for day_of_week in (1, 2, 4, 6)[:days_per_week]],
     }
 
 
@@ -419,6 +421,7 @@ async def _create_executable_proposal(
     return _ExecutableProposalSeed(
         token=token,
         user_id=user.id,
+        conversation_id=response.json()["conversation_id"],
         proposal_id=reference["id"],
         base_plan_id=base_plan.id,
         payload_fingerprint=reference["payload_fingerprint"],
@@ -754,6 +757,116 @@ async def test_explicit_single_read_adjustment_uses_planned_and_persists_proposa
 
 
 @pytest.mark.asyncio
+async def test_natural_language_frequency_mutation_persists_four_to_three_proposal(
+    client,
+    db_session,
+):
+    token, plan = await _seed_active_plan(
+        client,
+        email="proposal-runtime-natural-frequency@example.com",
+        suffix="natural-frequency",
+        duration_weeks=8,
+        days_per_week=4,
+    )
+    execute_planned = AsyncMock(return_value=_planned_result(
+        plan,
+        proposal_draft=None,
+        include_supporting_evidence=False,
+    ))
+
+    with (
+        patch.object(
+            settings,
+            "AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED",
+            True,
+        ),
+        patch("app.services.agent_runtime._build_model", return_value=object()),
+        patch(
+            "app.services.agent_runtime.execute_planned_agent",
+            new=execute_planned,
+        ),
+    ):
+        response = await client.post(
+            "/api/v1/agent/chat",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"message": "把我的训练计划调整为每周 3 天"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "proposal" in body
+    assert "每周训练频率将从4天调整为3天" in body["reply"]
+    proposal = await db_session.get(AgentProposal, body["proposal"]["id"])
+    assert proposal is not None
+    assert proposal.payload_data["before"]["days_per_week"] == 4
+    assert proposal.payload_data["after"]["days_per_week"] == 3
+    assert len(proposal.payload_data["after"]["exercises"]) == 3
+    assert {item["tool_id"] for item in proposal.payload_data["evidence"]} == {
+        "plan.get_active"
+    }
+
+    run_response = await client.get(
+        f"/api/v1/agent/runs/{body['run_id']}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    run_body = run_response.json()
+    assert run_body["understanding_version"] == "v3"
+    assert run_body["intent_domain"] == "workout_plan"
+    assert run_body["request_kind"] == "mutation"
+    assert run_body["requested_effect"] == "update"
+    assert run_body["change_requests"][0]["field_path"] == (
+        "schedule.days_per_week"
+    )
+    assert run_body["change_requests"][0]["value"] == 3
+
+
+@pytest.mark.asyncio
+async def test_natural_language_mutation_flag_off_is_classified_but_write_free(
+    client,
+    db_session,
+):
+    token, _ = await _seed_active_plan(
+        client,
+        email="proposal-runtime-natural-flag-off@example.com",
+        suffix="natural-flag-off",
+        days_per_week=4,
+    )
+    with (
+        patch.object(
+            settings,
+            "AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED",
+            False,
+        ),
+        patch(
+            "app.services.agent_runtime.invoke_langchain_agent",
+            new=AsyncMock(),
+        ) as invoke_direct,
+        patch(
+            "app.services.agent_runtime.execute_planned_agent",
+            new=AsyncMock(),
+        ) as execute_planned,
+    ):
+        response = await client.post(
+            "/api/v1/agent/chat",
+            headers=_headers(token),
+            json={"message": "把我的训练计划调整为每周 3 天"},
+        )
+
+    assert response.status_code == 200
+    assert "暂时未开启" in response.json()["reply"]
+    assert "proposal" not in response.json()
+    invoke_direct.assert_not_awaited()
+    execute_planned.assert_not_awaited()
+    run = await db_session.get(AgentRun, response.json()["run_id"])
+    assert run is not None
+    assert run.request_kind == "mutation"
+    proposal_count = await db_session.scalar(
+        select(func.count(AgentProposal.id)).where(AgentProposal.run_id == run.id)
+    )
+    assert proposal_count == 0
+
+
+@pytest.mark.asyncio
 async def test_explicit_adjustment_never_returns_fake_text_only_proposal(
     client,
 ):
@@ -1026,6 +1139,81 @@ async def test_e2e_runtime_create_read_reject_and_replay(
     assert len(plans) == 1
     assert plans[0].id == seeded.base_plan_id
     assert plans[0].is_active is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action_message", "expected_status", "expected_reply"),
+    [
+        ("确认刚才的调整", "applied", "已确认并应用调整"),
+        ("拒绝这个方案", "rejected", "已拒绝这份调整提案"),
+    ],
+)
+async def test_chat_decides_unique_pending_proposal_in_same_conversation(
+    client,
+    db_session,
+    action_message,
+    expected_status,
+    expected_reply,
+):
+    seeded = await _create_executable_proposal(
+        client,
+        db_session,
+        suffix=f"chat-decision-{expected_status}",
+    )
+
+    with patch.object(
+        settings,
+        "AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED",
+        True,
+    ):
+        response = await client.post(
+            "/api/v1/agent/chat",
+            headers=_headers(seeded.token),
+            json={
+                "message": action_message,
+                "conversation_id": seeded.conversation_id,
+            },
+        )
+
+    assert response.status_code == 200
+    assert expected_reply in response.json()["reply"]
+    db_session.expire_all()
+    proposal = await db_session.get(AgentProposal, seeded.proposal_id)
+    assert proposal is not None
+    assert proposal.status == expected_status
+    if expected_status == "applied":
+        assert proposal.result_plan_id is not None
+        active_plan_count = await db_session.scalar(
+            select(func.count())
+            .select_from(WorkoutPlan)
+            .where(
+                WorkoutPlan.user_id == seeded.user_id,
+                WorkoutPlan.is_active.is_(True),
+            )
+        )
+        assert active_plan_count == 1
+    else:
+        assert proposal.result_plan_id is None
+
+
+@pytest.mark.asyncio
+async def test_chat_proposal_decision_without_candidate_is_write_free(client):
+    token, _ = await _seed_active_plan(
+        client,
+        email="proposal-runtime-chat-decision-none@example.com",
+        suffix="chat-decision-none",
+    )
+
+    response = await client.post(
+        "/api/v1/agent/chat",
+        headers=_headers(token),
+        json={"message": "确认刚才的调整"},
+    )
+
+    assert response.status_code == 200
+    assert "没有待确认" in response.json()["reply"]
+    assert "proposal" not in response.json()
 
 
 @pytest.mark.asyncio
