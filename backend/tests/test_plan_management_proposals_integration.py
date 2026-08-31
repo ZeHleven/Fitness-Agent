@@ -65,7 +65,12 @@ async def _seed(db_session, suffix: str):
         days_per_week=2,
         is_active=True,
     )
-    db_session.add_all([user, profile, squat, row, plan])
+    # These models intentionally do not expose ORM relationships.  Flush the
+    # parent row first so PostgreSQL never observes a profile/plan foreign key
+    # before its user exists.
+    db_session.add(user)
+    await db_session.flush()
+    db_session.add_all([profile, squat, row, plan])
     await db_session.flush()
     db_session.add_all([
         PlannedExercise(
