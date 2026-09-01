@@ -558,6 +558,34 @@ async def test_deterministic_proposal_decision_overrides_model_mutation():
 
 
 @pytest.mark.asyncio
+async def test_deterministic_proposal_decision_fills_missing_model_action():
+    candidate = IntentResolution(
+        primary_intent="general_qa",
+        intent_domain="general",
+        request_kind="proposal_decision",
+        requested_effect="decide",
+        change_requests=[],
+        resolved_query="确认当前提案",
+        confidence=0.9,
+    )
+    with (
+        patch.object(settings, "DEEPSEEK_API_KEY", "test-key"),
+        patch(
+            "app.services.agent_intent_model._invoke_model_intent",
+            new=AsyncMock(return_value=candidate),
+        ),
+    ):
+        outcome = await resolve_intent_with_fallback(
+            "确认提交这份提案",
+            use_model=True,
+        )
+
+    assert outcome.resolution.request_kind == "proposal_decision"
+    assert outcome.resolution.change_requests[0].value == "confirm"
+    assert outcome.resolution.clarification_required is False
+
+
+@pytest.mark.asyncio
 async def test_plan_mutation_uses_model_first_and_safe_structured_fallback():
     with (
         patch.object(settings, "AGENT_RULES_FIRST_ENABLED", True),
@@ -575,11 +603,9 @@ async def test_plan_mutation_uses_model_first_and_safe_structured_fallback():
     assert invoked.await_count == 1
     assert outcome.source == "rules"
     assert outcome.resolution.request_kind == "mutation"
-    assert outcome.resolution.change_requests[0].field_path == (
-        "schedule.days_per_week"
-    )
-    assert outcome.resolution.change_requests[0].value == 3
-    assert route_tools(outcome.resolution) == ["plan.get_active"]
+    assert outcome.resolution.change_requests == []
+    assert outcome.resolution.clarification_required is False
+    assert route_tools(outcome.resolution) == []
 
 
 @pytest.mark.asyncio
@@ -592,12 +618,26 @@ async def test_server_overlay_blocks_model_from_downgrading_mutation_to_query():
         subtasks=["回答计划问题"],
         confidence=0.95,
     )
+    repaired_candidate = IntentResolution(
+        primary_intent="plan_query",
+        intent_domain="workout_plan",
+        request_kind="mutation",
+        requested_effect="update",
+        change_requests=[ChangeRequest(
+            resource="workout_plan",
+            operation="update",
+            field_path="schedule.days_per_week",
+            value=3,
+        )],
+        resolved_query="将当前训练计划调整为每周3天",
+        confidence=0.98,
+    )
     with (
         patch.object(settings, "DEEPSEEK_API_KEY", "test-key"),
         patch(
             "app.services.agent_intent_model._invoke_model_intent",
-            new=AsyncMock(return_value=unsafe_candidate),
-        ),
+            new=AsyncMock(side_effect=[unsafe_candidate, repaired_candidate]),
+        ) as invoked,
     ):
         outcome = await resolve_intent_with_fallback(
             "把我的训练计划调整为每周 3 天",
@@ -608,6 +648,10 @@ async def test_server_overlay_blocks_model_from_downgrading_mutation_to_query():
     assert outcome.resolution.requested_effect == "update"
     assert outcome.resolution.change_requests[0].value == 3
     assert route_tools(outcome.resolution) == ["plan.get_active"]
+    assert invoked.await_count == 2
+    assert invoked.await_args_list[1].kwargs["repair_error"] == (
+        "semantic_mutation_structure_missing"
+    )
 
 
 @pytest.mark.asyncio
@@ -737,7 +781,7 @@ async def test_plan_fit_overlay_restores_profile_and_history_candidates():
 
 
 @pytest.mark.asyncio
-async def test_explicit_proposal_overlay_overrides_model_general_answer():
+async def test_repeated_model_downgrade_of_explicit_mutation_fails_safely():
     candidate = IntentResolution(
         primary_intent="general_qa",
         resolved_query="解释如何手动延长计划",
@@ -758,12 +802,17 @@ async def test_explicit_proposal_overlay_overrides_model_general_answer():
         )
 
     assert outcome.resolution.primary_intent == "plan_query"
+    assert outcome.source == "rules"
+    assert outcome.attempt_count == 2
+    assert outcome.fallback_reason == "schema_validation_failed"
+    assert outcome.resolution.request_kind == "mutation"
+    assert outcome.resolution.change_requests == []
     assert outcome.resolution.expanded_intents == []
     assert outcome.resolution.subtasks == [
         "读取当前训练计划",
         "根据用户明确范围形成待确认的训练计划调整提案",
     ]
-    assert route_tools(outcome.resolution) == ["plan.get_active"]
+    assert route_tools(outcome.resolution) == []
 
 
 @pytest.mark.asyncio
@@ -899,6 +948,43 @@ async def test_multi_slot_pending_state_reasks_when_model_is_unavailable():
     assert outcome.resolution.clarification_required is True
     assert outcome.resolution.missing_slots == ["时间范围", "比较指标"]
     assert route_tools(outcome.resolution) == []
+
+
+@pytest.mark.asyncio
+async def test_verified_partial_mutation_survives_model_unavailability():
+    pending = {
+        "understanding_version": "v4",
+        "resolved_query": "记录今天晚餐的鸡胸肉",
+        "primary_intent": "nutrition_today_query",
+        "intent_domain": "nutrition",
+        "request_kind": "mutation",
+        "requested_effect": "create",
+        "change_requests": [{
+            "resource": "nutrition",
+            "operation": "create",
+            "field_path": "meal",
+            "value": {
+                "logged_at": "today",
+                "meal_type": "晚餐",
+                "items": [{"food_name": "鸡胸肉"}],
+            },
+        }],
+        "missing_slots": ["每种食品的克数"],
+        "clarification_question": "请补充每种食品的克数。",
+        "confidence": 0.94,
+    }
+
+    outcome = await resolve_intent_with_fallback(
+        "我暂时不确定克数",
+        pending_clarification=pending,
+        use_model=False,
+    )
+
+    assert outcome.fallback_reason == "model_disabled"
+    assert outcome.resolution.request_kind == "mutation"
+    assert len(outcome.resolution.change_requests) == 1
+    assert outcome.resolution.missing_slots == ["每种食品的克数"]
+    assert outcome.resolution.clarification_required is True
 
 
 @pytest.mark.asyncio

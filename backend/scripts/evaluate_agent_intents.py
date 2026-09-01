@@ -36,6 +36,10 @@ async def evaluate(case_file: Path, *, use_model: bool) -> dict[str, Any]:
     clarification_correct = 0
     semantic_expected = 0
     semantic_correct = 0
+    slot_expected = 0
+    slot_correct = 0
+    non_clarification_cases = 0
+    incorrect_clarifications = 0
 
     for case in cases:
         outcome = await resolve_intent_with_fallback(
@@ -47,15 +51,23 @@ async def evaluate(case_file: Path, *, use_model: bool) -> dict[str, Any]:
         resolution = outcome.resolution
         routed = route_tools(resolution)
         routed_set = set(routed)
-        allowed = set(case["allowed_tools"])
+        rules_mutation = (
+            not use_model
+            and case.get("expected_request_kind") == "mutation"
+        )
+        allowed = set([] if rules_mutation else case["allowed_tools"])
         forbidden = set(case["forbidden_tools"])
         primary_ok = resolution.primary_intent == case["expected_primary"]
         risk_ok = resolution.risk_level == case["risk_level"]
         allowed_hits = len(allowed & routed_set)
         leaks = sorted(forbidden & routed_set)
+        expected_clarification = (
+            False
+            if rules_mutation
+            else case.get("clarification_required", False)
+        )
         clarification_ok = (
-            resolution.clarification_required
-            == case.get("clarification_required", False)
+            resolution.clarification_required == expected_clarification
         )
         semantic_checks: list[bool] = []
         if "expected_domain" in case:
@@ -70,14 +82,22 @@ async def evaluate(case_file: Path, *, use_model: bool) -> dict[str, Any]:
             semantic_checks.append(
                 resolution.requested_effect == case["expected_effect"]
             )
-        if "expected_change_field" in case:
-            semantic_checks.append(
+        slot_ok: bool | None = None
+        if "expected_change_field" in case and not rules_mutation:
+            slot_ok = (
                 len(resolution.change_requests) == 1
                 and resolution.change_requests[0].field_path
                 == case["expected_change_field"]
                 and resolution.change_requests[0].value
                 == case.get("expected_change_value")
             )
+            semantic_checks.append(slot_ok)
+        if "expected_missing_slots" in case and not rules_mutation:
+            missing_ok = (
+                resolution.missing_slots == case["expected_missing_slots"]
+            )
+            slot_ok = missing_ok if slot_ok is None else slot_ok and missing_ok
+            semantic_checks.append(missing_ok)
         semantic_ok = all(semantic_checks)
 
         primary_correct += int(primary_ok)
@@ -87,6 +107,14 @@ async def evaluate(case_file: Path, *, use_model: bool) -> dict[str, Any]:
         forbidden_total += len(forbidden)
         forbidden_leaks += len(leaks)
         clarification_correct += int(clarification_ok)
+        if not expected_clarification:
+            non_clarification_cases += 1
+            incorrect_clarifications += int(
+                resolution.clarification_required
+            )
+        if slot_ok is not None:
+            slot_expected += 1
+            slot_correct += int(slot_ok)
         semantic_expected += int(bool(semantic_checks))
         semantic_correct += int(bool(semantic_checks) and semantic_ok)
         source_counts[outcome.source] += 1
@@ -101,6 +129,7 @@ async def evaluate(case_file: Path, *, use_model: bool) -> dict[str, Any]:
             "references": [item.model_dump() for item in resolution.references],
             "subtasks": resolution.subtasks,
             "clarification_required": resolution.clarification_required,
+            "expected_clarification": expected_clarification,
             "clarification_ok": clarification_ok,
             "intent_domain": resolution.intent_domain,
             "request_kind": resolution.request_kind,
@@ -128,6 +157,13 @@ async def evaluate(case_file: Path, *, use_model: bool) -> dict[str, Any]:
         ),
         "semantic_accuracy": (
             semantic_correct / semantic_expected if semantic_expected else 1
+        ),
+        "slot_match_rate": (
+            slot_correct / slot_expected if slot_expected else 1
+        ),
+        "incorrect_clarification_rate": (
+            incorrect_clarifications / non_clarification_cases
+            if non_clarification_cases else 0
         ),
         "allowed_tool_recall": (
             allowed_matched / expected_allowed if expected_allowed else 1

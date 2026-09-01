@@ -29,6 +29,7 @@ from app.schemas.agent_trace import (
     AgentPlanTrace,
 )
 from app.services.agent_controller import PlannedExecutionResult
+from app.services.agent_intent import ChangeRequest, IntentResolution
 from app.services.agent_plan_adjustment_proposal_persistence import (
     persist_optional_plan_adjustment_proposal,
 )
@@ -41,6 +42,27 @@ _EXPLICIT_DURATION_PROPOSAL_MESSAGE = (
     "请把当前训练计划周期从6周延长到8周，其他内容保持不变，"
     "并生成待确认提案。"
 )
+
+
+def _structured_plan_update(
+    *,
+    field_path: str,
+    value: int,
+) -> IntentResolution:
+    return IntentResolution(
+        primary_intent="plan_query",
+        intent_domain="workout_plan",
+        request_kind="mutation",
+        requested_effect="update",
+        change_requests=[ChangeRequest(
+            resource="workout_plan",
+            operation="update",
+            field_path=field_path,
+            value=value,
+        )],
+        resolved_query="更新当前训练计划",
+        confidence=0.99,
+    )
 
 
 @dataclass(frozen=True)
@@ -700,10 +722,19 @@ async def test_explicit_single_read_adjustment_uses_planned_and_persists_proposa
     ))
 
     with (
+        patch.object(settings, "AGENT_INTENT_MODEL_ENABLED", True),
+        patch.object(settings, "DEEPSEEK_API_KEY", "test-key"),
         patch.object(
             settings,
             "AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED",
             True,
+        ),
+        patch(
+            "app.services.agent_intent_model._invoke_model_intent",
+            new=AsyncMock(return_value=_structured_plan_update(
+                field_path="schedule.duration_weeks",
+                value=8,
+            )),
         ),
         patch("app.services.agent_runtime._build_model", return_value=object()),
         patch(
@@ -775,10 +806,19 @@ async def test_natural_language_frequency_mutation_persists_four_to_three_propos
     ))
 
     with (
+        patch.object(settings, "AGENT_INTENT_MODEL_ENABLED", True),
+        patch.object(settings, "DEEPSEEK_API_KEY", "test-key"),
         patch.object(
             settings,
             "AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED",
             True,
+        ),
+        patch(
+            "app.services.agent_intent_model._invoke_model_intent",
+            new=AsyncMock(return_value=_structured_plan_update(
+                field_path="schedule.days_per_week",
+                value=3,
+            )),
         ),
         patch("app.services.agent_runtime._build_model", return_value=object()),
         patch(
@@ -810,7 +850,7 @@ async def test_natural_language_frequency_mutation_persists_four_to_three_propos
         headers={"Authorization": f"Bearer {token}"},
     )
     run_body = run_response.json()
-    assert run_body["understanding_version"] == "v3"
+    assert run_body["understanding_version"] == "v4"
     assert run_body["intent_domain"] == "workout_plan"
     assert run_body["request_kind"] == "mutation"
     assert run_body["requested_effect"] == "update"
@@ -832,10 +872,19 @@ async def test_natural_language_mutation_flag_off_is_classified_but_write_free(
         days_per_week=4,
     )
     with (
+        patch.object(settings, "AGENT_INTENT_MODEL_ENABLED", True),
+        patch.object(settings, "DEEPSEEK_API_KEY", "test-key"),
         patch.object(
             settings,
             "AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED",
             False,
+        ),
+        patch(
+            "app.services.agent_intent_model._invoke_model_intent",
+            new=AsyncMock(return_value=_structured_plan_update(
+                field_path="schedule.days_per_week",
+                value=3,
+            )),
         ),
         patch(
             "app.services.agent_runtime.invoke_langchain_agent",
@@ -881,10 +930,19 @@ async def test_explicit_adjustment_never_returns_fake_text_only_proposal(
     )
 
     with (
+        patch.object(settings, "AGENT_INTENT_MODEL_ENABLED", True),
+        patch.object(settings, "DEEPSEEK_API_KEY", "test-key"),
         patch.object(
             settings,
             "AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED",
             True,
+        ),
+        patch(
+            "app.services.agent_intent_model._invoke_model_intent",
+            new=AsyncMock(return_value=_structured_plan_update(
+                field_path="schedule.duration_weeks",
+                value=8,
+            )),
         ),
         patch("app.services.agent_runtime._build_model", return_value=object()),
         patch(

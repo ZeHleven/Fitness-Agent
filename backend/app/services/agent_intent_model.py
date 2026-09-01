@@ -137,8 +137,10 @@ requested_effect 只能是：read、create、update、delete、decide。
 13. change_requests 只记录用户明确要求的变化，每项字段为 resource、operation、field_path、target_reference、value、preserve_unspecified。不要自行推断缺失目标值。
 14. 训练计划可表达 schedule.duration_weeks、schedule.days_per_week、exercise.sets、exercise.reps、exercise.rest_seconds、exercise.recommended_weight_kg、exercise.add、exercise.delete、exercise.exercise_id、exercise.day_of_week；动作字段必须在 target_reference 填当前计划中的完整动作名称。新增动作的 value 为包含 exercise_name、day_of_week、sets、reps、rest_seconds 的对象；替换动作的 value 为新动作名称或对象。
 15. 档案更新使用 profile.age、profile.gender、profile.height_cm、profile.weight_kg、profile.experience_level、profile.primary_goal、profile.training_days_per_week、profile.session_duration_min、profile.training_location、profile.diet_restriction。健康更新使用 health.injuries 或 health.chronic_conditions，value 必须是完整的新列表。记录体重使用 operation=create、field_path=weight_log.weight_kg。
-16. 新增饮食使用 operation=create、field_path=meal，value 为包含 logged_at、meal_type、items 的对象；每项食品包含 food_name 或 food_id 和 amount_g。自定义食品还必须给出 calories、protein_g、carbs_g、fat_g。删除饮食使用 operation=delete、field_path=meal，target_reference 填饮食记录 ID；若只说今天某个餐次，可填早餐、午餐、晚餐或加餐，由服务端唯一性校验。
+16. 新增饮食使用 operation=create、field_path=meal，value 为包含 logged_at、meal_type、items 的对象；每项食品只包含 food_name 或 food_id 和 amount_g，不要输出或猜测 calories、protein_g、carbs_g、fat_g。未收录食品由服务端提示用户去食品库处理。删除饮食使用 operation=delete、field_path=meal，target_reference 填饮食记录 ID；若只说今天某个餐次，可填早餐、午餐、晚餐或加餐，由服务端唯一性校验。
 17. mutation 缺少目标值、克数、动作或餐次标识时，填写 missing_slots 并要求澄清。proposal_decision 的 change_requests 使用 field_path=proposal.status，value=confirm 或 reject；提案决策的 resource 使用用户所指领域，无法判断时可用 general。
+18. 食品重量统一输出 amount_g 数值：g/克保持原值，kg/千克/公斤换算为克。不要输出单位字符串，也不要估算用户未提供的重量。
+19. missing_slots 只是模型提示，最终由服务端根据 change_requests 从头验证。已提供的嵌套字段必须保留，不要因为规则或上下文未提取到就删除。
 
 顶层字段只能是 primary_intent、intent_domain、request_kind、requested_effect、change_requests、resolved_query、references、expanded_intents、subtasks、missing_slots、clarification_required、clarification_question、risk_level、confidence。
 
@@ -303,6 +305,30 @@ def _should_use_rules_first(
     return True
 
 
+def _safe_rules_fallback_resolution(
+    resolution: IntentResolution,
+    *,
+    pending_clarification: dict | None,
+) -> IntentResolution:
+    """Never promote regex-extracted write slots to trusted semantic state."""
+    if resolution.request_kind != "mutation":
+        return resolution
+    trusted_partial = (
+        bool(pending_clarification)
+        and pending_clarification.get("understanding_version") == "v4"
+        and pending_clarification.get("request_kind") == "mutation"
+        and bool(pending_clarification.get("change_requests"))
+    )
+    if trusted_partial:
+        return resolution
+    return resolution.model_copy(update={
+        "change_requests": [],
+        "missing_slots": [],
+        "clarification_required": False,
+        "clarification_question": None,
+    })
+
+
 def _intent_attempt_timeout_seconds(
     *,
     attempt: int,
@@ -374,7 +400,10 @@ async def resolve_intent_with_fallback(
     )
     if not model_enabled:
         return _finish_outcome(IntentResolverOutcome(
-            resolution=rules_resolution,
+            resolution=_safe_rules_fallback_resolution(
+                rules_resolution,
+                pending_clarification=pending_clarification,
+            ),
             source="rules",
             fallback_reason="model_disabled",
         ), started=started)
@@ -394,7 +423,10 @@ async def resolve_intent_with_fallback(
         ), started=started)
     if not settings.DEEPSEEK_API_KEY:
         return _finish_outcome(IntentResolverOutcome(
-            resolution=rules_resolution,
+            resolution=_safe_rules_fallback_resolution(
+                rules_resolution,
+                pending_clarification=pending_clarification,
+            ),
             source="rules",
             fallback_reason="model_unconfigured",
         ), started=started)
@@ -431,17 +463,27 @@ async def resolve_intent_with_fallback(
                 ),
                 timeout=attempt_timeout,
             )
+            normalized_resolution = normalize_resolution(
+                message,
+                resolution,
+                context_messages=context_messages,
+            )
+            if (
+                direct_rules_resolution.request_kind == "mutation"
+                and resolution.request_kind not in {
+                    "mutation", "proposal_decision"
+                }
+            ):
+                raise IntentStructuredOutputError(
+                    "semantic_mutation_structure_missing"
+                )
             attempt_timings.append(IntentAttemptTiming(
                 attempt=attempt,
                 latency_ms=_elapsed_ms(attempt_started),
                 status="success",
             ))
             return _finish_outcome(IntentResolverOutcome(
-                resolution=normalize_resolution(
-                    message,
-                    resolution,
-                    context_messages=context_messages,
-                ),
+                resolution=normalized_resolution,
                 source="model",
                 attempt_count=attempt,
                 error_category=(
@@ -480,7 +522,10 @@ async def resolve_intent_with_fallback(
 
     assert last_error is not None
     return _finish_outcome(IntentResolverOutcome(
-        resolution=rules_resolution,
+        resolution=_safe_rules_fallback_resolution(
+            rules_resolution,
+            pending_clarification=pending_clarification,
+        ),
         source="rules",
         attempt_count=attempt_count,
         fallback_reason=_fallback_reason(last_error),

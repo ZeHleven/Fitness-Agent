@@ -154,7 +154,7 @@ async def test_food_library_meal_proposal_recalculates_server_nutrition(db_sessi
     user, _, conversation, run = await _context(db_session, "meal")
     food = Food(
         id="domain-food",
-        name_zh="鸡胸肉",
+        name_zh="鸡胸肉-服务端营养重算",
         category="肉类",
         calories_per_100g=165,
         protein_g=31,
@@ -200,7 +200,7 @@ async def test_food_library_meal_proposal_recalculates_server_nutrition(db_sessi
     )
     meal = await db_session.scalar(select(MealLog).where(MealLog.user_id == user.id))
     item = await db_session.scalar(select(MealItem).where(MealItem.meal_id == meal.id))
-    assert item.food_name == "鸡胸肉"
+    assert item.food_name == "鸡胸肉-服务端营养重算"
     assert item.calories == 330
     assert item.protein_g == 62
 
@@ -210,7 +210,7 @@ async def test_meal_proposal_requires_explicit_meal_type(db_session):
     user, _, conversation, run = await _context(db_session, "meal-type-required")
     food = Food(
         id="domain-food-meal-type",
-        name_zh="鸡胸肉",
+        name_zh="鸡胸肉-餐次校验",
         category="肉类",
         calories_per_100g=165,
         protein_g=31,
@@ -341,8 +341,8 @@ async def test_chat_creates_and_confirms_one_meal_proposal_once(
                 "logged_at": date.today().isoformat(),
                 "meal_type": "晚餐",
                 "items": [
-                    {"food_id": chicken.id, "amount_g": 150},
-                    {"food_id": rice.id, "amount_g": 100},
+                    {"food_name": "鸡胸肉", "amount_g": 150},
+                    {"food_name": "杂粮饭", "amount_g": 100},
                 ],
             },
         )],
@@ -355,13 +355,10 @@ async def test_chat_creates_and_confirms_one_meal_proposal_once(
 
     with (
         patch.object(settings, "AGENT_NUTRITION_PROPOSALS_ENABLED", True),
+        patch.object(settings, "DEEPSEEK_API_KEY", "test-key"),
         patch(
-            "app.services.agent_runtime.resolve_intent_with_fallback",
-            new=AsyncMock(return_value=IntentResolverOutcome(
-                resolution=resolution,
-                source="model",
-                attempt_count=1,
-            )),
+            "app.services.agent_intent_model._invoke_model_intent",
+            new=AsyncMock(return_value=resolution),
         ),
     ):
         created = await client.post(
@@ -498,12 +495,8 @@ async def test_chat_complete_meal_write_reports_disabled_feature_without_draft(
                 "logged_at": date.today().isoformat(),
                 "meal_type": "晚餐",
                 "items": [{
-                    "food_name": "自定义晚餐",
+                    "food_name": "未收录测试食品",
                     "amount_g": 100,
-                    "calories": 300,
-                    "protein_g": 20,
-                    "carbs_g": 30,
-                    "fat_g": 10,
                 }],
             },
         )],
@@ -541,3 +534,178 @@ async def test_chat_complete_meal_write_reports_disabled_feature_without_draft(
     assert await db_session.scalar(select(AgentProposal.id).where(
         AgentProposal.conversation_id == conversation.id,
     )) is None
+
+
+@pytest.mark.asyncio
+async def test_agent_cannot_invent_nutrition_for_unknown_food(db_session):
+    user, _, conversation, run = await _context(
+        db_session, "meal-unknown-food"
+    )
+
+    with pytest.raises(PlanProposalError) as captured:
+        await create_agent_meal_create_proposal(
+            db_session,
+            enabled=True,
+            user_id=user.id,
+            conversation_id=conversation.id,
+            run_id=run.id,
+            changes=[ChangeRequest(
+                resource="nutrition",
+                operation="create",
+                field_path="meal",
+                value={
+                    "logged_at": "today",
+                    "meal_type": "晚餐",
+                    "items": [{
+                        "food_name": "模型虚构食品",
+                        "amount_g": 100,
+                        "calories": 1,
+                        "protein_g": 999,
+                        "carbs_g": 999,
+                        "fat_g": 999,
+                    }],
+                },
+            )],
+        )
+
+    assert captured.value.code == "proposal_target_not_found"
+    assert "尚未收录" in captured.value.message
+    assert await db_session.scalar(select(AgentProposal.id).where(
+        AgentProposal.conversation_id == conversation.id,
+    )) is None
+
+
+@pytest.mark.asyncio
+async def test_chat_model_failure_does_not_persist_rule_extracted_write_slots(
+    client,
+    db_session,
+):
+    user, _, conversation, _ = await _context(
+        db_session, "meal-chat-model-failure"
+    )
+    token = create_access_token(user.id)
+
+    with patch.object(settings, "AGENT_INTENT_MODEL_ENABLED", False):
+        response = await client.post(
+            "/api/v1/agent/chat",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "message": "把今天晚餐记录为鸡胸肉150克、杂粮饭100克",
+                "conversation_id": conversation.id,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["reply"] == (
+        "我暂时无法可靠解析这次修改，请稍后重试或换一种说法。"
+        "本次没有修改任何数据。"
+    )
+    assert "proposal" not in response.json()
+    run = await db_session.get(AgentRun, response.json()["run_id"])
+    assert run is not None
+    assert run.understanding_version == "v4"
+    assert run.change_requests == []
+    assert run.error_code == "intent_structure_unavailable"
+    await db_session.refresh(conversation)
+    assert conversation.pending_clarification == {}
+    assert await db_session.scalar(select(AgentProposal.id).where(
+        AgentProposal.conversation_id == conversation.id,
+    )) is None
+
+
+@pytest.mark.asyncio
+async def test_chat_partial_meal_structure_is_filled_by_model_across_turns(
+    client,
+    db_session,
+):
+    user, _, conversation, _ = await _context(
+        db_session, "meal-chat-multiturn"
+    )
+    food = Food(
+        id="domain-food-chat-multiturn",
+        name_zh="多轮鸡胸肉",
+        category="肉类",
+        calories_per_100g=165,
+        protein_g=31,
+        carbs_g=0,
+        fat_g=3.6,
+        is_active=True,
+    )
+    db_session.add(food)
+    await db_session.commit()
+    partial = IntentResolution(
+        primary_intent="nutrition_today_query",
+        intent_domain="nutrition",
+        request_kind="mutation",
+        requested_effect="create",
+        change_requests=[ChangeRequest(
+            resource="nutrition",
+            operation="create",
+            field_path="meal",
+            value={
+                "logged_at": "today",
+                "meal_type": "晚餐",
+                "items": [{"food_name": "多轮鸡胸肉"}],
+            },
+        )],
+        resolved_query="记录今天晚餐的多轮鸡胸肉",
+        confidence=0.96,
+    )
+    complete = partial.model_copy(update={
+        "change_requests": [ChangeRequest(
+            resource="nutrition",
+            operation="create",
+            field_path="meal",
+            value={
+                "logged_at": "today",
+                "meal_type": "晚餐",
+                "items": [{
+                    "food_name": "多轮鸡胸肉",
+                    "amount_g": 150,
+                }],
+            },
+        )],
+        "resolved_query": "记录今天晚餐的多轮鸡胸肉150克",
+        "confidence": 0.99,
+    })
+    token = create_access_token(user.id)
+    resolver = AsyncMock(side_effect=[partial, complete])
+
+    with (
+        patch.object(settings, "AGENT_NUTRITION_PROPOSALS_ENABLED", True),
+        patch.object(settings, "DEEPSEEK_API_KEY", "test-key"),
+        patch(
+            "app.services.agent_intent_model._invoke_model_intent",
+            new=resolver,
+        ),
+    ):
+        first = await client.post(
+            "/api/v1/agent/chat",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "message": "帮我记录今天晚餐的多轮鸡胸肉",
+                "conversation_id": conversation.id,
+            },
+        )
+        second = await client.post(
+            "/api/v1/agent/chat",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "message": "150克",
+                "conversation_id": conversation.id,
+            },
+        )
+
+    assert first.status_code == 200
+    assert first.json()["reply"] == "请补充每种食品的克数。"
+    assert "proposal" not in first.json()
+    assert second.status_code == 200
+    assert second.json()["proposal"]["proposal_type"] == "meal_log_create_v1"
+    assert resolver.await_count == 2
+    pending = resolver.await_args_list[1].kwargs["pending_clarification"]
+    assert pending["understanding_version"] == "v4"
+    assert pending["change_requests"][0]["value"]["items"] == [
+        {"food_name": "多轮鸡胸肉"}
+    ]
+    await db_session.refresh(conversation)
+    assert conversation.pending_clarification == {}

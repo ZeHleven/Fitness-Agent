@@ -389,5 +389,89 @@
     "allowed_tools": [],
     "forbidden_tools": ["profile.get_summary", "weight.list_history"],
     "risk_level": "low"
+  },
+  {
+    "id": "meal_create_original_complete_v4",
+    "model_only": true,
+    "message": "把今天晚餐记录为鸡胸肉150克、杂粮饭100克",
+    "expected_primary": "nutrition_today_query",
+    "expected_domain": "nutrition",
+    "expected_request_kind": "mutation",
+    "expected_effect": "create",
+    "expected_change_field": "meal",
+    "expected_change_value": {
+      "logged_at": "today",
+      "meal_type": "晚餐",
+      "items": [
+        {"food_name": "鸡胸肉", "amount_g": 150},
+        {"food_name": "杂粮饭", "amount_g": 100}
+      ]
+    },
+    "allowed_tools": [],
+    "forbidden_tools": ["nutrition.get_today", "food.search"],
+    "clarification_required": false,
+    "risk_level": "low"
+  },
+  {
+    "id": "meal_create_reordered_mixed_units_v4",
+    "model_only": true,
+    "message": "晚饭替我记一下：杂粮饭0.1kg，另外鸡胸肉150g",
+    "expected_primary": "nutrition_today_query",
+    "expected_domain": "nutrition",
+    "expected_request_kind": "mutation",
+    "expected_effect": "create",
+    "expected_change_field": "meal",
+    "expected_change_value": {
+      "logged_at": "today",
+      "meal_type": "晚餐",
+      "items": [
+        {"food_name": "杂粮饭", "amount_g": 100},
+        {"food_name": "鸡胸肉", "amount_g": 150}
+      ]
+    },
+    "allowed_tools": [],
+    "forbidden_tools": ["nutrition.get_today", "food.search"],
+    "clarification_required": false,
+    "risk_level": "low"
+  },
+  {
+    "id": "meal_create_only_grams_missing_v4",
+    "model_only": true,
+    "message": "帮我记下今天午餐的鸡胸肉",
+    "expected_primary": "nutrition_today_query",
+    "expected_domain": "nutrition",
+    "expected_request_kind": "mutation",
+    "expected_effect": "create",
+    "expected_missing_slots": ["每种食品的克数"],
+    "allowed_tools": [],
+    "forbidden_tools": ["nutrition.get_today", "food.search"],
+    "clarification_required": true,
+    "risk_level": "low"
+  },
+  {
+    "id": "meal_advice_read_write_contrast_v4",
+    "model_only": true,
+    "message": "鸡胸肉和杂粮饭怎么搭配晚餐更适合减脂？",
+    "expected_primary": "nutrition_today_query",
+    "expected_domain": "nutrition",
+    "expected_request_kind": "query",
+    "expected_effect": "read",
+    "allowed_tools": ["nutrition.get_today"],
+    "forbidden_tools": ["food.search"],
+    "clarification_required": false,
+    "risk_level": "low"
+  },
+  {
+    "id": "meal_negated_write_v4",
+    "model_only": true,
+    "message": "先别记录这顿晚饭，只告诉我鸡胸肉和杂粮饭的营养搭配是否合理",
+    "expected_primary": "nutrition_today_query",
+    "expected_domain": "nutrition",
+    "expected_request_kind": "query",
+    "expected_effect": "read",
+    "allowed_tools": ["nutrition.get_today"],
+    "forbidden_tools": ["food.search"],
+    "clarification_required": false,
+    "risk_level": "low"
   }
 ]

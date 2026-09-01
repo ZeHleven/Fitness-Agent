@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.services.agent_change_validation import validate_semantic_changes
+
 
 IntentName = Literal[
     "general_qa",
@@ -397,6 +399,11 @@ _MUTATION_VERB_PATTERN = re.compile(
     r"新建|添加|写入|录入|减少|降低|调低|调高|降一点|缩短|延长|"
     r"删除|移除|替换|制定|创建|保存|记录|开始|完成)"
 )
+_NEGATED_MUTATION_PATTERN = re.compile(
+    r"(?:不要|别|先别|无需|不用|不必|暂不|别再).{0,12}?"
+    r"(?:调整|修改|更新|改成|改为|设置|增加|新增|新建|添加|写入|"
+    r"录入|减少|降低|删除|移除|替换|制定|创建|保存|记录|开始|完成)"
+)
 _CREATE_VERB_PATTERN = re.compile(r"(?:新增|新建|添加|制定|创建|写入|录入)")
 _DELETE_VERB_PATTERN = re.compile(r"(?:删除|移除)")
 _HOW_TO_PREFIX_PATTERN = re.compile(r"^(?:怎样|怎么|如何|应该怎样|应该怎么)")
@@ -676,6 +683,8 @@ def _infer_request_semantics(
         return domain, "assessment", "read", [], [], None
 
     mutation_requested = bool(_MUTATION_VERB_PATTERN.search(normalized))
+    if _NEGATED_MUTATION_PATTERN.search(normalized):
+        mutation_requested = False
     if (
         "记录" in normalized
         and re.search(r"(?:查看|查询|看看|历史|最近|过去|有哪些|是什么)", normalized)
@@ -1163,32 +1172,10 @@ def resolve_pending_clarification(
         return None
 
     if inherited.request_kind == "mutation":
-        original_message = str(
-            pending_clarification.get("original_message") or ""
-        ).strip()
-        combined = resolve_intent(
-            f"{original_message}，目标值是{message.strip()}"
-        )
-        if (
-            combined.request_kind == "mutation"
-            and not combined.clarification_required
-            and combined.change_requests
-        ):
-            return (
-                combined.model_copy(update={
-                    "resolved_query": (
-                        f"{inherited.resolved_query}；{slot}：{message.strip()}"
-                    )[:4000],
-                    "references": [*inherited.references, ResolvedReference(
-                        expression=message.strip()[:120],
-                        resolved_value=f"{slot}：{message.strip()}"[:500],
-                        reference_type="other",
-                        source="pending_clarification",
-                    )][:12],
-                    "confidence": min(max(combined.confidence, 0.72), 0.9),
-                }),
-                "clarification_filled",
-            )
+        # Mutation slot filling must go back through the structured model with
+        # the persisted partial change.  Re-parsing a concatenated Chinese
+        # sentence with deterministic rules loses nested meal/plan fields and
+        # turns rule extraction limits into false user omissions.
         return None
 
     references = [*inherited.references, ResolvedReference(
@@ -1277,15 +1264,35 @@ def normalize_resolution(
         rules_resolution.request_kind == "proposal_decision"
         and request_kind != "proposal_decision"
     )
-    if rules_resolution.request_kind in {"mutation", "proposal_decision"} and (
+    model_decision_actions = {
+        str(change.value)
+        for change in change_requests
+        if change.field_path == "proposal.status"
+        and change.value in {"confirm", "reject"}
+    }
+    rules_decision_fills_incomplete_action = (
+        rules_resolution.request_kind == "proposal_decision"
+        and request_kind == "proposal_decision"
+        and len(model_decision_actions) != 1
+    )
+    if rules_resolution.request_kind == "proposal_decision" and (
         rules_decision_overrides_non_decision
-        or request_kind not in {"mutation", "proposal_decision"}
-        or not change_requests
+        or rules_decision_fills_incomplete_action
     ):
         intent_domain = rules_resolution.intent_domain
         request_kind = rules_resolution.request_kind
         requested_effect = rules_resolution.requested_effect
         change_requests = list(rules_resolution.change_requests)
+    elif (
+        rules_resolution.request_kind == "mutation"
+        and request_kind not in {"mutation", "proposal_decision"}
+    ):
+        # Rules may correct the read/write classification, but their regex
+        # extraction is never promoted into authoritative write fields.
+        intent_domain = rules_resolution.intent_domain
+        request_kind = "mutation"
+        requested_effect = rules_resolution.requested_effect
+        change_requests = []
     elif (
         rules_resolution.request_kind == "assessment"
         and request_kind == "query"
@@ -1430,72 +1437,32 @@ def normalize_resolution(
             "读取近期训练进度，失败时改查历史记录",
             "评估并形成待确认的调整建议",
         ])
-    semantic_missing_slots = (
-        rules_resolution.missing_slots
-        if request_kind == rules_resolution.request_kind
-        and rules_resolution.missing_slots
-        else []
-    )
-    supported_value_fields = {
-        "schedule.duration_weeks",
-        "schedule.days_per_week",
-        "exercise.sets",
-        "exercise.reps",
-        "exercise.rest_seconds",
-        "exercise.recommended_weight_kg",
-    }
-    if request_kind == "mutation":
-        if not change_requests:
-            semantic_missing_slots.append("写入对象和具体目标值")
-        for change in change_requests:
-            if (
-                change.operation == "update"
-                and change.field_path in supported_value_fields
-                and change.value is None
-            ):
-                semantic_missing_slots.append("计划调整的具体目标值")
-            if (
-                change.field_path is not None
-                and change.field_path.startswith("exercise.")
-                and change.field_path in supported_value_fields
-                and not change.target_reference
-            ):
-                semantic_missing_slots.append("要调整的动作名称")
-            if (
-                intent_domain in {"profile", "health"}
-                and (not change.field_path or change.value is None)
-            ):
-                semantic_missing_slots.append("要更新的资料字段和具体值")
-            if (
-                intent_domain == "nutrition"
-                and change.operation == "create"
-                and change.value is None
-            ):
-                semantic_missing_slots.append("餐次、食品和克数")
-            if (
-                intent_domain == "nutrition"
-                and change.operation == "delete"
-                and not change.target_reference
-                and change.value is None
-            ):
-                semantic_missing_slots.append("要删除的具体餐次记录")
-    missing_slots = list(dict.fromkeys(
-        item.strip()
-        for item in [*resolution.missing_slots, *semantic_missing_slots]
-        if item.strip()
-    ))[:8]
-    clarification_required = bool(
-        resolution.clarification_required or missing_slots
-    )
-    clarification_question = resolution.clarification_question
-    if clarification_required and not clarification_question:
-        clarification_question = (
-            f"为了继续，我还需要确认：{'、'.join(missing_slots)}。"
-            if missing_slots
-            else "为了准确继续，请补充你希望查询的具体内容。"
+    if request_kind in {"mutation", "proposal_decision"}:
+        semantic_validation = validate_semantic_changes(
+            intent_domain=intent_domain,
+            request_kind=request_kind,
+            requested_effect=requested_effect,
+            change_requests=change_requests,
         )
-    if not clarification_required:
-        clarification_question = None
+        missing_slots = list(semantic_validation.missing_slots)[:8]
+        clarification_required = bool(missing_slots)
+        clarification_question = semantic_validation.clarification_question
+    else:
+        missing_slots = list(dict.fromkeys(
+            item.strip() for item in resolution.missing_slots if item.strip()
+        ))[:8]
+        clarification_required = bool(
+            resolution.clarification_required or missing_slots
+        )
+        clarification_question = resolution.clarification_question
+        if clarification_required and not clarification_question:
+            clarification_question = (
+                f"为了继续，我还需要确认：{'、'.join(missing_slots)}。"
+                if missing_slots
+                else "为了准确继续，请补充你希望查询的具体内容。"
+            )
+        if not clarification_required:
+            clarification_question = None
 
     references = list(resolution.references)
     if not references and context_messages:
@@ -1574,6 +1541,7 @@ def route_tools(resolution: IntentResolution) -> list[str]:
             ["plan.get_active"]
             if resolution.intent_domain == "workout_plan"
             and resolution.requested_effect == "update"
+            and bool(resolution.change_requests)
             else []
         )
     routed: list[str] = []

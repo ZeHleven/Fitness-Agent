@@ -1,6 +1,8 @@
 import pytest
 
 from app.services.agent_intent import (
+    IntentResolution,
+    normalize_resolution,
     parse_explicit_plan_adjustment_command,
     resolve_intent,
     route_tools,
@@ -369,6 +371,17 @@ def test_nutrition_advice_is_read_only_and_never_creates_a_draft():
     assert resolution.clarification_required is False
 
 
+def test_negated_write_request_remains_read_only():
+    resolution = resolve_intent(
+        "先别记录这顿晚饭，只告诉我鸡胸肉和杂粮饭的营养搭配是否合理"
+    )
+
+    assert resolution.intent_domain == "nutrition"
+    assert resolution.request_kind == "query"
+    assert resolution.requested_effect == "read"
+    assert resolution.change_requests == []
+
+
 def test_incomplete_meal_record_request_requires_structured_clarification():
     resolution = resolve_intent("帮我记录这份晚餐")
 
@@ -377,6 +390,42 @@ def test_incomplete_meal_record_request_requires_structured_clarification():
     assert resolution.requested_effect == "create"
     assert resolution.clarification_required is True
     assert "餐次、食品和克数" in resolution.missing_slots
+
+
+def test_complete_model_meal_is_not_overridden_by_rule_extraction_limits():
+    message = "把今天晚餐记录为鸡胸肉150克、杂粮饭100克"
+    model_resolution = IntentResolution.model_validate({
+        "primary_intent": "nutrition_today_query",
+        "intent_domain": "nutrition",
+        "request_kind": "mutation",
+        "requested_effect": "create",
+        "change_requests": [{
+            "resource": "nutrition",
+            "operation": "create",
+            "field_path": "meal",
+            "value": {
+                "logged_at": "today",
+                "meal_type": "晚餐",
+                "items": [
+                    {"food_name": "鸡胸肉", "amount_g": 150},
+                    {"food_name": "杂粮饭", "amount_g": 100},
+                ],
+            },
+        }],
+        "resolved_query": "记录今天晚餐的鸡胸肉150克和杂粮饭100克",
+        "missing_slots": ["餐次、食品和克数"],
+        "clarification_required": True,
+        "clarification_question": "请补充餐次、食品和克数。",
+        "confidence": 0.98,
+    })
+
+    normalized = normalize_resolution(message, model_resolution)
+
+    assert normalized.request_kind == "mutation"
+    assert normalized.change_requests[0].field_path == "meal"
+    assert normalized.missing_slots == []
+    assert normalized.clarification_required is False
+    assert normalized.clarification_question is None
 
 
 @pytest.mark.parametrize(
