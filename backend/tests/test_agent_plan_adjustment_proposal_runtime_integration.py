@@ -810,7 +810,7 @@ async def test_natural_language_frequency_mutation_persists_four_to_three_propos
         headers={"Authorization": f"Bearer {token}"},
     )
     run_body = run_response.json()
-    assert run_body["understanding_version"] == "v3"
+    assert run_body["understanding_version"] == "v4"
     assert run_body["intent_domain"] == "workout_plan"
     assert run_body["request_kind"] == "mutation"
     assert run_body["requested_effect"] == "update"

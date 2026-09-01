@@ -155,7 +155,7 @@ class AgentRun(Base):
     )
     clarification_question: Mapped[str | None] = mapped_column(Text, nullable=True)
     understanding_version: Mapped[str | None] = mapped_column(
-        String(20), default="v3", nullable=True
+        String(20), default="v4", server_default="v4", nullable=True
     )
     intent_source: Mapped[str] = mapped_column(
         String(20), default="rules", server_default="rules"

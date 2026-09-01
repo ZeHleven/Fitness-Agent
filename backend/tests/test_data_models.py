@@ -1,6 +1,6 @@
 from app.models.agent import AgentRun
 from app.models.exercise import Exercise
-from app.models.food import Food
+from app.models.food import Food, FoodAlias
 from app.models.knowledge import KnowledgeChunk
 
 
@@ -27,9 +27,18 @@ def test_food_model_fields():
         carbs_g=0.0,
         fat_g=3.6,
         diet_tags=["高蛋白"],
+        source_name="产品目录",
+        source_reference="catalog-v1",
     )
     assert f.calories_per_100g == 165.0
     assert f.diet_tags == ["高蛋白"]
+    assert f.source_name == "产品目录"
+    alias = FoodAlias(
+        food_id="food-id",
+        alias="鸡肉胸",
+        normalized_alias="鸡肉胸",
+    )
+    assert alias.food_id == "food-id"
 
 
 def test_knowledge_chunk_model_fields():
@@ -42,10 +51,11 @@ def test_knowledge_chunk_model_fields():
     assert k.embedding is None
 
 
-def test_agent_run_persists_v3_intent_semantics():
+def test_agent_run_persists_v4_intent_semantics():
     columns = AgentRun.__table__.columns
 
     assert "intent_domain" in columns
     assert "request_kind" in columns
     assert "requested_effect" in columns
     assert "change_requests" in columns
+    assert columns["understanding_version"].server_default.arg == "v4"

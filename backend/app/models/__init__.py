@@ -1,7 +1,7 @@
 from app.models.user import User
 from app.models.profile import UserProfile, WeightLog
 from app.models.exercise import Exercise
-from app.models.food import Food
+from app.models.food import Food, FoodAlias
 from app.models.knowledge import KnowledgeChunk
 from app.models.chat import ChatSession, ChatMessage
 from app.models.workout import WorkoutPlan, PlannedExercise, WorkoutSession, SessionExercise
@@ -14,7 +14,7 @@ from app.models.agent import (
 
 __all__ = [
     "User", "UserProfile", "WeightLog",
-    "Exercise", "Food", "KnowledgeChunk",
+    "Exercise", "Food", "FoodAlias", "KnowledgeChunk",
     "ChatSession", "ChatMessage",
     "WorkoutPlan", "PlannedExercise", "WorkoutSession", "SessionExercise",
     "MealLog", "MealItem",

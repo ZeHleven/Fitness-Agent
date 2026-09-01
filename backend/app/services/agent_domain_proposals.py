@@ -12,11 +12,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.agent import AgentProposal
 from app.models.exercise import Exercise
-from app.models.food import Food
 from app.models.meal import MealItem, MealLog
 from app.models.profile import UserProfile, WeightLog
 from app.models.workout import PlannedExercise, WorkoutPlan
-from app.schemas.meal import MealItemCreate, MealLogCreate
+from app.schemas.meal import MealLogCreate
 from app.schemas.plan_management_proposal import (
     CreatePlanAdjustmentProposalRequest,
     CreatePlanDeletionProposalRequest,
@@ -30,6 +29,7 @@ from app.schemas.plan_management_proposal import (
 from app.schemas.profile import ProfileUpdateRequest
 from app.schemas.workout import PersonalizedPlanPreviewRequest
 from app.services.agent_intent import ChangeRequest
+from app.services.food import resolve_food_reference
 from app.services.personalized_planner import (
     PersonalizedPlanError,
     is_exercise_compatible,
@@ -395,16 +395,11 @@ async def _canonical_meal_value(
         reference = str(
             raw.get("food_reference") or raw.get("food_name") or ""
         ).strip()
-        query = select(Food).where(Food.is_active.is_(True))
-        if food_id:
-            query = query.where(Food.id == str(food_id))
-        elif reference:
-            query = query.where(
-                func.lower(Food.name_zh) == reference.lower()
-            )
-        else:
-            query = None
-        foods = list((await db.execute(query)).scalars().all()) if query is not None else []
+        foods = await resolve_food_reference(
+            db,
+            food_id=str(food_id) if food_id else None,
+            reference=reference or None,
+        )
         if len(foods) > 1:
             raise PlanProposalError(
                 "proposal_target_ambiguous", f"食品“{reference}”匹配到多个结果", status_code=422
@@ -431,22 +426,13 @@ async def _canonical_meal_value(
             raise PlanProposalError(
                 "proposal_target_not_found", f"食品“{reference or food_id}”不存在", status_code=422
             )
-        try:
-            custom = MealItemCreate.model_validate({
-                "food_name": reference,
-                "amount_g": raw.get("amount_g"),
-                "calories": raw.get("calories"),
-                "protein_g": raw.get("protein_g", 0),
-                "carbs_g": raw.get("carbs_g", 0),
-                "fat_g": raw.get("fat_g", 0),
-            })
-        except ValidationError as exc:
-            raise PlanProposalError(
-                "proposal_change_incomplete",
-                f"自定义食品“{reference}”需要克数、热量和合法营养值",
-                status_code=422,
-            ) from exc
-        canonical_items.append(custom.model_dump())
+        # Agent output is untrusted and cannot establish nutrition facts for an
+        # unknown food. Custom foods remain a separate validated manual flow.
+        raise PlanProposalError(
+            "proposal_target_not_found",
+            f"食品“{reference}”尚未收录，请从食品库选择或在饮食页创建自定义食品",
+            status_code=422,
+        )
     try:
         meal = MealLogCreate.model_validate({
             "logged_at": _parse_logged_at(value.get("logged_at")),
@@ -642,7 +628,25 @@ async def create_agent_plan_creation_proposal(
         elif field in {"plan.goal", "profile.primary_goal"}:
             options["goal"] = change.value
         elif field == "plan" and isinstance(change.value, dict):
+            unsupported_keys = set(change.value) - {
+                "goal",
+                "duration_weeks",
+                "days_per_week",
+                "session_duration_min",
+            }
+            if unsupported_keys:
+                raise PlanProposalError(
+                    "proposal_change_unsupported",
+                    "新建计划包含当前不支持的选项",
+                    status_code=422,
+                )
             options.update(change.value)
+        else:
+            raise PlanProposalError(
+                "proposal_change_unsupported",
+                "新建计划当前只支持目标、周期、每周训练天数和单次时长选项",
+                status_code=422,
+            )
     try:
         request = PersonalizedPlanPreviewRequest.model_validate(options)
         preview = await preview_personalized_plan(

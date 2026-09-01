@@ -13,7 +13,8 @@ from app.config import settings
 from app.database import Base
 from app.database_url import normalize_async_database_url
 from app.models import (  # noqa: F401
-    User, UserProfile, WeightLog, Exercise, Food, KnowledgeChunk, WeChatIdentity,
+    User, UserProfile, WeightLog, Exercise, Food, FoodAlias, KnowledgeChunk,
+    WeChatIdentity,
 )
 
 config = context.config

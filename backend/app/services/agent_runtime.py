@@ -145,6 +145,13 @@ _SUPPORTED_PLAN_MUTATION_FIELDS = frozenset({
     "exercise.rest_seconds",
     "exercise.recommended_weight_kg",
 })
+_UNTRUSTED_WRITE_FALLBACK_REASONS = frozenset({
+    "model_disabled",
+    "model_unconfigured",
+    "model_timeout",
+    "model_unavailable",
+    "schema_validation_failed",
+})
 
 
 def _explicit_proposal_created_reply(
@@ -866,10 +873,15 @@ async def execute_agent_run(
             conversation_id=conversation.id,
             before_run=run,
         )
+        pending_clarification_state = (
+            dict(conversation.pending_clarification)
+            if conversation.pending_clarification
+            else None
+        )
         intent_outcome = await resolve_intent_with_fallback(
             user_message,
             context_messages=history,
-            pending_clarification=(conversation.pending_clarification or None),
+            pending_clarification=pending_clarification_state,
         )
         resolution = intent_outcome.resolution
         legacy_explicit_command = parse_explicit_plan_adjustment_command(
@@ -916,7 +928,7 @@ async def execute_agent_run(
         run.risk_level = resolution.risk_level
         run.clarification_required = resolution.clarification_required
         run.clarification_question = resolution.clarification_question
-        run.understanding_version = "v3"
+        run.understanding_version = "v4"
         run.intent_source = intent_outcome.source
         run.intent_confidence = resolution.confidence
         run.intent_attempt_count = intent_outcome.attempt_count
@@ -948,7 +960,7 @@ async def execute_agent_run(
                 "clarification_question": resolution.clarification_question,
                 "risk_level": resolution.risk_level,
                 "confidence": resolution.confidence,
-                "understanding_version": "v3",
+                "understanding_version": "v4",
             }
         else:
             conversation.pending_clarification = {}
@@ -1021,7 +1033,7 @@ async def execute_agent_run(
                     "clarification_question": reply,
                     "risk_level": resolution.risk_level,
                     "confidence": resolution.confidence,
-                    "understanding_version": "v3",
+                    "understanding_version": "v4",
                 }
             else:
                 conversation.pending_clarification = {}
@@ -1035,6 +1047,31 @@ async def execute_agent_run(
                 run_id=run.id,
                 execution_trace=execution_trace,
                 proposal=short_proposal,
+            )
+
+        write_structure_unavailable = (
+            resolution.request_kind == "mutation"
+            and intent_outcome.source == "rules"
+            and intent_outcome.fallback_reason in _UNTRUSTED_WRITE_FALLBACK_REASONS
+        )
+        persisted_partial_mutation = (
+            bool(pending_clarification_state)
+            and pending_clarification_state.get("understanding_version") == "v4"
+            and pending_clarification_state.get("request_kind") == "mutation"
+            and bool(pending_clarification_state.get("change_requests"))
+            and bool(resolution.change_requests)
+            and resolution.clarification_required
+        )
+        if write_structure_unavailable and not persisted_partial_mutation:
+            reply = (
+                "我暂时无法可靠解析这次修改，请稍后重试或换一种说法。"
+                "本次没有修改任何数据。"
+            )
+            run.error_code = "intent_structure_unavailable"
+            run.error_message = reply
+            return await complete_semantic_short_circuit(
+                reply,
+                termination_reason="intent_structure_unavailable",
             )
 
         domain_mutation_path = (
@@ -1422,7 +1459,7 @@ async def execute_agent_run(
                     "clarification_question": reply,
                     "risk_level": resolution.risk_level,
                     "confidence": resolution.confidence,
-                    "understanding_version": "v3",
+                    "understanding_version": "v4",
                 }
             elif execution_trace.terminal_action == "safe_stop":
                 run.risk_level = "high"
