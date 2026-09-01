@@ -7,7 +7,10 @@ from app.services.agent_intent import (
     IntentResolution,
     IntentResolverOutcome,
 )
-from app.services.agent_runtime import _audit_result_summary
+from app.services.agent_runtime import (
+    _audit_result_summary,
+    _normalize_unpersisted_proposal_result,
+)
 from app.services.agent_trace import (
     add_stage_timing,
     build_initial_execution_trace,
@@ -45,6 +48,88 @@ def test_execution_mode_gate_covers_direct_planned_clarify_and_safe_stop():
     )[0] == "direct"
     assert select_execution_mode(clarify, [])[0] == "clarify"
     assert select_execution_mode(safe_stop, [])[0] == "safe_stop"
+
+
+def test_direct_nutrition_answer_cannot_invite_confirmation_without_proposal():
+    resolution = IntentResolution(
+        primary_intent="nutrition_today_query",
+        intent_domain="nutrition",
+        request_kind="query",
+        requested_effect="read",
+        resolved_query="给我一个减脂晚餐建议",
+        subtasks=["给出晚餐建议"],
+        confidence=0.95,
+    )
+    trace = build_initial_execution_trace(resolution, []).model_copy(update={
+        "terminal_action": "answer",
+    })
+
+    reply, normalized = _normalize_unpersisted_proposal_result(
+        reply="需要我确认提交这份提案吗？",
+        execution_trace=trace,
+        proposal_reference=None,
+        intent_domain="nutrition",
+        request_kind="query",
+    )
+
+    assert reply == (
+        "以上内容仅作为饮食建议，尚未创建可确认的饮食记录提案。"
+        "如需记录，请明确餐次、食品和克数。"
+    )
+    assert normalized.terminal_action == "answer"
+    assert "proposal_creation_rejected_safe_answer" in normalized.mode_reasons
+
+
+def test_direct_answer_cannot_claim_a_pending_proposal_without_reference():
+    resolution = IntentResolution(
+        primary_intent="nutrition_today_query",
+        intent_domain="nutrition",
+        request_kind="assessment",
+        requested_effect="read",
+        resolved_query="评估晚餐建议",
+        subtasks=["给出晚餐建议"],
+        confidence=0.95,
+    )
+    trace = build_initial_execution_trace(resolution, []).model_copy(update={
+        "terminal_action": "answer",
+    })
+
+    reply, normalized = _normalize_unpersisted_proposal_result(
+        reply="以上是待确认饮食提案，尚未写入。",
+        execution_trace=trace,
+        proposal_reference=None,
+        intent_domain="nutrition",
+        request_kind="assessment",
+    )
+
+    assert "仅作为饮食建议" in reply
+    assert normalized.terminal_action == "answer"
+
+
+def test_proposal_terminal_action_is_downgraded_even_when_feature_is_off():
+    resolution = IntentResolution(
+        primary_intent="plan_query",
+        intent_domain="workout_plan",
+        request_kind="assessment",
+        requested_effect="read",
+        resolved_query="评估当前计划",
+        subtasks=["评估当前计划"],
+        confidence=0.95,
+    )
+    trace = build_initial_execution_trace(resolution, []).model_copy(update={
+        "terminal_action": "proposal",
+    })
+
+    reply, normalized = _normalize_unpersisted_proposal_result(
+        reply="这是待确认的调整提案。",
+        execution_trace=trace,
+        proposal_reference=None,
+        intent_domain="workout_plan",
+        request_kind="assessment",
+    )
+
+    assert "仅作为训练建议" in reply
+    assert normalized.terminal_action == "answer"
 
 
 def test_explicit_plan_adjustment_proposal_uses_feature_gated_planned_mode():

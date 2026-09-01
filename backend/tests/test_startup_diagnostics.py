@@ -65,6 +65,10 @@ def test_startup_projection_distinguishes_flags_from_effective_runtime():
         agent_enabled=True,
         planned_execution_enabled=False,
         plan_adjustment_proposals_enabled=True,
+        plan_management_proposals_enabled=True,
+        profile_proposals_enabled=True,
+        weight_proposals_enabled=False,
+        nutrition_proposals_enabled=True,
     )
 
     assert diagnostic == {
@@ -76,6 +80,10 @@ def test_startup_projection_distinguishes_flags_from_effective_runtime():
         "agent_enabled": True,
         "planned_execution_enabled": False,
         "plan_adjustment_proposals_enabled": True,
+        "plan_management_proposals_enabled": True,
+        "profile_proposals_enabled": True,
+        "weight_proposals_enabled": False,
+        "nutrition_proposals_enabled": True,
         "proposal_runtime_enabled": False,
     }
 
@@ -99,6 +107,14 @@ def test_startup_log_contains_only_allowlisted_non_secret_fields(
         "AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED",
         True,
     )
+    monkeypatch.setattr(
+        settings,
+        "AGENT_PLAN_MANAGEMENT_PROPOSALS_ENABLED",
+        True,
+    )
+    monkeypatch.setattr(settings, "AGENT_PROFILE_PROPOSALS_ENABLED", True)
+    monkeypatch.setattr(settings, "AGENT_WEIGHT_PROPOSALS_ENABLED", False)
+    monkeypatch.setattr(settings, "AGENT_NUTRITION_PROPOSALS_ENABLED", True)
     monkeypatch.setattr(settings, "SECRET_KEY", "must-never-be-logged")
     monkeypatch.setattr(settings, "DEEPSEEK_API_KEY", "also-never-logged")
     caplog.set_level(logging.INFO, logger="uvicorn.error")
@@ -125,5 +141,9 @@ def test_startup_log_contains_only_allowlisted_non_secret_fields(
         "agent_enabled",
         "planned_execution_enabled",
         "plan_adjustment_proposals_enabled",
+        "plan_management_proposals_enabled",
+        "profile_proposals_enabled",
+        "weight_proposals_enabled",
+        "nutrition_proposals_enabled",
         "proposal_runtime_enabled",
     }

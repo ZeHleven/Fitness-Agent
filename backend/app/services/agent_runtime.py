@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -103,6 +104,8 @@ SYSTEM_PROMPT = """你是 Fitness Agent，一位中文健身对话助手。
 能力边界：
 - 一般健身知识可以直接回答；用户自己的资料、计划、训练和进度必须以工具结果为准。
 - 训练计划、档案、健康、体重和饮食的写入只能通过服务端生成待确认提案，不能声称已经直接修改。
+- 本回答阶段不能创建提案。普通查询或建议不得称为“提案”或“待确认记录”，也不得邀请用户
+  确认、提交或应用当前建议；只有服务端已经返回提案卡片时，用户才有可确认对象。
 - 工具无结果时明确说明，不得编造用户数据。
 - 简单问题使用简洁文本；有结构化训练数据时先回答结论，再概括关键数据。
 
@@ -119,6 +122,20 @@ _PROPOSAL_NOT_CREATED_REPLY = (
 )
 _PROPOSAL_REJECTED_SAFE_ANSWER_REASON = (
     "proposal_creation_rejected_safe_answer"
+)
+_CURRENT_PROPOSAL_REFERENCE_PATTERN = re.compile(
+    r"(?:(?:这|该|当前|上述|刚才|本)(?:份|个|次)?"
+    r"(?:提案|方案|调整|变更|记录)|"
+    r"(?:待确认|等待确认).{0,8}(?:提案|方案|记录)|"
+    r"(?:提案|方案|记录).{0,8}(?:待确认|等待确认))"
+)
+_UNPERSISTED_PROPOSAL_STATE_PATTERN = re.compile(
+    r"(?:(?:待确认|等待确认|尚待确认).{0,8}(?:提案|方案|记录)|"
+    r"(?:提案|方案|记录).{0,8}(?:待确认|等待确认|尚待确认))"
+)
+_CONFIRMATION_INVITATION_PATTERN = re.compile(
+    r"(?:(?:需要|请|是否|可以|要不要|如果.{0,8}?需要).{0,20}?"
+    r"(?:确认|提交|应用|执行)|(?:确认|提交|应用|执行).{0,12}?(?:吗|[？?]|后))"
 )
 _SUPPORTED_PLAN_MUTATION_FIELDS = frozenset({
     "schedule.duration_weeks",
@@ -207,21 +224,48 @@ def _normalize_unpersisted_proposal_result(
     *,
     reply: str,
     execution_trace: AgentExecutionTrace,
-    proposal_creation_enabled: bool,
     proposal_reference: AgentProposalReference | None,
     proposal_expected: bool = False,
+    intent_domain: str = "general",
+    request_kind: str = "query",
 ) -> tuple[str, AgentExecutionTrace]:
     """Never expose a proposal terminal action without a durable proposal."""
 
-    if (
-        not proposal_creation_enabled
-        or proposal_reference is not None
+    if proposal_reference is not None:
+        return reply, execution_trace
+
+    exposes_phantom_proposal = bool(
+        _UNPERSISTED_PROPOSAL_STATE_PATTERN.search(reply)
         or (
-            execution_trace.terminal_action != "proposal"
-            and not proposal_expected
+            _CURRENT_PROPOSAL_REFERENCE_PATTERN.search(reply)
+            and _CONFIRMATION_INVITATION_PATTERN.search(reply)
         )
+    )
+    if (
+        execution_trace.terminal_action != "proposal"
+        and not proposal_expected
+        and not exposes_phantom_proposal
     ):
         return reply, execution_trace
+
+    if request_kind in {"query", "assessment"}:
+        if intent_domain == "nutrition":
+            safe_reply = (
+                "以上内容仅作为饮食建议，尚未创建可确认的饮食记录提案。"
+                "如需记录，请明确餐次、食品和克数。"
+            )
+        elif intent_domain == "workout_plan":
+            safe_reply = (
+                "以上内容仅作为训练建议，尚未创建可确认的训练计划提案。"
+                "如需修改，请明确要调整的项目和目标值。"
+            )
+        else:
+            safe_reply = (
+                "以上内容仅作为建议，尚未创建可确认的数据变更提案。"
+                "如需写入，请明确要修改的数据和目标值。"
+            )
+    else:
+        safe_reply = _PROPOSAL_NOT_CREATED_REPLY
 
     mode_reasons = [
         reason
@@ -229,7 +273,7 @@ def _normalize_unpersisted_proposal_result(
         if reason != _PROPOSAL_REJECTED_SAFE_ANSWER_REASON
     ][-7:]
     mode_reasons.append(_PROPOSAL_REJECTED_SAFE_ANSWER_REASON)
-    return _PROPOSAL_NOT_CREATED_REPLY, execution_trace.model_copy(update={
+    return safe_reply, execution_trace.model_copy(update={
         "terminal_action": "answer",
         "mode_reasons": mode_reasons,
     })
@@ -583,6 +627,20 @@ def _clarification_reply(resolution: IntentResolution) -> str:
         fields = "、".join(resolution.missing_slots)
         return f"为了准确回答，我还需要确认：{fields}。请补充后我再继续。"
     return "为了准确理解你的目标，请再补充一下你希望我查询或比较的具体内容。"
+
+
+def _mutation_missing_slots(resolution: IntentResolution) -> list[str]:
+    if resolution.intent_domain == "nutrition":
+        return (
+            ["餐次、食品和克数"]
+            if resolution.requested_effect == "create"
+            else ["要删除的具体餐次记录"]
+        )
+    if resolution.intent_domain == "workout_plan":
+        return ["要修改的计划项目和具体目标值"]
+    if resolution.intent_domain in {"profile", "health"}:
+        return ["要修改的资料字段和具体目标值"]
+    return ["写入目标的完整字段、对象和数值"]
 
 
 HIGH_RISK_REPLY = (
@@ -1014,7 +1072,7 @@ async def execute_agent_run(
                     ),
                     termination_reason=exc.code,
                     missing_slots=(
-                        ["写入目标的完整字段、对象和数值"]
+                        _mutation_missing_slots(resolution)
                         if exc.status_code == 422 else None
                     ),
                 )
@@ -1097,7 +1155,7 @@ async def execute_agent_run(
             }
             if len(decision_values) != 1:
                 return await complete_semantic_short_circuit(
-                    "请明确告诉我是确认还是拒绝当前待确认的调整提案。",
+                    "请明确告诉我是确认还是拒绝当前待确认提案。",
                     terminal_action="clarify",
                     termination_reason="proposal_decision_action_ambiguous",
                     missing_slots=["提案决策动作"],
@@ -1115,7 +1173,8 @@ async def execute_agent_run(
             )).scalars().all())
             if len(pending) != 1:
                 reply = (
-                    "当前会话没有待确认的训练计划调整提案，请先发起一次明确的计划调整。"
+                    "当前会话没有可确认的待处理提案。只有消息下方出现“待你确认”"
+                    "提案卡片后，才能在对话中确认。"
                     if not pending
                     else "当前会话有多个待确认提案，请打开提案详情选择要处理的那一个。"
                 )
@@ -1127,7 +1186,7 @@ async def execute_agent_run(
                         if not pending
                         else "proposal_decision_candidate_ambiguous"
                     ),
-                    missing_slots=["要处理的调整提案"],
+                    missing_slots=["要处理的待确认提案"],
                 )
             proposal = pending[0]
             decision_request_id = f"agent-chat-decision:{run.id}:{action}"
@@ -1321,6 +1380,7 @@ async def execute_agent_run(
                 shadow_session=shadow_session,
                 proposal_creation_enabled=(
                     settings.AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED
+                    and resolution.intent_domain == "workout_plan"
                 ),
                 force_adjustment_proposal=(
                     resolution.request_kind == "mutation"
@@ -1481,21 +1541,13 @@ async def execute_agent_run(
             reply, execution_trace = _normalize_unpersisted_proposal_result(
                 reply=reply,
                 execution_trace=execution_trace,
-                proposal_creation_enabled=(
-                    settings.AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED
-                ),
                 proposal_reference=proposal_reference,
                 proposal_expected=(
                     resolution.request_kind == "mutation"
                 ),
+                intent_domain=resolution.intent_domain,
+                request_kind=resolution.request_kind,
             )
-            if (
-                proposal_reference is None
-                and resolution.request_kind == "mutation"
-                and runtime_proposal is not None
-                and runtime_proposal.reply
-            ):
-                reply = runtime_proposal.reply
             message_content_data: dict[str, Any] = {}
             if cards:
                 message_content_data["cards"] = cards
@@ -1576,13 +1628,12 @@ async def execute_agent_run(
         reply, execution_trace = _normalize_unpersisted_proposal_result(
             reply=reply,
             execution_trace=execution_trace,
-            proposal_creation_enabled=(
-                settings.AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED
-            ),
             proposal_reference=None,
             proposal_expected=(
                 resolution.request_kind == "mutation"
             ),
+            intent_domain=resolution.intent_domain,
+            request_kind=resolution.request_kind,
         )
         await _lock_run_ownership(
             db,

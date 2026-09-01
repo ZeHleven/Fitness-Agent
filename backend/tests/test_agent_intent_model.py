@@ -6,6 +6,7 @@ import pytest
 
 from app.config import settings
 from app.services.agent_intent import (
+    ChangeRequest,
     IntentResolution,
     ResolvedReference,
     resolve_intent,
@@ -518,6 +519,42 @@ async def test_explicit_red_flag_health_update_can_be_structured_but_stays_high_
     assert outcome.resolution.risk_level == "high"
     assert len(outcome.resolution.change_requests) == 1
     assert route_tools(outcome.resolution) == []
+
+
+@pytest.mark.asyncio
+async def test_deterministic_proposal_decision_overrides_model_mutation():
+    candidate = IntentResolution(
+        primary_intent="profile_query",
+        intent_domain="profile",
+        request_kind="mutation",
+        requested_effect="create",
+        change_requests=[ChangeRequest(
+            resource="profile",
+            operation="create",
+            field_path="weight_log.weight_kg",
+            value=None,
+        )],
+        resolved_query="提交刚才的体重记录",
+        subtasks=["新增体重记录"],
+        confidence=0.91,
+    )
+    with (
+        patch.object(settings, "DEEPSEEK_API_KEY", "test-key"),
+        patch(
+            "app.services.agent_intent_model._invoke_model_intent",
+            new=AsyncMock(return_value=candidate),
+        ),
+    ):
+        outcome = await resolve_intent_with_fallback(
+            "提交刚才的体重记录",
+            use_model=True,
+        )
+
+    assert outcome.resolution.intent_domain == "profile"
+    assert outcome.resolution.request_kind == "proposal_decision"
+    assert outcome.resolution.requested_effect == "decide"
+    assert outcome.resolution.change_requests[0].field_path == "proposal.status"
+    assert outcome.resolution.change_requests[0].value == "confirm"
 
 
 @pytest.mark.asyncio

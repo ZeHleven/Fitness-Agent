@@ -380,6 +380,11 @@ async def _canonical_meal_value(
         raise PlanProposalError(
             "proposal_change_incomplete", "请至少提供一种食品和克数", status_code=422
         )
+    meal_type = str(value.get("meal_type") or "").strip()
+    if not meal_type:
+        raise PlanProposalError(
+            "proposal_change_incomplete", "请明确要记录的餐次", status_code=422
+        )
     canonical_items: list[dict[str, Any]] = []
     for raw in raw_items:
         if not isinstance(raw, dict):
@@ -445,7 +450,7 @@ async def _canonical_meal_value(
     try:
         meal = MealLogCreate.model_validate({
             "logged_at": _parse_logged_at(value.get("logged_at")),
-            "meal_type": value.get("meal_type") or "早餐",
+            "meal_type": meal_type,
             "items": canonical_items,
         })
     except ValidationError as exc:

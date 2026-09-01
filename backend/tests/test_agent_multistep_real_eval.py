@@ -111,6 +111,7 @@ async def test_injected_progress_timeout_recovers_through_controller():
         summarize_observation=_audit_result_summary,
         policy=policy,
         tools=build_fixture_tools(case, allowlist),
+        proposal_creation_enabled=True,
     )
 
     trace = result.execution_trace
