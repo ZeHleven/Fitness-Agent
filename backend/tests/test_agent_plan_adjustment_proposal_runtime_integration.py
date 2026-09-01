@@ -962,8 +962,8 @@ async def test_flag_on_invalid_draft_normalizes_to_safe_answer_without_proposal(
     body = response.json()
     assert "proposal" not in body
     assert body["reply"] == (
-        "我已完成本轮评估，但没有生成可确认的训练计划调整提案，"
-        "当前计划未作修改。你可以补充希望调整的具体范围后重新发起请求。"
+        "以上内容仅作为训练建议，尚未创建可确认的训练计划提案。"
+        "如需修改，请明确要调整的项目和目标值。"
     )
     assert "待确认" not in body["reply"]
     assert "需要你确认" not in body["reply"]
