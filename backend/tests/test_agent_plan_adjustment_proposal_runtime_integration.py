@@ -1212,7 +1212,8 @@ async def test_chat_proposal_decision_without_candidate_is_write_free(client):
     )
 
     assert response.status_code == 200
-    assert "没有待确认" in response.json()["reply"]
+    assert "没有可确认的待处理提案" in response.json()["reply"]
+    assert "训练计划" not in response.json()["reply"]
     assert "proposal" not in response.json()
 
 

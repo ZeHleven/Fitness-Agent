@@ -202,6 +202,9 @@ async def evaluate_case(case: MultistepEvalCase) -> dict[str, Any]:
             initial_trace=trace,
             summarize_observation=_audit_result_summary,
             tools=build_fixture_tools(case, tool_allowlist),
+            proposal_creation_enabled=(
+                resolution.intent_domain == "workout_plan"
+            ),
         )
         reply = result.reply
         trace = result.execution_trace

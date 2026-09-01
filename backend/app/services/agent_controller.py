@@ -389,6 +389,19 @@ def _finalization_outcomes_for_observations(
     force_adjustment_proposal: bool = False,
 ) -> list[FinalizationOutcome]:
     allowed_outcomes = _allowed_finalization_outcomes(goal, subtasks)
+    if (
+        not proposal_creation_enabled
+        and "adjustment_proposal" in allowed_outcomes
+    ):
+        allowed_outcomes = [
+            "informational_answer",
+            *(
+                ["no_change_needed"]
+                if "no_change_needed" in allowed_outcomes
+                else []
+            ),
+            "insufficient_evidence",
+        ]
     active_plan = _latest_successful_observation_result(
         observations,
         "plan.get_active",
@@ -1963,6 +1976,30 @@ async def execute_planned_agent(
                 **finalize_arguments,
             )
             finalizer_metrics = response.invocation_metrics
+            if (
+                "adjustment_proposal" not in allowed_outcomes
+                and (
+                    response.terminal_action == "proposal"
+                    or response.outcome == "adjustment_proposal"
+                )
+            ):
+                fallback_outcome = (
+                    "informational_answer"
+                    if "informational_answer" in allowed_outcomes
+                    else allowed_outcomes[0]
+                )
+                response = response.model_copy(update={
+                    "terminal_action": "answer",
+                    "outcome": fallback_outcome,
+                    "proposal_draft": None,
+                    "reply": "本轮只完成了查询或评估，没有创建可确认提案。",
+                })
+                trace = trace.model_copy(update={
+                    "mode_reasons": [
+                        *trace.mode_reasons,
+                        "finalizer_unpersisted_proposal_downgraded",
+                    ][-8:],
+                })
             _validate_final_response_contract(
                 response,
                 allowed_outcomes=allowed_outcomes,

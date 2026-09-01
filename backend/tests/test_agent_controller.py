@@ -224,6 +224,7 @@ def test_clear_low_adherence_requires_adjustment_proposal():
         goal="看看当前计划是不是太激进，并给调整建议",
         subtasks=["判断计划适配度"],
         observations=observations,
+        proposal_creation_enabled=True,
     ) == ["adjustment_proposal"]
 
 
@@ -264,7 +265,7 @@ def test_explicit_duration_command_does_not_force_proposal_when_flag_off():
         observations=observations,
         proposal_creation_enabled=False,
     ) == [
-        "adjustment_proposal",
+        "informational_answer",
         "no_change_needed",
         "insufficient_evidence",
     ]
@@ -299,6 +300,7 @@ def test_high_adherence_with_matching_profile_requires_no_change_outcome():
         goal="判断当前计划是否需要调整",
         subtasks=["判断计划适配度"],
         observations=observations,
+        proposal_creation_enabled=True,
     ) == ["no_change_needed"]
 
 
@@ -335,6 +337,7 @@ def test_high_adherence_without_profile_alignment_keeps_dynamic_options(
         goal="判断当前计划是否需要调整",
         subtasks=["判断计划适配度"],
         observations=observations,
+        proposal_creation_enabled=True,
     ) == [
         "adjustment_proposal",
         "no_change_needed",
@@ -376,6 +379,7 @@ def test_high_adherence_with_additional_signal_keeps_dynamic_options():
         goal="判断当前计划是否需要调整",
         subtasks=["结合近期趋势判断计划适配度"],
         observations=observations,
+        proposal_creation_enabled=True,
     ) == [
         "adjustment_proposal",
         "no_change_needed",
@@ -1812,6 +1816,7 @@ async def test_finalizer_contract_maps_adjustment_outcome_to_proposal():
         summarize_observation=_audit_result_summary,
         policy=policy,
         tools=[],
+        proposal_creation_enabled=True,
     )
 
     contract = result.execution_trace.finalization_contract
@@ -2226,7 +2231,7 @@ async def test_plan_progress_fast_path_avoids_executor_before_primary_reads():
 
 
 @pytest.mark.asyncio
-async def test_finalizer_contract_rejects_unsolicited_proposal():
+async def test_finalizer_contract_downgrades_unsolicited_proposal():
     allowlist = ["workout.get_progress"]
     policy = ScriptedPolicy(
         plan=MicroPlan(
@@ -2248,33 +2253,29 @@ async def test_finalizer_contract_rejects_unsolicited_proposal():
             outcome="adjustment_proposal",
         ),
     )
-    traces = []
-
-    async def sink(trace, _audit):
-        traces.append(trace)
-
-    with pytest.raises(PlanningModelError) as captured:
-        await execute_planned_agent(
-            db=None,
-            user_id="user-1",
-            run_id="unsolicited-proposal",
-            model=None,
-            goal="查询最近训练进度",
-            subtasks=["查询进度"],
-            tool_allowlist=allowlist,
-            initial_trace=_planned_trace(allowlist),
-            summarize_observation=_audit_result_summary,
-            event_sink=sink,
-            policy=policy,
-            tools=[],
-        )
-
-    assert captured.value.category == (
-        "finalization_terminal_action_not_allowed"
+    result = await execute_planned_agent(
+        db=None,
+        user_id="user-1",
+        run_id="unsolicited-proposal",
+        model=None,
+        goal="查询最近训练进度",
+        subtasks=["查询进度"],
+        tool_allowlist=allowlist,
+        initial_trace=_planned_trace(allowlist),
+        summarize_observation=_audit_result_summary,
+        policy=policy,
+        tools=[],
     )
-    timing = traces[-1].stage_timings[-1]
+
+    assert result.reply == "本轮只完成了查询或评估，没有创建可确认提案。"
+    assert result.execution_trace.terminal_action == "answer"
+    assert result.proposal_draft is None
+    assert "finalizer_unpersisted_proposal_downgraded" in (
+        result.execution_trace.mode_reasons
+    )
+    timing = result.execution_trace.stage_timings[-1]
     assert timing.stage == "finalizer"
-    assert timing.status == "error"
+    assert timing.status == "success"
 
 
 @pytest.mark.asyncio

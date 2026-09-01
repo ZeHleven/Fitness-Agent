@@ -76,6 +76,10 @@ def build_agent_startup_diagnostic(
     agent_enabled: bool,
     planned_execution_enabled: bool,
     plan_adjustment_proposals_enabled: bool,
+    plan_management_proposals_enabled: bool = False,
+    profile_proposals_enabled: bool = False,
+    weight_proposals_enabled: bool = False,
+    nutrition_proposals_enabled: bool = False,
 ) -> dict[str, str | bool]:
     """Project only explicitly approved, non-secret startup facts."""
 
@@ -95,6 +99,12 @@ def build_agent_startup_diagnostic(
         "plan_adjustment_proposals_enabled": bool(
             plan_adjustment_proposals_enabled
         ),
+        "plan_management_proposals_enabled": bool(
+            plan_management_proposals_enabled
+        ),
+        "profile_proposals_enabled": bool(profile_proposals_enabled),
+        "weight_proposals_enabled": bool(weight_proposals_enabled),
+        "nutrition_proposals_enabled": bool(nutrition_proposals_enabled),
         "proposal_runtime_enabled": proposal_runtime_enabled,
     }
 
@@ -109,6 +119,14 @@ def log_agent_startup_diagnostic(
         planned_execution_enabled=settings.AGENT_PLANNED_EXECUTION_ENABLED,
         plan_adjustment_proposals_enabled=(
             settings.AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED
+        ),
+        plan_management_proposals_enabled=(
+            settings.AGENT_PLAN_MANAGEMENT_PROPOSALS_ENABLED
+        ),
+        profile_proposals_enabled=settings.AGENT_PROFILE_PROPOSALS_ENABLED,
+        weight_proposals_enabled=settings.AGENT_WEIGHT_PROPOSALS_ENABLED,
+        nutrition_proposals_enabled=(
+            settings.AGENT_NUTRITION_PROPOSALS_ENABLED
         ),
     )
     production_logger.info(

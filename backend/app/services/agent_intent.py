@@ -400,7 +400,9 @@ _MUTATION_VERB_PATTERN = re.compile(
 _CREATE_VERB_PATTERN = re.compile(r"(?:新增|新建|添加|制定|创建|写入|录入)")
 _DELETE_VERB_PATTERN = re.compile(r"(?:删除|移除)")
 _HOW_TO_PREFIX_PATTERN = re.compile(r"^(?:怎样|怎么|如何|应该怎样|应该怎么)")
-_CONFIRM_DECISION_PATTERN = re.compile(r"(?<!待)(?:确认|同意|接受|应用|执行)")
+_CONFIRM_DECISION_PATTERN = re.compile(
+    r"(?<!待)(?:确认|同意|接受|应用|执行|提交)"
+)
 _REJECT_DECISION_PATTERN = re.compile(r"(?:拒绝|不同意|取消|放弃)")
 _PROPOSAL_REFERENCE_PATTERN = re.compile(
     r"(?:提案|方案|调整|改动|变更|刚才|上一个|这个)"
@@ -646,11 +648,11 @@ def _infer_request_semantics(
     decision_action = _proposal_decision_action(message)
     if decision_action is not None and not contains_health_red_flag(message):
         return (
-            "workout_plan",
+            domain,
             "proposal_decision",
             "decide",
             [ChangeRequest(
-                resource="workout_plan",
+                resource=domain,
                 operation="update",
                 field_path="proposal.status",
                 target_reference="latest_pending_in_conversation",
@@ -744,7 +746,12 @@ def _infer_request_semantics(
                     or (domain == "workout_plan" and change.operation == "update")
                 )
             ):
-                missing_slots.append("写入对象和具体目标值")
+                if domain == "nutrition" and change.operation == "create":
+                    missing_slots.append("餐次、食品和克数")
+                elif domain == "nutrition" and change.operation == "delete":
+                    missing_slots.append("要删除的具体餐次记录")
+                else:
+                    missing_slots.append("写入对象和具体目标值")
             if (
                 domain == "workout_plan"
                 and change.operation == "update"
@@ -1266,8 +1273,13 @@ def normalize_resolution(
     request_kind = resolution.request_kind
     requested_effect = resolution.requested_effect
     change_requests = list(resolution.change_requests)
+    rules_decision_overrides_non_decision = (
+        rules_resolution.request_kind == "proposal_decision"
+        and request_kind != "proposal_decision"
+    )
     if rules_resolution.request_kind in {"mutation", "proposal_decision"} and (
-        request_kind not in {"mutation", "proposal_decision"}
+        rules_decision_overrides_non_decision
+        or request_kind not in {"mutation", "proposal_decision"}
         or not change_requests
     ):
         intent_domain = rules_resolution.intent_domain
@@ -1287,7 +1299,6 @@ def normalize_resolution(
         expanded = []
 
     if request_kind == "proposal_decision":
-        intent_domain = "workout_plan"
         requested_effect = "decide"
     elif request_kind == "mutation":
         operations = {change.operation for change in change_requests}
@@ -1396,7 +1407,7 @@ def normalize_resolution(
             else ["识别写入请求并进行能力校验"]
         )
     elif request_kind == "proposal_decision" and primary != "health_query":
-        primary = "plan_query"
+        primary = _INTENT_BY_DOMAIN[intent_domain]
         expanded = []
         subtasks = ["定位当前会话唯一待确认提案", "安全执行提案决策"]
     elif (

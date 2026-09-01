@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import date
+from unittest.mock import AsyncMock, patch
 
 import bcrypt
 import pytest
 from sqlalchemy import select
 
+from app.config import settings
 from app.models.agent import AgentConversation, AgentProposal, AgentRun
 from app.models.food import Food
 from app.models.meal import MealItem, MealLog
@@ -19,7 +21,12 @@ from app.services.agent_domain_proposals import (
     decide_agent_domain_proposal,
     read_owned_domain_proposal,
 )
-from app.services.agent_intent import ChangeRequest
+from app.services.agent_intent import (
+    ChangeRequest,
+    IntentResolution,
+    IntentResolverOutcome,
+)
+from app.services.auth import create_access_token
 from app.services.plan_management_proposals import PlanProposalError
 
 
@@ -199,6 +206,47 @@ async def test_food_library_meal_proposal_recalculates_server_nutrition(db_sessi
 
 
 @pytest.mark.asyncio
+async def test_meal_proposal_requires_explicit_meal_type(db_session):
+    user, _, conversation, run = await _context(db_session, "meal-type-required")
+    food = Food(
+        id="domain-food-meal-type",
+        name_zh="鸡胸肉",
+        category="肉类",
+        calories_per_100g=165,
+        protein_g=31,
+        carbs_g=0,
+        fat_g=3.6,
+        is_active=True,
+    )
+    db_session.add(food)
+    await db_session.commit()
+
+    with pytest.raises(PlanProposalError) as captured:
+        await create_agent_meal_create_proposal(
+            db_session,
+            enabled=True,
+            user_id=user.id,
+            conversation_id=conversation.id,
+            run_id=run.id,
+            changes=[ChangeRequest(
+                resource="nutrition",
+                operation="create",
+                field_path="meal",
+                value={
+                    "logged_at": date.today().isoformat(),
+                    "items": [{"food_id": food.id, "amount_g": 150}],
+                },
+            )],
+        )
+
+    assert captured.value.code == "proposal_change_incomplete"
+    assert "餐次" in captured.value.message
+    assert await db_session.scalar(select(AgentProposal.id).where(
+        AgentProposal.conversation_id == conversation.id,
+    )) is None
+
+
+@pytest.mark.asyncio
 async def test_changed_food_data_stales_meal_proposal_without_writing(db_session):
     user, _, conversation, run = await _context(db_session, "meal-stale")
     food = Food(
@@ -250,3 +298,246 @@ async def test_changed_food_data_stales_meal_proposal_without_writing(db_session
     )
     assert proposal.status == "stale"
     assert proposal.last_error_code == "proposal_base_changed"
+
+
+@pytest.mark.asyncio
+async def test_chat_creates_and_confirms_one_meal_proposal_once(
+    client,
+    db_session,
+):
+    user, _, conversation, _ = await _context(db_session, "meal-chat")
+    chicken = Food(
+        id="domain-food-chat-chicken",
+        name_zh="鸡胸肉",
+        category="肉类",
+        calories_per_100g=165,
+        protein_g=31,
+        carbs_g=0,
+        fat_g=3.6,
+        is_active=True,
+    )
+    rice = Food(
+        id="domain-food-chat-rice",
+        name_zh="杂粮饭",
+        category="谷物",
+        calories_per_100g=130,
+        protein_g=3,
+        carbs_g=28,
+        fat_g=1,
+        is_active=True,
+    )
+    db_session.add_all([chicken, rice])
+    await db_session.commit()
+    resolution = IntentResolution(
+        primary_intent="nutrition_today_query",
+        intent_domain="nutrition",
+        request_kind="mutation",
+        requested_effect="create",
+        change_requests=[ChangeRequest(
+            resource="nutrition",
+            operation="create",
+            field_path="meal",
+            value={
+                "logged_at": date.today().isoformat(),
+                "meal_type": "晚餐",
+                "items": [
+                    {"food_id": chicken.id, "amount_g": 150},
+                    {"food_id": rice.id, "amount_g": 100},
+                ],
+            },
+        )],
+        resolved_query="记录今天晚餐的鸡胸肉150克和杂粮饭100克",
+        subtasks=["校验变更并形成待确认提案"],
+        confidence=0.99,
+    )
+    token = create_access_token(user.id)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    with (
+        patch.object(settings, "AGENT_NUTRITION_PROPOSALS_ENABLED", True),
+        patch(
+            "app.services.agent_runtime.resolve_intent_with_fallback",
+            new=AsyncMock(return_value=IntentResolverOutcome(
+                resolution=resolution,
+                source="model",
+                attempt_count=1,
+            )),
+        ),
+    ):
+        created = await client.post(
+            "/api/v1/agent/chat",
+            headers=headers,
+            json={
+                "message": "把今天晚餐记录为鸡胸肉150克、杂粮饭100克",
+                "conversation_id": conversation.id,
+            },
+        )
+
+    assert created.status_code == 200
+    assert created.json()["proposal"]["proposal_type"] == "meal_log_create_v1"
+    assert created.json()["proposal"]["status"] == "pending_confirmation"
+    proposal = await db_session.get(
+        AgentProposal,
+        created.json()["proposal"]["id"],
+    )
+    assert proposal is not None
+    assert proposal.conversation_id == conversation.id
+    assert await db_session.scalar(
+        select(MealLog.id).where(MealLog.user_id == user.id)
+    ) is None
+
+    with (
+        patch.object(settings, "AGENT_NUTRITION_PROPOSALS_ENABLED", True),
+        patch.object(settings, "AGENT_INTENT_MODEL_ENABLED", False),
+    ):
+        confirmed = await client.post(
+            "/api/v1/agent/chat",
+            headers=headers,
+            json={
+                "message": "确认提交这份提案",
+                "conversation_id": conversation.id,
+            },
+        )
+        replay = await client.post(
+            "/api/v1/agent/chat",
+            headers=headers,
+            json={
+                "message": "确认提交这份提案",
+                "conversation_id": conversation.id,
+            },
+        )
+
+    assert confirmed.status_code == 200
+    assert "已确认并应用提案" in confirmed.json()["reply"]
+    assert replay.status_code == 200
+    assert "没有可确认的待处理提案" in replay.json()["reply"]
+    meals = list((await db_session.execute(
+        select(MealLog).where(MealLog.user_id == user.id)
+    )).scalars().all())
+    assert len(meals) == 1
+    items = list((await db_session.execute(
+        select(MealItem).where(MealItem.meal_id == meals[0].id)
+    )).scalars().all())
+    assert {item.food_name for item in items} == {"鸡胸肉", "杂粮饭"}
+
+
+@pytest.mark.asyncio
+async def test_chat_natural_language_rejects_meal_proposal_without_writing(
+    client,
+    db_session,
+):
+    user, _, conversation, run = await _context(db_session, "meal-chat-reject")
+    food = Food(
+        id="domain-food-chat-reject",
+        name_zh="鸡胸肉",
+        category="肉类",
+        calories_per_100g=165,
+        protein_g=31,
+        carbs_g=0,
+        fat_g=3.6,
+        is_active=True,
+    )
+    db_session.add(food)
+    await db_session.commit()
+    reference = await create_agent_meal_create_proposal(
+        db_session,
+        enabled=True,
+        user_id=user.id,
+        conversation_id=conversation.id,
+        run_id=run.id,
+        changes=[ChangeRequest(
+            resource="nutrition",
+            operation="create",
+            field_path="meal",
+            value={
+                "logged_at": date.today().isoformat(),
+                "meal_type": "晚餐",
+                "items": [{"food_id": food.id, "amount_g": 150}],
+            },
+        )],
+    )
+    token = create_access_token(user.id)
+
+    with patch.object(settings, "AGENT_INTENT_MODEL_ENABLED", False):
+        response = await client.post(
+            "/api/v1/agent/chat",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "message": "拒绝这份饮食提案",
+                "conversation_id": conversation.id,
+            },
+        )
+
+    assert response.status_code == 200
+    assert "已拒绝这份提案" in response.json()["reply"]
+    proposal = await db_session.get(AgentProposal, reference.id)
+    assert proposal is not None
+    await db_session.refresh(proposal)
+    assert proposal.status == "rejected"
+    assert await db_session.scalar(
+        select(MealLog.id).where(MealLog.user_id == user.id)
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_chat_complete_meal_write_reports_disabled_feature_without_draft(
+    client,
+    db_session,
+):
+    user, _, conversation, _ = await _context(db_session, "meal-chat-disabled")
+    resolution = IntentResolution(
+        primary_intent="nutrition_today_query",
+        intent_domain="nutrition",
+        request_kind="mutation",
+        requested_effect="create",
+        change_requests=[ChangeRequest(
+            resource="nutrition",
+            operation="create",
+            field_path="meal",
+            value={
+                "logged_at": date.today().isoformat(),
+                "meal_type": "晚餐",
+                "items": [{
+                    "food_name": "自定义晚餐",
+                    "amount_g": 100,
+                    "calories": 300,
+                    "protein_g": 20,
+                    "carbs_g": 30,
+                    "fat_g": 10,
+                }],
+            },
+        )],
+        resolved_query="记录今天晚餐",
+        subtasks=["校验变更并形成待确认提案"],
+        confidence=0.99,
+    )
+    token = create_access_token(user.id)
+
+    with (
+        patch.object(settings, "AGENT_NUTRITION_PROPOSALS_ENABLED", False),
+        patch(
+            "app.services.agent_runtime.resolve_intent_with_fallback",
+            new=AsyncMock(return_value=IntentResolverOutcome(
+                resolution=resolution,
+                source="model",
+                attempt_count=1,
+            )),
+        ),
+    ):
+        response = await client.post(
+            "/api/v1/agent/chat",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "message": "记录这份晚餐",
+                "conversation_id": conversation.id,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["reply"] == (
+        "饮食记录提案功能暂未开启。当前数据未作修改。"
+    )
+    assert "proposal" not in response.json()
+    assert await db_session.scalar(select(AgentProposal.id).where(
+        AgentProposal.conversation_id == conversation.id,
+    )) is None

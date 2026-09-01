@@ -249,8 +249,8 @@
   {
     "id": "proposal_chat_confirm",
     "message": "确认刚才的调整",
-    "expected_primary": "plan_query",
-    "expected_domain": "workout_plan",
+    "expected_primary": "general_qa",
+    "expected_domain": "general",
     "expected_request_kind": "proposal_decision",
     "expected_effect": "decide",
     "expected_change_field": "proposal.status",
@@ -354,14 +354,40 @@
   {
     "id": "proposal_chat_reject",
     "message": "拒绝这个方案",
-    "expected_primary": "plan_query",
-    "expected_domain": "workout_plan",
+    "expected_primary": "general_qa",
+    "expected_domain": "general",
     "expected_request_kind": "proposal_decision",
     "expected_effect": "decide",
     "expected_change_field": "proposal.status",
     "expected_change_value": "reject",
     "allowed_tools": [],
     "forbidden_tools": ["plan.get_active"],
+    "risk_level": "low"
+  },
+  {
+    "id": "nutrition_proposal_chat_confirm",
+    "message": "确认提交这份饮食提案",
+    "expected_primary": "nutrition_today_query",
+    "expected_domain": "nutrition",
+    "expected_request_kind": "proposal_decision",
+    "expected_effect": "decide",
+    "expected_change_field": "proposal.status",
+    "expected_change_value": "confirm",
+    "allowed_tools": [],
+    "forbidden_tools": ["nutrition.get_today", "food.search"],
+    "risk_level": "low"
+  },
+  {
+    "id": "weight_proposal_chat_submit",
+    "message": "提交刚才的体重记录",
+    "expected_primary": "profile_query",
+    "expected_domain": "profile",
+    "expected_request_kind": "proposal_decision",
+    "expected_effect": "decide",
+    "expected_change_field": "proposal.status",
+    "expected_change_value": "confirm",
+    "allowed_tools": [],
+    "forbidden_tools": ["profile.get_summary", "weight.list_history"],
     "risk_level": "low"
   }
 ]

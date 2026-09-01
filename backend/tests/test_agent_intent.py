@@ -359,19 +359,47 @@ def test_three_day_training_advice_is_consultation_not_write():
     assert resolution.change_requests == []
 
 
+def test_nutrition_advice_is_read_only_and_never_creates_a_draft():
+    resolution = resolve_intent("给我一个减脂晚餐建议")
+
+    assert resolution.intent_domain == "nutrition"
+    assert resolution.request_kind == "query"
+    assert resolution.requested_effect == "read"
+    assert resolution.change_requests == []
+    assert resolution.clarification_required is False
+
+
+def test_incomplete_meal_record_request_requires_structured_clarification():
+    resolution = resolve_intent("帮我记录这份晚餐")
+
+    assert resolution.intent_domain == "nutrition"
+    assert resolution.request_kind == "mutation"
+    assert resolution.requested_effect == "create"
+    assert resolution.clarification_required is True
+    assert "餐次、食品和克数" in resolution.missing_slots
+
+
 @pytest.mark.parametrize(
-    ("message", "expected_action"),
+    ("message", "expected_domain", "expected_action"),
     [
-        ("确认刚才的调整", "confirm"),
-        ("拒绝这个方案", "reject"),
+        ("确认刚才的调整", "general", "confirm"),
+        ("拒绝这个方案", "general", "reject"),
+        ("确认提交这份饮食提案", "nutrition", "confirm"),
+        ("提交刚才的体重记录", "profile", "confirm"),
+        ("拒绝这份训练计划调整", "workout_plan", "reject"),
     ],
 )
-def test_natural_language_proposal_decision_is_structured(message, expected_action):
+def test_natural_language_proposal_decision_is_structured(
+    message,
+    expected_domain,
+    expected_action,
+):
     resolution = resolve_intent(message)
 
-    assert resolution.intent_domain == "workout_plan"
+    assert resolution.intent_domain == expected_domain
     assert resolution.request_kind == "proposal_decision"
     assert resolution.requested_effect == "decide"
+    assert resolution.change_requests[0].resource == expected_domain
     assert resolution.change_requests[0].field_path == "proposal.status"
     assert resolution.change_requests[0].value == expected_action
     assert route_tools(resolution) == []
