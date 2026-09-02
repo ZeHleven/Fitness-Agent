@@ -33,6 +33,12 @@ async def evaluate(case_file: Path, *, use_model: bool) -> dict[str, Any]:
     allowed_matched = 0
     forbidden_total = 0
     forbidden_leaks = 0
+    required_evidence_total = 0
+    required_evidence_matched = 0
+    forbidden_evidence_total = 0
+    forbidden_evidence_leaks = 0
+    generation_cases = 0
+    generation_as_mutation = 0
     clarification_correct = 0
     semantic_expected = 0
     semantic_correct = 0
@@ -57,6 +63,9 @@ async def evaluate(case_file: Path, *, use_model: bool) -> dict[str, Any]:
         )
         allowed = set([] if rules_mutation else case["allowed_tools"])
         forbidden = set(case["forbidden_tools"])
+        evidence = set(resolution.evidence_requirements)
+        required_evidence = set(case.get("required_evidence", []))
+        forbidden_evidence = set(case.get("forbidden_evidence", []))
         primary_ok = resolution.primary_intent == case["expected_primary"]
         risk_ok = resolution.risk_level == case["risk_level"]
         allowed_hits = len(allowed & routed_set)
@@ -82,6 +91,15 @@ async def evaluate(case_file: Path, *, use_model: bool) -> dict[str, Any]:
             semantic_checks.append(
                 resolution.requested_effect == case["expected_effect"]
             )
+        if "expected_requested_output" in case:
+            semantic_checks.append(
+                resolution.requested_output
+                == case["expected_requested_output"]
+            )
+        if required_evidence:
+            semantic_checks.append(required_evidence <= evidence)
+        if forbidden_evidence:
+            semantic_checks.append(not (forbidden_evidence & evidence))
         slot_ok: bool | None = None
         if "expected_change_field" in case and not rules_mutation:
             slot_ok = (
@@ -106,6 +124,13 @@ async def evaluate(case_file: Path, *, use_model: bool) -> dict[str, Any]:
         allowed_matched += allowed_hits
         forbidden_total += len(forbidden)
         forbidden_leaks += len(leaks)
+        required_evidence_total += len(required_evidence)
+        required_evidence_matched += len(required_evidence & evidence)
+        forbidden_evidence_total += len(forbidden_evidence)
+        forbidden_evidence_leaks += len(forbidden_evidence & evidence)
+        if case.get("expected_request_kind") == "generation":
+            generation_cases += 1
+            generation_as_mutation += int(resolution.request_kind == "mutation")
         clarification_correct += int(clarification_ok)
         if not expected_clarification:
             non_clarification_cases += 1
@@ -134,6 +159,8 @@ async def evaluate(case_file: Path, *, use_model: bool) -> dict[str, Any]:
             "intent_domain": resolution.intent_domain,
             "request_kind": resolution.request_kind,
             "requested_effect": resolution.requested_effect,
+            "requested_output": resolution.requested_output,
+            "evidence_requirements": resolution.evidence_requirements,
             "change_requests": [
                 item.model_dump(mode="json")
                 for item in resolution.change_requests
@@ -171,6 +198,18 @@ async def evaluate(case_file: Path, *, use_model: bool) -> dict[str, Any]:
         "forbidden_tool_leakage": (
             forbidden_leaks / forbidden_total if forbidden_total else 0
         ),
+        "required_evidence_coverage": (
+            required_evidence_matched / required_evidence_total
+            if required_evidence_total else 1
+        ),
+        "irrelevant_evidence_rate": (
+            forbidden_evidence_leaks / forbidden_evidence_total
+            if forbidden_evidence_total else 0
+        ),
+        "generation_as_mutation_rate": (
+            generation_as_mutation / generation_cases
+            if generation_cases else 0
+        ),
         "source_counts": dict(source_counts),
         "results": results,
     }
@@ -198,6 +237,9 @@ def main() -> int:
         or report["risk_accuracy"] < 1
         or report["clarification_accuracy"] < 1
         or report["semantic_accuracy"] < 1
+        or report["required_evidence_coverage"] < 1
+        or report["irrelevant_evidence_rate"] > 0
+        or report["generation_as_mutation_rate"] > 0
     ):
         return 1
     return 0

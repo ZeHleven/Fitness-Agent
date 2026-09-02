@@ -43,9 +43,19 @@ class AgentProposalReference(BaseModel):
         "profile_update_v1",
         "weight_log_create_v1",
         "meal_log_create_v1",
+        "daily_meal_log_create_v1",
         "meal_log_delete_v1",
     ]
     status: Literal["pending_confirmation"]
+    version: int = Field(ge=1)
+    expires_at: datetime
+    payload_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class AgentArtifactReference(BaseModel):
+    id: str
+    artifact_type: Literal["daily_meal_plan_v1"]
+    status: Literal["active", "superseded", "proposed", "consumed", "expired"]
     version: int = Field(ge=1)
     expires_at: datetime
     payload_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -57,12 +67,15 @@ class AgentChatResponse(BaseModel):
     run_id: str
     cards: list[AgentCard] = Field(default_factory=list)
     proposal: AgentProposalReference | None = None
+    artifact: AgentArtifactReference | None = None
 
     @model_serializer(mode="wrap")
     def omit_absent_optional_proposal(self, handler):
         data = handler(self)
         if self.proposal is None:
             data.pop("proposal", None)
+        if self.artifact is None:
+            data.pop("artifact", None)
         return data
 
 
@@ -103,11 +116,14 @@ class AgentRunResponse(BaseModel):
     request_kind: Literal[
         "query",
         "assessment",
+        "generation",
         "mutation",
         "proposal_decision",
     ]
     requested_effect: Literal["read", "create", "update", "delete", "decide"]
     change_requests: list[dict[str, Any]] = Field(default_factory=list)
+    evidence_requirements: list[str] = Field(default_factory=list)
+    requested_output: Literal["answer", "daily_meal_plan"] = "answer"
     resolved_query: str | None
     references: list[dict[str, Any]] = Field(default_factory=list)
     expanded_intents: list[str] = Field(default_factory=list)
@@ -133,6 +149,7 @@ class AgentRunResponse(BaseModel):
     reply: str | None = None
     cards: list[AgentCard] = Field(default_factory=list)
     proposal: AgentProposalReference | None = None
+    artifact: AgentArtifactReference | None = None
     poll_after_ms: int | None = None
     queued_at: datetime
     processing_started_at: datetime | None
@@ -146,4 +163,6 @@ class AgentRunResponse(BaseModel):
         data = handler(self)
         if self.proposal is None:
             data.pop("proposal", None)
+        if self.artifact is None:
+            data.pop("artifact", None)
         return data

@@ -13,6 +13,7 @@ from app.models.user import User
 from app.schemas.agent import (
     AgentChatRequest,
     AgentChatResponse,
+    AgentArtifactReference,
     AgentCard,
     AgentConversationResponse,
     AgentMessageResponse,
@@ -127,6 +128,7 @@ async def agent_chat(
         run_id=result.run_id,
         cards=result.cards,
         proposal=result.proposal,
+        artifact=result.artifact,
     )
 
 
@@ -236,6 +238,7 @@ async def get_agent_run(
     )
     cards: list[AgentCard] = []
     proposal: AgentProposalReference | None = None
+    artifact: AgentArtifactReference | None = None
     reply: str | None = None
     if assistant_message is not None:
         reply = assistant_message.content
@@ -252,12 +255,19 @@ async def get_agent_run(
                 proposal = AgentProposalReference.model_validate(raw_proposal)
             except ValueError:
                 proposal = None
+        raw_artifact = assistant_message.content_data.get("artifact")
+        if isinstance(raw_artifact, dict):
+            try:
+                artifact = AgentArtifactReference.model_validate(raw_artifact)
+            except ValueError:
+                artifact = None
 
     response = AgentRunResponse.model_validate(run)
     return response.model_copy(update={
         "reply": reply,
         "cards": cards,
         "proposal": proposal,
+        "artifact": artifact,
         "error_message": RUN_ERROR_MESSAGES.get(run.error_code),
         "poll_after_ms": 800 if run.status in {"queued", "running"} else None,
     })

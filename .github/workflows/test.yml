@@ -60,7 +60,7 @@ jobs:
         working-directory: backend
         run: |
           python -m alembic upgrade head
-          python -m alembic downgrade 0022
+          python -m alembic downgrade 0023
           python -m alembic upgrade head
 
       - name: Run backend tests

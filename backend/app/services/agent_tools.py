@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.food import Food
 from app.models.profile import UserProfile, WeightLog
 from app.models.workout import WorkoutPlan
 from app.services.food import query_nutrition_database
@@ -75,10 +76,13 @@ READ_TOOL_IDS: tuple[str, ...] = (
     "workout.get_active_session",
     "workout.list_history",
     "workout.get_progress",
+    "workout.get_daily_context",
     "weight.list_history",
     "nutrition.get_today",
     "nutrition.list_history",
+    "nutrition.get_recent_context",
     "food.search",
+    "food.list_candidates",
 )
 
 
@@ -125,10 +129,13 @@ LANGCHAIN_TOOL_NAMES: dict[str, str] = {
     "workout.get_active_session": "workout_get_active_session",
     "workout.list_history": "workout_list_history",
     "workout.get_progress": "workout_get_progress",
+    "workout.get_daily_context": "workout_get_daily_context",
     "weight.list_history": "weight_list_history",
     "nutrition.get_today": "nutrition_get_today",
     "nutrition.list_history": "nutrition_list_history",
+    "nutrition.get_recent_context": "nutrition_get_recent_context",
     "food.search": "food_search",
+    "food.list_candidates": "food_list_candidates",
 }
 TOOL_ID_BY_LANGCHAIN_NAME = {
     tool_name: tool_id for tool_id, tool_name in LANGCHAIN_TOOL_NAMES.items()
@@ -322,6 +329,43 @@ def build_read_tools(
         return progress.model_dump(mode="json")
 
     @tool(
+        LANGCHAIN_TOOL_NAMES["workout.get_daily_context"],
+        args_schema=NoArguments,
+        description=(
+            "聚合读取今天是否为训练日、当天计划动作及近 4 周执行情况。"
+            "用于需要结合当日训练量的跨领域评估，不会修改计划。"
+        ),
+    )
+    async def workout_get_daily_context() -> dict[str, Any]:
+        plan = await _active_plan(db, user_id)
+        progress = await get_workout_progress_summary(
+            db,
+            user_id=user_id,
+            weeks=4,
+        )
+        exercises: list[dict[str, Any]] = []
+        plan_data: dict[str, Any] | None = None
+        if plan is not None:
+            detail = await build_plan_detail(db, plan)
+            exercises = [
+                item.model_dump(mode="json")
+                for item in detail.exercises
+                if item.day_of_week == date.today().isoweekday()
+            ]
+            plan_data = {
+                "id": detail.id,
+                "name": detail.name,
+                "days_per_week": detail.days_per_week,
+            }
+        return {
+            "date": date.today().isoformat(),
+            "is_training_day": bool(exercises),
+            "plan": plan_data,
+            "exercises": exercises,
+            "progress_4_weeks": progress.model_dump(mode="json"),
+        }
+
+    @tool(
         LANGCHAIN_TOOL_NAMES["weight.list_history"],
         args_schema=WeightHistoryArguments,
         description=(
@@ -372,6 +416,24 @@ def build_read_tools(
         }
 
     @tool(
+        LANGCHAIN_TOOL_NAMES["nutrition.get_recent_context"],
+        args_schema=NoArguments,
+        description=(
+            "聚合读取今天餐次与近 14 个有记录日期的营养趋势，供跨领域评估使用。"
+            "不会创建、修改或删除饮食记录。"
+        ),
+    )
+    async def nutrition_get_recent_context() -> dict[str, Any]:
+        today = await build_daily_nutrition_summary(
+            db, user_id=user_id, target_date=date.today()
+        )
+        history = await list_nutrition_history(db, user_id=user_id, days=14)
+        return {
+            "today": today.model_dump(mode="json"),
+            "recent_days": [item.model_dump(mode="json") for item in history],
+        }
+
+    @tool(
         LANGCHAIN_TOOL_NAMES["food.search"],
         args_schema=FoodSearchArguments,
         description=(
@@ -398,6 +460,35 @@ def build_read_tools(
             } for item in foods],
         }
 
+    @tool(
+        LANGCHAIN_TOOL_NAMES["food.list_candidates"],
+        args_schema=NoArguments,
+        description=(
+            "读取可用于结构化饮食方案的标准食品候选、稳定 ID、营养和饮食标签。"
+            "模型只能选择候选，不能据此直接写入饮食记录。"
+        ),
+    )
+    async def food_list_candidates() -> dict[str, Any]:
+        foods = list((await db.execute(
+            select(Food)
+            .where(Food.is_active.is_(True))
+            .order_by(Food.is_common_in_china.desc(), Food.name_zh, Food.id)
+            .limit(80)
+        )).scalars().all())
+        return {
+            "count": len(foods),
+            "foods": [{
+                "id": item.id,
+                "name_zh": item.name_zh,
+                "category": item.category,
+                "calories_per_100g": item.calories_per_100g,
+                "protein_g": item.protein_g,
+                "carbs_g": item.carbs_g,
+                "fat_g": item.fat_g,
+                "diet_tags": item.diet_tags or [],
+            } for item in foods],
+        }
+
     factories: dict[str, Callable[[], BaseTool]] = {
         "profile.get_summary": lambda: profile_get_summary,
         "health.get_screening_summary": lambda: health_get_screening_summary,
@@ -406,9 +497,12 @@ def build_read_tools(
         "workout.get_active_session": lambda: workout_get_active_session,
         "workout.list_history": lambda: workout_list_history,
         "workout.get_progress": lambda: workout_get_progress,
+        "workout.get_daily_context": lambda: workout_get_daily_context,
         "weight.list_history": lambda: weight_list_history,
         "nutrition.get_today": lambda: nutrition_get_today,
         "nutrition.list_history": lambda: nutrition_list_history,
+        "nutrition.get_recent_context": lambda: nutrition_get_recent_context,
         "food.search": lambda: food_search,
+        "food.list_candidates": lambda: food_list_candidates,
     }
     return [factories[tool_id]() for tool_id in allowlist]

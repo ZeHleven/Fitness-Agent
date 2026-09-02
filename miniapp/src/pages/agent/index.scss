@@ -141,6 +141,49 @@
   display: block;
 }
 
+.daily-meal-row {
+  margin-top: 16px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.daily-meal-title,
+.daily-meal-source,
+.daily-meal-note {
+  display: block;
+}
+
+.daily-meal-title {
+  color: #244b38;
+  font-size: 24px;
+  font-weight: 800;
+}
+
+.daily-meal-source {
+  margin-top: 18px;
+  color: #1d6b49;
+  font-size: 21px;
+  font-weight: 700;
+  line-height: 1.6;
+}
+
+.daily-meal-note {
+  margin-top: 7px;
+  color: #718178;
+  font-size: 19px;
+  line-height: 1.55;
+}
+
+.daily-meal-save {
+  margin-top: 18px;
+  border-radius: 18px;
+  background: #1d6b49;
+  color: #fff;
+  font-size: 23px;
+  font-weight: 800;
+}
+
 .data-card-title {
   color: #1d6b49;
   font-size: 21px;

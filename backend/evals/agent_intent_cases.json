@@ -391,6 +391,102 @@
     "risk_level": "low"
   },
   {
+    "id": "daily_meal_generation_contextual_v5",
+    "message": "结合我的情况安排今天怎么吃",
+    "expected_primary": "nutrition_today_query",
+    "expected_domain": "nutrition",
+    "expected_request_kind": "generation",
+    "expected_effect": "read",
+    "expected_requested_output": "daily_meal_plan",
+    "required_evidence": [
+      "profile_summary",
+      "health_screening",
+      "weight_history",
+      "workout_daily_context",
+      "nutrition_recent_context",
+      "food_catalog"
+    ],
+    "forbidden_evidence": ["active_plan", "nutrition_history"],
+    "allowed_tools": [],
+    "forbidden_tools": ["nutrition.get_today", "food.search"],
+    "risk_level": "low"
+  },
+  {
+    "id": "daily_meal_generation_training_load_v5",
+    "message": "按今天训练量给我配三餐",
+    "expected_primary": "nutrition_today_query",
+    "expected_domain": "nutrition",
+    "expected_request_kind": "generation",
+    "expected_effect": "read",
+    "expected_requested_output": "daily_meal_plan",
+    "required_evidence": [
+      "profile_summary",
+      "health_screening",
+      "weight_history",
+      "workout_daily_context",
+      "nutrition_recent_context",
+      "food_catalog"
+    ],
+    "forbidden_evidence": ["active_plan", "nutrition_history"],
+    "allowed_tools": [],
+    "forbidden_tools": ["nutrition.get_today", "food.search"],
+    "risk_level": "low"
+  },
+  {
+    "id": "daily_meal_generation_and_save_still_reviews_first_v5",
+    "message": "制定并保存今天的全天饮食方案",
+    "expected_primary": "nutrition_today_query",
+    "expected_domain": "nutrition",
+    "expected_request_kind": "generation",
+    "expected_effect": "read",
+    "expected_requested_output": "daily_meal_plan",
+    "required_evidence": [
+      "profile_summary",
+      "health_screening",
+      "weight_history",
+      "workout_daily_context",
+      "nutrition_recent_context",
+      "food_catalog"
+    ],
+    "forbidden_evidence": ["active_plan", "nutrition_history"],
+    "allowed_tools": [],
+    "forbidden_tools": ["nutrition.get_today", "food.search"],
+    "risk_level": "low"
+  },
+  {
+    "id": "daily_meal_artifact_save_v5",
+    "message": "保存这份方案",
+    "expected_primary": "nutrition_today_query",
+    "expected_domain": "nutrition",
+    "expected_request_kind": "mutation",
+    "expected_effect": "create",
+    "expected_requested_output": "answer",
+    "allowed_tools": [],
+    "forbidden_tools": ["nutrition.get_today", "food.search"],
+    "risk_level": "low"
+  },
+  {
+    "id": "daily_meal_artifact_revision_v5",
+    "message": "调整这份方案的午餐",
+    "expected_primary": "nutrition_today_query",
+    "expected_domain": "nutrition",
+    "expected_request_kind": "generation",
+    "expected_effect": "read",
+    "expected_requested_output": "daily_meal_plan",
+    "required_evidence": [
+      "profile_summary",
+      "health_screening",
+      "weight_history",
+      "workout_daily_context",
+      "nutrition_recent_context",
+      "food_catalog"
+    ],
+    "forbidden_evidence": ["active_plan", "nutrition_history"],
+    "allowed_tools": [],
+    "forbidden_tools": ["nutrition.get_today", "food.search"],
+    "risk_level": "low"
+  },
+  {
     "id": "meal_create_original_complete_v4",
     "model_only": true,
     "message": "把今天晚餐记录为鸡胸肉150克、杂粮饭100克",

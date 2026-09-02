@@ -314,6 +314,46 @@ TOOL_REGISTRY_V2 = ToolRegistryV2(
             audit=_SUMMARY_AND_FINGERPRINT_AUDIT,
         ),
         ToolRegistryEntry(
+            tool_id="workout.get_daily_context",
+            contract_version="1.0.0",
+            langchain_name="workout_get_daily_context",
+            title="当日训练聚合上下文",
+            mode="read",
+            availability="active",
+            side_effects="none",
+            risk_level="low",
+            data_sensitivity="personal",
+            supported_intents=("daily_meal_generation",),
+            use_cases=("聚合读取当日计划训练与近 4 周执行情况",),
+            exclusions=("修改训练计划", "记录训练"),
+            data_sources=(
+                "workout_plans",
+                "planned_exercises",
+                "workout_sessions",
+                "session_exercises",
+            ),
+            parallel_safe=True,
+            arguments=ToolArgumentContract(
+                schema_ref="NoArguments",
+                default_arguments={},
+            ),
+            observation=ToolObservationContract(
+                current_shape="legacy_mapping",
+                missing_data_signals=("empty_aggregate",),
+                empty_collection_is_success=True,
+            ),
+            freshness=ToolFreshnessContract(
+                reuse_scope="run",
+                max_age_seconds=60,
+                invalidation_events=(
+                    "plan.updated",
+                    "workout.completed",
+                    "date.changed",
+                ),
+            ),
+            audit=_SUMMARY_AND_FINGERPRINT_AUDIT,
+        ),
+        ToolRegistryEntry(
             tool_id="weight.list_history",
             contract_version="1.0.0",
             langchain_name="weight_list_history",
@@ -425,6 +465,37 @@ TOOL_REGISTRY_V2 = ToolRegistryV2(
             audit=_SUMMARY_AND_FINGERPRINT_AUDIT,
         ),
         ToolRegistryEntry(
+            tool_id="nutrition.get_recent_context",
+            contract_version="1.0.0",
+            langchain_name="nutrition_get_recent_context",
+            title="近期饮食聚合上下文",
+            mode="read",
+            availability="active",
+            side_effects="none",
+            risk_level="low",
+            data_sensitivity="health_sensitive",
+            supported_intents=("daily_meal_generation",),
+            use_cases=("聚合读取今日餐次和近 14 个记录日的营养趋势",),
+            exclusions=("新增或删除饮食记录",),
+            data_sources=("meal_logs", "meal_items"),
+            parallel_safe=True,
+            arguments=ToolArgumentContract(
+                schema_ref="NoArguments",
+                default_arguments={},
+            ),
+            observation=ToolObservationContract(
+                current_shape="legacy_mapping",
+                missing_data_signals=("empty_aggregate",),
+                empty_collection_is_success=True,
+            ),
+            freshness=ToolFreshnessContract(
+                reuse_scope="run",
+                max_age_seconds=60,
+                invalidation_events=("meal.created", "meal.deleted"),
+            ),
+            audit=_SUMMARY_AND_FINGERPRINT_AUDIT,
+        ),
+        ToolRegistryEntry(
             tool_id="food.search",
             contract_version="1.0.0",
             langchain_name="food_search",
@@ -458,6 +529,37 @@ TOOL_REGISTRY_V2 = ToolRegistryV2(
                         maximum=20,
                     ),
                 ),
+            ),
+            observation=ToolObservationContract(
+                current_shape="legacy_mapping",
+                missing_data_signals=("count_zero",),
+                empty_collection_is_success=True,
+            ),
+            freshness=ToolFreshnessContract(
+                reuse_scope="run",
+                max_age_seconds=3600,
+                invalidation_events=("food.updated",),
+            ),
+            audit=_SUMMARY_AND_FINGERPRINT_AUDIT,
+        ),
+        ToolRegistryEntry(
+            tool_id="food.list_candidates",
+            contract_version="1.0.0",
+            langchain_name="food_list_candidates",
+            title="饮食方案食品候选",
+            mode="read",
+            availability="active",
+            side_effects="none",
+            risk_level="low",
+            data_sensitivity="standard",
+            supported_intents=("daily_meal_generation",),
+            use_cases=("读取结构化饮食方案可选择的标准食品与营养标签",),
+            exclusions=("记录餐次", "生成自定义营养值"),
+            data_sources=("foods",),
+            parallel_safe=True,
+            arguments=ToolArgumentContract(
+                schema_ref="NoArguments",
+                default_arguments={},
             ),
             observation=ToolObservationContract(
                 current_shape="legacy_mapping",
@@ -505,10 +607,13 @@ TOOL_REGISTRY_V2_INITIAL_READ_TOOL_IDS = (
     "workout.get_active_session",
     "workout.list_history",
     "workout.get_progress",
+    "workout.get_daily_context",
     "weight.list_history",
     "nutrition.get_today",
     "nutrition.list_history",
+    "nutrition.get_recent_context",
     "food.search",
+    "food.list_candidates",
 )
 
 
@@ -530,7 +635,15 @@ def route_registry_read_tool_ids(
 ) -> tuple[str, ...]:
     """Project Registry entries to ordered candidates for one resolved route."""
 
-    if resolution.clarification_required or resolution.risk_level == "high":
+    if (
+        resolution.clarification_required
+        or resolution.risk_level == "high"
+        or resolution.request_kind in {
+            "generation",
+            "mutation",
+            "proposal_decision",
+        }
+    ):
         return ()
 
     routed: list[str] = []

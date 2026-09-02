@@ -34,6 +34,7 @@ export interface PlanAdjustmentProposalReference {
     | 'profile_update_v1'
     | 'weight_log_create_v1'
     | 'meal_log_create_v1'
+    | 'daily_meal_log_create_v1'
     | 'meal_log_delete_v1'
   status: PlanAdjustmentProposalStatus | 'missing'
   version: number
