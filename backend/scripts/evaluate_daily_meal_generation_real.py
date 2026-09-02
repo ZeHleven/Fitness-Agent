@@ -22,10 +22,12 @@ from app.models.agent import (  # noqa: E402
     AgentProposal,
     AgentRun,
 )
+from app.models.food import Food  # noqa: E402
 from app.models.meal import MealLog  # noqa: E402
 from app.models.profile import UserProfile, WeightLog  # noqa: E402
 from app.models.user import User  # noqa: E402
 from app.services.agent_runtime import run_agent_chat  # noqa: E402
+from scripts.seed_foods import FOODS as BASELINE_FOODS  # noqa: E402
 
 
 ORIGINAL = "结合我的情况安排今天怎么吃"
@@ -51,6 +53,72 @@ SYNONYMS = (
     "按当前目标和身体数据给我制定今日食谱",
     "请自动读取需要的信息并安排今天怎么吃",
 )
+REQUIRED_FOOD_CATEGORIES = ("蛋白质", "碳水", "蔬菜", "油脂")
+
+
+class LiveEvaluationPrerequisiteError(RuntimeError):
+    def __init__(self, diagnostics: dict[str, Any]):
+        super().__init__("food_catalog_incomplete")
+        self.code = "food_catalog_incomplete"
+        self.diagnostics = diagnostics
+
+
+def _food_catalog_prerequisite_diagnostics(
+    foods: list[tuple[str, str, float, float, float, float]],
+) -> dict[str, Any]:
+    expected_names = {str(item["name_zh"]) for item in BASELINE_FOODS}
+    active_names = {item[0] for item in foods}
+    category_counts = {
+        category: sum(item[1] == category for item in foods)
+        for category in REQUIRED_FOOD_CATEGORIES
+    }
+    invalid_nutrition_count = sum(
+        calories <= 0 or protein < 0 or carbs < 0 or fat < 0
+        for _, _, calories, protein, carbs, fat in foods
+    )
+    return {
+        "active_food_count": len(foods),
+        "required_seed_food_count": len(expected_names),
+        "missing_seed_food_count": len(expected_names - active_names),
+        "invalid_nutrition_count": invalid_nutrition_count,
+        "required_category_counts": category_counts,
+    }
+
+
+async def _validate_evaluation_prerequisites(
+    db: AsyncSession,
+) -> dict[str, Any]:
+    rows = list((await db.execute(
+        select(
+            Food.name_zh,
+            Food.category,
+            Food.calories_per_100g,
+            Food.protein_g,
+            Food.carbs_g,
+            Food.fat_g,
+        ).where(Food.is_active.is_(True))
+    )).all())
+    diagnostics = _food_catalog_prerequisite_diagnostics([
+        (
+            str(row.name_zh),
+            str(row.category),
+            float(row.calories_per_100g),
+            float(row.protein_g),
+            float(row.carbs_g),
+            float(row.fat_g),
+        )
+        for row in rows
+    ])
+    if (
+        diagnostics["missing_seed_food_count"]
+        or diagnostics["invalid_nutrition_count"]
+        or any(
+            count == 0
+            for count in diagnostics["required_category_counts"].values()
+        )
+    ):
+        raise LiveEvaluationPrerequisiteError(diagnostics)
+    return diagnostics
 
 
 async def _seed_evaluation_subject(db: AsyncSession, *, suffix: str) -> str:
@@ -92,6 +160,7 @@ async def evaluate() -> dict[str, Any]:
     prompts = [ORIGINAL] * 10 + list(SYNONYMS)
     results: list[dict[str, Any]] = []
     async with AsyncSessionLocal() as db:
+        prerequisite_diagnostics = await _validate_evaluation_prerequisites(db)
         user_id = await _seed_evaluation_subject(db, suffix=suffix)
 
         for index, prompt in enumerate(prompts, start=1):
@@ -167,6 +236,7 @@ async def evaluate() -> dict[str, Any]:
     }
     return {
         "model": settings.AGENT_MODEL,
+        "prerequisites": prerequisite_diagnostics,
         "original_runs": len(original),
         "original_successes": original_successes,
         "synonym_runs": len(synonyms),
@@ -242,6 +312,14 @@ def main() -> int:
         return 2
     try:
         report = asyncio.run(evaluate())
+    except LiveEvaluationPrerequisiteError as exc:
+        report = _fatal_report(
+            stage="prerequisites",
+            error_type=exc.code,
+        )
+        report["prerequisites"] = exc.diagnostics
+        _write_report(report, args.output)
+        return 1
     except Exception as exc:  # keep the Actions artifact safe and actionable
         report = _fatal_report(
             stage="evaluation",

@@ -52,6 +52,10 @@ jobs:
         working-directory: backend
         run: python -m alembic upgrade head
 
+      - name: Seed isolated evaluation food catalog
+        working-directory: backend
+        run: python scripts/seed_foods.py
+
       - name: Run real-model daily meal gate
         run: >-
           python backend/scripts/evaluate_daily_meal_generation_real.py
