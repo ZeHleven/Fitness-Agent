@@ -1,0 +1,68 @@
+name: Daily Meal Live Model Release Gate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  evaluate:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: agent-live-eval
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: fitness
+          POSTGRES_PASSWORD: fitness_pass
+          POSTGRES_DB: fitness_live_eval
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fitness -d fitness_live_eval"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://fitness:fitness_pass@localhost:5432/fitness_live_eval
+      SECRET_KEY: live-eval-only-secret-key-with-at-least-64-characters-0000000000000000
+      PYTHONPATH: backend
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      DEEPSEEK_BASE_URL: https://api.deepseek.com
+      AGENT_ENABLED: "true"
+      AGENT_INTENT_MODEL_ENABLED: "true"
+    steps:
+      - name: Check out main release candidate
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        run: python -m pip install -r backend/requirements.txt
+
+      - name: Upgrade isolated evaluation database
+        working-directory: backend
+        run: python -m alembic upgrade head
+
+      - name: Run real-model daily meal gate
+        run: >-
+          python backend/scripts/evaluate_daily_meal_generation_real.py
+          --strict
+          --output daily-meal-live-eval.json
+
+      - name: Upload sanitized evaluation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-meal-live-eval-${{ github.sha }}
+          path: daily-meal-live-eval.json
+          if-no-files-found: warn
+          retention-days: 14

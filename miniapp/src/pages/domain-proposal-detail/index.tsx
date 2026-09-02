@@ -134,7 +134,8 @@ function ProposalSection ({ title, value, type }: { title: string, value: Record
   const meals = Array.isArray(value.meals) ? value.meals.map(item => objectValue(item) || {}) : []
   const dailyTotals = objectValue(value.daily_totals)
   const nutritionTargets = objectValue(value.nutrition_targets)
-  const hidden = new Set(['exercises', 'exercise_options', 'rationale', 'safety_notes', 'items', 'meals', 'nutrition_targets', 'daily_totals'])
+  const nutritionFit = objectValue(value.nutrition_fit)
+  const hidden = new Set(['exercises', 'exercise_options', 'rationale', 'safety_notes', 'items', 'meals', 'nutrition_targets', 'daily_totals', 'nutrition_fit'])
   return (
     <>
       <Text className='section-heading'>{title}</Text>
@@ -148,10 +149,26 @@ function ProposalSection ({ title, value, type }: { title: string, value: Record
           <Text className='meal-total'>全天合计 {display(dailyTotals.calories)} kcal · 蛋白质 {display(dailyTotals.protein_g)} g · 碳水 {display(dailyTotals.carbs_g)} g · 脂肪 {display(dailyTotals.fat_g)} g</Text>
         )}
         {nutritionTargets && <NutritionTargets value={nutritionTargets} />}
+        {nutritionFit && <NutritionFit value={nutritionFit} />}
         {planExercises.length > 0 && <Text className='detail-line'>训练动作共 {planExercises.length} 项，将按提案中的训练日与顺序创建。</Text>}
         {type === 'weight_log_create_v1' && <Text className='detail-line'>确认后会同步更新个人档案中的当前体重和 BMI。</Text>}
       </View>
     </>
+  )
+}
+
+function NutritionFit ({ value }: { value: Record<string, unknown> }) {
+  const warning = value.status === 'acceptable_deviation'
+  const deviations = Array.isArray(value.deviations) ? value.deviations.map(item => objectValue(item) || {}) : []
+  return (
+    <View className={`nutrition-fit ${warning ? 'warning' : 'success'}`}>
+      <Text className='nutrition-fit-title'>{warning ? '接近目标，请核对偏差' : '营养指标处于理想范围'}</Text>
+      {deviations.map((item, index) => (
+        <Text className='nutrition-fit-detail' key={index}>
+          • {display(item.label || item.metric)}实际 {display(item.actual)}{display(item.unit)}，理想范围 {display(item.ideal_min)}–{display(item.ideal_max)}{display(item.unit)}
+        </Text>
+      ))}
+    </View>
   )
 }
 

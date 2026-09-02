@@ -544,6 +544,9 @@ function AgentDataCard ({
     const calories = asRecord(targets.calories_kcal)
     const protein = asRecord(targets.protein_g)
     const totals = asRecord(data.daily_totals)
+    const fit = asRecord(data.nutrition_fit)
+    const fitStatus = String(fit.status || 'within_target')
+    const fitDeviations = asList(fit.deviations).map(asRecord)
     const meals = asList(data.meals).map(asRecord)
     const sources = asList(data.evidence_sources).map(item => evidenceLabel(String(item)))
     const assumptions = asList(data.assumptions).map(String)
@@ -551,6 +554,9 @@ function AgentDataCard ({
     return (
       <View className='agent-data-card daily-meal-card'>
         <Text className='data-card-title'>{title}</Text>
+        <Text className={`daily-meal-fit ${fitStatus === 'acceptable_deviation' ? 'warning' : 'success'}`}>
+          {fitStatus === 'acceptable_deviation' ? '接近目标' : '理想范围'}
+        </Text>
         <Text className='data-card-secondary'>目标 {textValue(calories.min)}–{textValue(calories.max)} kcal · 蛋白质 {textValue(protein.min)}–{textValue(protein.max)} g</Text>
         <View className='data-metrics'>
           <View className='data-metric'><Text className='data-metric-value'>{textValue(totals.calories)}</Text><Text className='data-metric-label'>kcal</Text></View>
@@ -566,6 +572,11 @@ function AgentDataCard ({
               </Text>
             ))}
           </View>
+        ))}
+        {fitDeviations.map((item, index) => (
+          <Text className='daily-meal-fit-detail' key={`fit-${index}`}>
+            • {textValue(item.label, textValue(item.metric))}实际 {textValue(item.actual)}{textValue(item.unit)}，理想范围 {textValue(item.ideal_min)}–{textValue(item.ideal_max)}{textValue(item.unit)}
+          </Text>
         ))}
         <Text className='daily-meal-source'>本次参考：{sources.join('、')}</Text>
         {assumptions.map((item, index) => <Text className='daily-meal-note' key={`assumption-${index}`}>• {item}</Text>)}

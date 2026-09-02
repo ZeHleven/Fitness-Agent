@@ -1,6 +1,6 @@
 param(
     [ValidatePattern('^[0-9A-Za-z][0-9A-Za-z._-]{0,39}$')]
-    [string]$Version = "0.5.28",
+    [string]$Version = "0.5.29",
     [ValidateRange(0.01, 1024)]
     [double]$MaxPackageSizeMB = 25
 )
@@ -357,6 +357,7 @@ $required = @(
     "./app/services/agent_runtime.py",
     "./app/services/agent_change_validation.py",
     "./app/services/agent_daily_meal_plans.py",
+    "./app/services/daily_meal_optimizer.py",
     "./app/services/agent_domain_proposals.py",
     "./app/services/plan_management_proposals.py",
     "./app/services/agent_tool_registry.py",

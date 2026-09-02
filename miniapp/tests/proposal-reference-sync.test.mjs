@@ -117,6 +117,9 @@ test('daily meal artifact card stays review-only until save is requested', () =>
   )
   assert.match(source, /card\.type === 'daily_meal_plan'/)
   assert.match(source, /本次参考：/)
+  assert.match(source, /acceptable_deviation/)
+  assert.match(source, /接近目标/)
+  assert.match(source, /理想范围/)
   assert.match(source, /保存为待确认提案/)
   assert.match(source, /onAction\('保存这份方案'\)/)
 })
@@ -129,6 +132,8 @@ test('multi-meal proposal detail renders per-meal items and nutrition totals', (
   assert.match(source, /daily_meal_log_create_v1/)
   assert.match(source, /value\.meals/)
   assert.match(source, /全天合计/)
+  assert.match(source, /NutritionFit/)
+  assert.match(source, /接近目标，请核对偏差/)
 })
 
 test('fresh confirm bypasses modal while reject and uncertain retry reconfirm', () => {

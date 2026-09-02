@@ -1,4 +1,4 @@
-ARG PYTHON_IMAGE=docker.m.daocloud.io/library/python:3.13-slim
+ARG PYTHON_IMAGE=docker.m.daocloud.io/library/python:3.13-slim-bookworm
 FROM ${PYTHON_IMAGE} AS builder
 
 WORKDIR /build
