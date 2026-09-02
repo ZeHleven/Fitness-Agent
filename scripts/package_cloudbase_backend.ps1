@@ -1,6 +1,6 @@
 param(
     [ValidatePattern('^[0-9A-Za-z][0-9A-Za-z._-]{0,39}$')]
-    [string]$Version = "0.5.27",
+    [string]$Version = "0.5.28",
     [ValidateRange(0.01, 1024)]
     [double]$MaxPackageSizeMB = 25
 )
