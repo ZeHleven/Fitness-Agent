@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -52,18 +53,22 @@ SYNONYMS = (
 )
 
 
-async def evaluate() -> dict[str, Any]:
-    suffix = uuid.uuid4().hex[:12]
+async def _seed_evaluation_subject(db: AsyncSession, *, suffix: str) -> str:
+    """Create the isolated live-evaluation subject in dependency order."""
     user_id = f"daily-meal-live-{suffix}"
-    prompts = [ORIGINAL] * 10 + list(SYNONYMS)
-    results: list[dict[str, Any]] = []
-    async with AsyncSessionLocal() as db:
-        user = User(
-            id=user_id,
-            email=f"daily-meal-live-{suffix}@example.invalid",
-            password_hash="live-eval-not-used",
-        )
-        profile = UserProfile(
+    user = User(
+        id=user_id,
+        email=f"daily-meal-live-{suffix}@example.invalid",
+        password_hash="live-eval-not-used",
+    )
+    db.add(user)
+    # These models intentionally do not expose ORM relationships. Flush the
+    # foreign-key parent first so SQLAlchemy cannot order the profile/weight
+    # inserts ahead of the user on PostgreSQL.
+    await db.flush()
+
+    db.add_all([
+        UserProfile(
             user_id=user_id,
             age=30,
             gender="prefer_not_to_say",
@@ -75,9 +80,19 @@ async def evaluate() -> dict[str, Any]:
             injuries=[],
             chronic_conditions=[],
             onboarding_completed=True,
-        )
-        db.add_all([user, profile, WeightLog(user_id=user_id, weight_kg=66)])
-        await db.commit()
+        ),
+        WeightLog(user_id=user_id, weight_kg=66),
+    ])
+    await db.commit()
+    return user_id
+
+
+async def evaluate() -> dict[str, Any]:
+    suffix = uuid.uuid4().hex[:12]
+    prompts = [ORIGINAL] * 10 + list(SYNONYMS)
+    results: list[dict[str, Any]] = []
+    async with AsyncSessionLocal() as db:
+        user_id = await _seed_evaluation_subject(db, suffix=suffix)
 
         for index, prompt in enumerate(prompts, start=1):
             conversation = AgentConversation(
@@ -181,16 +196,60 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _fatal_report(*, stage: str, error_type: str) -> dict[str, Any]:
+    """Return a stable report without exception messages or sensitive values."""
+    return {
+        "model": settings.AGENT_MODEL,
+        "original_runs": 0,
+        "original_successes": 0,
+        "synonym_runs": 0,
+        "synonym_successes": 0,
+        "synonym_success_rate": 0.0,
+        "generation_as_mutation_count": 0,
+        "unconfirmed_meal_writes": 0,
+        "proposal_count": 0,
+        "fit_counts": {
+            "within_target": 0,
+            "acceptable_deviation": 0,
+        },
+        "passed": False,
+        "fatal_error": {
+            "stage": stage,
+            "type": error_type,
+        },
+        "results": [],
+    }
+
+
+def _write_report(report: dict[str, Any], output: Path | None) -> None:
+    encoded = json.dumps(report, ensure_ascii=False, indent=2)
+    print(encoded)
+    if output:
+        output.write_text(encoded + "\n", encoding="utf-8")
+
+
 def main() -> int:
     args = parse_args()
     if not settings.DEEPSEEK_API_KEY:
+        _write_report(
+            _fatal_report(
+                stage="configuration",
+                error_type="missing_deepseek_api_key",
+            ),
+            args.output,
+        )
         print("DEEPSEEK_API_KEY is required", file=sys.stderr)
         return 2
-    report = asyncio.run(evaluate())
-    encoded = json.dumps(report, ensure_ascii=False, indent=2)
-    print(encoded)
-    if args.output:
-        args.output.write_text(encoded + "\n", encoding="utf-8")
+    try:
+        report = asyncio.run(evaluate())
+    except Exception as exc:  # keep the Actions artifact safe and actionable
+        report = _fatal_report(
+            stage="evaluation",
+            error_type=type(exc).__name__,
+        )
+        _write_report(report, args.output)
+        return 1
+    _write_report(report, args.output)
     return 1 if args.strict and not report["passed"] else 0
 
 
