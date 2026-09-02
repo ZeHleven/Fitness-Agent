@@ -259,12 +259,22 @@ export interface AgentCard {
   data: Record<string, unknown>
 }
 
+export interface AgentArtifactReference {
+  id: string
+  artifact_type: 'daily_meal_plan_v1'
+  status: 'active' | 'superseded' | 'proposed' | 'consumed' | 'expired'
+  version: number
+  expires_at: string
+  payload_fingerprint: string
+}
+
 export interface AgentChatResponse {
   reply: string
   conversation_id: string
   run_id: string
   cards: AgentCard[]
   proposal?: PlanAdjustmentProposalReference | null
+  artifact?: AgentArtifactReference | null
 }
 
 export type AgentRunState = 'queued' | 'running' | 'completed' | 'failed'
@@ -282,6 +292,7 @@ export interface AgentRunStatus {
   reply?: string | null
   cards: AgentCard[]
   proposal?: PlanAdjustmentProposalReference | null
+  artifact?: AgentArtifactReference | null
   error_code?: string | null
   error_message?: string | null
   poll_after_ms?: number | null

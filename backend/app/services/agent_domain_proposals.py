@@ -10,7 +10,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.agent import AgentProposal
+from app.models.agent import AgentArtifact, AgentProposal
 from app.models.exercise import Exercise
 from app.models.meal import MealItem, MealLog
 from app.models.profile import UserProfile, WeightLog
@@ -29,6 +29,15 @@ from app.schemas.plan_management_proposal import (
 from app.schemas.profile import ProfileUpdateRequest
 from app.schemas.workout import PersonalizedPlanPreviewRequest
 from app.services.agent_intent import ChangeRequest
+from app.services.agent_daily_meal_plans import (
+    DailyMealDraft,
+    DailyMealPlanError,
+    EphemeralNutritionInputs,
+    apply_ephemeral_inputs,
+    canonical_fingerprint,
+    canonicalize_daily_meal_draft,
+    collect_daily_meal_evidence,
+)
 from app.services.food import resolve_food_reference
 from app.services.personalized_planner import (
     PersonalizedPlanError,
@@ -50,6 +59,7 @@ DOMAIN_PROPOSAL_TYPES = (
     "profile_update_v1",
     "weight_log_create_v1",
     "meal_log_create_v1",
+    "daily_meal_log_create_v1",
     "meal_log_delete_v1",
 )
 
@@ -140,6 +150,7 @@ async def _persist(
     target_id: str | None,
     payload: dict[str, Any],
     now: datetime,
+    expires_at: datetime | None = None,
 ) -> PlanProposalReference:
     replay = await _creation_replay(
         db,
@@ -161,7 +172,7 @@ async def _persist(
         payload_data=payload,
         payload_fingerprint=_fingerprint(payload),
         status="pending_confirmation",
-        expires_at=now + timedelta(hours=48),
+        expires_at=expires_at or now + timedelta(hours=48),
     )
     db.add(proposal)
     try:
@@ -486,6 +497,180 @@ async def create_agent_meal_create_proposal(
         target_id=None,
         payload=payload,
         now=now or datetime.now(timezone.utc),
+    )
+
+
+async def create_agent_daily_meal_proposal(
+    db: AsyncSession,
+    *,
+    enabled: bool,
+    user_id: str,
+    conversation_id: str,
+    run_id: str,
+    now: datetime | None = None,
+) -> PlanProposalReference:
+    """Convert one owned immutable daily-meal Artifact into one Proposal."""
+    if not enabled:
+        raise PlanProposalError(
+            "proposal_feature_disabled",
+            "饮食记录提案功能暂未开启；全天方案仍可查看，但当前不能保存",
+            status_code=403,
+        )
+    moment = now or datetime.now(timezone.utc)
+    candidates = list((await db.execute(
+        select(AgentArtifact)
+        .where(
+            AgentArtifact.user_id == user_id,
+            AgentArtifact.conversation_id == conversation_id,
+            AgentArtifact.artifact_type == "daily_meal_plan_v1",
+            AgentArtifact.status.in_(("active", "proposed")),
+            AgentArtifact.expires_at > moment,
+        )
+        .order_by(AgentArtifact.created_at.desc())
+        .limit(2)
+        .with_for_update()
+    )).scalars().all())
+    if not candidates:
+        raise PlanProposalError(
+            "artifact_not_found",
+            "当前会话没有可保存的全天饮食方案，请先生成并查看方案",
+            status_code=422,
+        )
+    if len(candidates) != 1:
+        raise PlanProposalError(
+            "artifact_ambiguous",
+            "当前会话有多份可用方案，请先明确要保存的版本",
+            status_code=422,
+        )
+    artifact = candidates[0]
+    request_id = f"agent-artifact-proposal:{artifact.id}"
+    existing_proposal = await db.scalar(select(AgentProposal).where(
+        AgentProposal.user_id == user_id,
+        AgentProposal.creation_client_request_id == request_id,
+    ))
+    if existing_proposal is not None:
+        if (
+            existing_proposal.proposal_type == "daily_meal_log_create_v1"
+            and existing_proposal.status == "pending_confirmation"
+        ):
+            return _reference(existing_proposal)
+        raise PlanProposalError(
+            "artifact_already_proposed",
+            "这份方案已经生成并处理过提案，请重新生成方案",
+            status_code=409,
+        )
+    if artifact.status != "active":
+        raise PlanProposalError(
+            "artifact_already_proposed",
+            "这份方案已经生成过提案，请直接处理现有提案",
+            status_code=409,
+        )
+    payload_data = artifact.payload_data
+    if payload_data.get("target_date") != date.today().isoformat():
+        raise PlanProposalError(
+            "artifact_target_date_invalid",
+            "全天饮食方案只能在目标日期当天保存",
+            status_code=409,
+        )
+    if canonical_fingerprint(payload_data) != artifact.payload_fingerprint:
+        raise PlanProposalError(
+            "artifact_fingerprint_mismatch",
+            "方案内容校验失败，请重新生成",
+            status_code=409,
+        )
+    current = await collect_daily_meal_evidence(
+        db,
+        user_id=user_id,
+        target_date=date.today(),
+    )
+    try:
+        current = apply_ephemeral_inputs(
+            current,
+            EphemeralNutritionInputs.model_validate(
+                payload_data.get("ephemeral_inputs", {})
+            ),
+            reject_current_conflicts=True,
+        )
+    except (ValidationError, DailyMealPlanError) as exc:
+        raise PlanProposalError(
+            "artifact_context_changed",
+            "用于生成方案的临时资料已不再有效，请重新生成方案",
+            status_code=409,
+        ) from exc
+    if current.fingerprints != artifact.context_fingerprints:
+        raise PlanProposalError(
+            "artifact_context_changed",
+            "档案、健康、体重、训练、饮食或食品数据已变化，请重新生成方案",
+            status_code=409,
+        )
+    try:
+        draft = DailyMealDraft.model_validate({
+            "meals": [{
+                "meal_type": meal["meal_type"],
+                "items": [{
+                    "food_id": item["food_id"],
+                    "amount_g": item["amount_g"],
+                } for item in meal["items"]],
+            } for meal in payload_data.get("meals", [])],
+        })
+        canonical_meals = await canonicalize_daily_meal_draft(
+            db,
+            draft=draft,
+            evidence=current,
+        )
+    except (ValidationError, DailyMealPlanError) as exc:
+        raise PlanProposalError(
+            "artifact_no_longer_valid",
+            "方案食品或餐次已不再满足保存条件，请重新生成",
+            status_code=409,
+        ) from exc
+    if canonical_meals != payload_data.get("meals"):
+        raise PlanProposalError(
+            "artifact_food_data_changed",
+            "食品库营养数据已变化，请重新生成方案",
+            status_code=409,
+        )
+    proposal_payload = {
+        "schema_version": "1.0.0",
+        "proposal_type": "daily_meal_log_create_v1",
+        "target": {
+            "resource_type": "daily_meal_plan_artifact",
+            "target_id": artifact.id,
+            "artifact_fingerprint": artifact.payload_fingerprint,
+            "target_date": payload_data["target_date"],
+        },
+        "before": {"meals": payload_data.get("existing_meals", [])},
+        "after": {
+            "logged_at": payload_data["target_date"],
+            "meals": canonical_meals,
+            "daily_totals": payload_data.get("daily_totals", {}),
+            "nutrition_targets": payload_data.get("nutrition_targets", {}),
+        },
+        "changes": [{
+            "field_path": "meal_logs",
+            "before": payload_data.get("existing_meals", []),
+            "after": canonical_meals,
+        }],
+        "safety_notes": [
+            "确认后将一次写入全部待新增餐次；任一餐次冲突时整份失败。",
+            "所有营养值均由服务端按食品库和克数重新计算。",
+        ],
+    }
+    artifact.status = "proposed"
+    artifact.version += 1
+    artifact.updated_at = moment
+    return await _persist(
+        db,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        run_id=run_id,
+        proposal_type="daily_meal_log_create_v1",
+        request_id=request_id,
+        target_kind="daily_meal_plan_artifact",
+        target_id=artifact.id,
+        payload=proposal_payload,
+        now=moment,
+        expires_at=min(artifact.expires_at, moment + timedelta(hours=23, minutes=59)),
     )
 
 
@@ -1044,6 +1229,140 @@ async def _apply_meal_create(
     }
 
 
+async def _apply_daily_meal_create(
+    db: AsyncSession,
+    *,
+    proposal: AgentProposal,
+    user_id: str,
+) -> dict[str, Any]:
+    payload = proposal.payload_data
+    target = payload.get("target", {})
+    artifact = await db.scalar(
+        select(AgentArtifact).where(
+            AgentArtifact.id == target.get("target_id"),
+            AgentArtifact.user_id == user_id,
+            AgentArtifact.conversation_id == proposal.conversation_id,
+        ).with_for_update()
+    )
+    if artifact is None:
+        raise PlanProposalError("artifact_not_found", "原始全天饮食方案不存在")
+    if artifact.status != "proposed":
+        raise PlanProposalError("artifact_not_pending", "原始方案已不能继续确认")
+    if artifact.expires_at <= datetime.now(timezone.utc):
+        artifact.status = "expired"
+        raise PlanProposalError("artifact_expired", "原始全天饮食方案已过期")
+    if (
+        artifact.payload_fingerprint != target.get("artifact_fingerprint")
+        or canonical_fingerprint(artifact.payload_data) != artifact.payload_fingerprint
+    ):
+        raise PlanProposalError("artifact_fingerprint_mismatch", "原始方案内容校验失败")
+    if target.get("target_date") != date.today().isoformat():
+        raise PlanProposalError("artifact_target_date_invalid", "只能在方案目标日期当天确认")
+
+    # Locking the profile serializes Agent-owned nutrition confirmations for a
+    # user.  All meal rows are still created inside the surrounding nested
+    # transaction, so any later error rolls back the complete day.
+    profile = await db.scalar(
+        select(UserProfile).where(UserProfile.user_id == user_id).with_for_update()
+    )
+    if profile is None:
+        raise PlanProposalError("profile_not_found", "个人档案不存在")
+    current = await collect_daily_meal_evidence(
+        db,
+        user_id=user_id,
+        target_date=date.today(),
+    )
+    try:
+        current = apply_ephemeral_inputs(
+            current,
+            EphemeralNutritionInputs.model_validate(
+                artifact.payload_data.get("ephemeral_inputs", {})
+            ),
+            reject_current_conflicts=True,
+        )
+    except (ValidationError, DailyMealPlanError) as exc:
+        raise PlanProposalError(
+            "artifact_context_changed",
+            "用于生成方案的临时资料已不再有效，请重新生成方案",
+        ) from exc
+    if current.fingerprints != artifact.context_fingerprints:
+        raise PlanProposalError(
+            "artifact_context_changed",
+            "档案、健康、体重、训练、饮食或食品数据已变化，请重新生成方案",
+        )
+    after = payload.get("after", {})
+    raw_meals = after.get("meals", [])
+    try:
+        draft = DailyMealDraft.model_validate({
+            "meals": [{
+                "meal_type": meal["meal_type"],
+                "items": [{
+                    "food_id": item["food_id"],
+                    "amount_g": item["amount_g"],
+                } for item in meal["items"]],
+            } for meal in raw_meals],
+        })
+        canonical_meals = await canonicalize_daily_meal_draft(
+            db,
+            draft=draft,
+            evidence=current,
+        )
+    except (ValidationError, DailyMealPlanError) as exc:
+        raise PlanProposalError(
+            "proposal_payload_invalid",
+            "全天饮食提案已不再满足食品或餐次校验",
+        ) from exc
+    if canonical_meals != raw_meals:
+        raise PlanProposalError(
+            "proposal_base_changed",
+            "食品库营养数据已变化，请重新生成方案",
+        )
+
+    meal_types = [item["meal_type"] for item in canonical_meals]
+    conflicts = list((await db.execute(
+        select(MealLog.id, MealLog.meal_type)
+        .where(
+            MealLog.user_id == user_id,
+            MealLog.logged_at == date.today(),
+            MealLog.meal_type.in_(meal_types),
+        )
+        .with_for_update()
+    )).all())
+    if conflicts:
+        raise PlanProposalError(
+            "daily_meal_conflict",
+            "今天已有相同餐次记录，整份方案未写入；请重新生成缺失餐次方案",
+        )
+    created: list[dict[str, Any]] = []
+    for meal_value in canonical_meals:
+        meal = MealLog(
+            user_id=user_id,
+            logged_at=date.today(),
+            meal_type=meal_value["meal_type"],
+        )
+        db.add(meal)
+        await db.flush()
+        for item in meal_value["items"]:
+            db.add(MealItem(
+                meal_id=meal.id,
+                **{key: value for key, value in item.items() if key != "totals"},
+            ))
+        created.append({
+            "meal_log_id": meal.id,
+            "meal_type": meal.meal_type,
+        })
+    artifact.status = "consumed"
+    artifact.version += 1
+    artifact.updated_at = datetime.now(timezone.utc)
+    await db.flush()
+    return {
+        "artifact_id": artifact.id,
+        "logged_at": date.today().isoformat(),
+        "meals": created,
+        "meal_count": len(created),
+    }
+
+
 async def _apply_meal_delete(
     db: AsyncSession,
     *,
@@ -1184,6 +1503,15 @@ async def decide_agent_domain_proposal(
         await db.commit()
         raise PlanProposalError("proposal_expired", "提案已过期")
     if action == "reject":
+        if proposal.proposal_type == "daily_meal_log_create_v1":
+            artifact = await db.scalar(select(AgentArtifact).where(
+                AgentArtifact.id == proposal.target_id,
+                AgentArtifact.user_id == user_id,
+            ).with_for_update())
+            if artifact is not None and artifact.status == "proposed":
+                artifact.status = "superseded"
+                artifact.version += 1
+                artifact.updated_at = moment
         proposal.status = "rejected"
         proposal.version += 1
         proposal.decision_action = "reject"
@@ -1197,6 +1525,7 @@ async def decide_agent_domain_proposal(
             "profile_update_v1": _apply_profile_update,
             "weight_log_create_v1": _apply_weight_create,
             "meal_log_create_v1": _apply_meal_create,
+            "daily_meal_log_create_v1": _apply_daily_meal_create,
             "meal_log_delete_v1": _apply_meal_delete,
             "plan_creation_v1": _apply_plan_creation,
         }

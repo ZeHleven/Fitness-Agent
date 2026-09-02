@@ -44,6 +44,7 @@ const quickPrompts = [
   '查看我的当前训练计划',
   '查看我的健康筛查资料',
   '我今天吃了什么？',
+  '结合我的情况安排今天怎么吃',
   '查看我的体重变化'
 ]
 
@@ -339,7 +340,11 @@ export default function AgentPage () {
                 <Text selectable>{message.content}</Text>
               </View>
               {message.cards.map((card, index) => (
-                <AgentDataCard card={card} key={`${message.id}-${card.type}-${index}`} />
+                <AgentDataCard
+                  card={card}
+                  key={`${message.id}-${card.type}-${index}`}
+                  onAction={prompt => send(prompt)}
+                />
               ))}
               {message.proposal && (
                 <ProposalReferenceCard proposal={message.proposal} />
@@ -371,7 +376,7 @@ export default function AgentPage () {
           value={input}
           maxlength={2000}
           autoHeight
-          placeholder='问计划、下一练、训练记录或健身问题…'
+          placeholder='问训练、健康、体重、饮食或让搭子制定方案…'
           disabled={sending}
           onInput={event => setInput(event.detail.value)}
         />
@@ -382,7 +387,7 @@ export default function AgentPage () {
         >
           {sending ? '处理中' : '发送'}
         </Button>
-        <Text className='composer-hint'>健康建议不能替代医生诊断；未经你的确认不会修改训练数据。</Text>
+        <Text className='composer-hint'>健康建议不能替代医生诊断；未经你的确认不会修改任何数据。</Text>
       </View>
     </View>
   )
@@ -463,6 +468,7 @@ function proposalTitle (type: PlanAdjustmentProposalReference['proposal_type']):
     profile_update_v1: '个人档案更新提案',
     weight_log_create_v1: '体重记录提案',
     meal_log_create_v1: '饮食记录提案',
+    daily_meal_log_create_v1: '全天饮食记录提案',
     meal_log_delete_v1: '饮食删除提案'
   })[type]
 }
@@ -502,7 +508,24 @@ function textValue (value: unknown, fallback = '—'): string {
   return fallback
 }
 
-function AgentDataCard ({ card }: { card: AgentCard }) {
+function evidenceLabel (value: string): string {
+  return ({
+    profile_summary: '个人档案',
+    health_screening: '健康情况',
+    weight_history: '体重趋势',
+    workout_daily_context: '训练情况',
+    nutrition_recent_context: '近期饮食',
+    food_catalog: '标准食品库'
+  } as Record<string, string>)[value] || value
+}
+
+function AgentDataCard ({
+  card,
+  onAction
+}: {
+  card: AgentCard
+  onAction: (prompt: string) => void
+}) {
   const data = card.data
   const titleMap: Record<string, string> = {
     'profile.get_summary': '个人训练资料',
@@ -511,9 +534,46 @@ function AgentDataCard ({ card }: { card: AgentCard }) {
     'workout.get_next': '下一练',
     'workout.get_active_session': '进行中的训练',
     'workout.list_history': '近期训练记录',
-    'workout.get_progress': '训练进度'
+    'workout.get_progress': '训练进度',
+    daily_meal_plan: '今日全天饮食方案'
   }
   const title = titleMap[card.type] || '查询结果'
+
+  if (card.type === 'daily_meal_plan') {
+    const targets = asRecord(data.nutrition_targets)
+    const calories = asRecord(targets.calories_kcal)
+    const protein = asRecord(targets.protein_g)
+    const totals = asRecord(data.daily_totals)
+    const meals = asList(data.meals).map(asRecord)
+    const sources = asList(data.evidence_sources).map(item => evidenceLabel(String(item)))
+    const assumptions = asList(data.assumptions).map(String)
+    const safetyNotes = asList(data.safety_notes).map(String)
+    return (
+      <View className='agent-data-card daily-meal-card'>
+        <Text className='data-card-title'>{title}</Text>
+        <Text className='data-card-secondary'>目标 {textValue(calories.min)}–{textValue(calories.max)} kcal · 蛋白质 {textValue(protein.min)}–{textValue(protein.max)} g</Text>
+        <View className='data-metrics'>
+          <View className='data-metric'><Text className='data-metric-value'>{textValue(totals.calories)}</Text><Text className='data-metric-label'>kcal</Text></View>
+          <View className='data-metric'><Text className='data-metric-value'>{textValue(totals.protein_g)}</Text><Text className='data-metric-label'>蛋白质 g</Text></View>
+          <View className='data-metric'><Text className='data-metric-value'>{textValue(totals.carbs_g)}</Text><Text className='data-metric-label'>碳水 g</Text></View>
+        </View>
+        {meals.map((meal, mealIndex) => (
+          <View className='daily-meal-row' key={`${textValue(meal.meal_type)}-${mealIndex}`}>
+            <Text className='daily-meal-title'>{textValue(meal.meal_type)}</Text>
+            {asList(meal.items).map(asRecord).map((item, itemIndex) => (
+              <Text className='data-card-line' key={`${textValue(item.food_id)}-${itemIndex}`}>
+                {textValue(item.food_name)} · {textValue(item.amount_g)} 克
+              </Text>
+            ))}
+          </View>
+        ))}
+        <Text className='daily-meal-source'>本次参考：{sources.join('、')}</Text>
+        {assumptions.map((item, index) => <Text className='daily-meal-note' key={`assumption-${index}`}>• {item}</Text>)}
+        {safetyNotes.map((item, index) => <Text className='daily-meal-note' key={`safety-${index}`}>• {item}</Text>)}
+        <Button className='daily-meal-save' onClick={() => onAction('保存这份方案')}>保存为待确认提案</Button>
+      </View>
+    )
+  }
 
   if (card.type === 'plan.get_active') {
     const plan = asRecord(data.plan)

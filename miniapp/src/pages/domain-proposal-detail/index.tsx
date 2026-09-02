@@ -131,7 +131,10 @@ export default function DomainProposalDetailPage () {
 function ProposalSection ({ title, value, type }: { title: string, value: Record<string, unknown>, type: string }) {
   const planExercises = Array.isArray(value.exercises) ? value.exercises : []
   const mealItems = Array.isArray(value.items) ? value.items : []
-  const hidden = new Set(['exercises', 'exercise_options', 'rationale', 'safety_notes', 'items'])
+  const meals = Array.isArray(value.meals) ? value.meals.map(item => objectValue(item) || {}) : []
+  const dailyTotals = objectValue(value.daily_totals)
+  const nutritionTargets = objectValue(value.nutrition_targets)
+  const hidden = new Set(['exercises', 'exercise_options', 'rationale', 'safety_notes', 'items', 'meals', 'nutrition_targets', 'daily_totals'])
   return (
     <>
       <Text className='section-heading'>{title}</Text>
@@ -140,10 +143,40 @@ function ProposalSection ({ title, value, type }: { title: string, value: Record
           <ValueRow key={key} label={labels[key] || key} value={item} />
         ))}
         {mealItems.map((item, index) => <NestedItem key={index} value={objectValue(item) || {}} />)}
+        {meals.map((meal, index) => <MealProposalItem key={index} meal={meal} />)}
+        {dailyTotals && (
+          <Text className='meal-total'>全天合计 {display(dailyTotals.calories)} kcal · 蛋白质 {display(dailyTotals.protein_g)} g · 碳水 {display(dailyTotals.carbs_g)} g · 脂肪 {display(dailyTotals.fat_g)} g</Text>
+        )}
+        {nutritionTargets && <NutritionTargets value={nutritionTargets} />}
         {planExercises.length > 0 && <Text className='detail-line'>训练动作共 {planExercises.length} 项，将按提案中的训练日与顺序创建。</Text>}
         {type === 'weight_log_create_v1' && <Text className='detail-line'>确认后会同步更新个人档案中的当前体重和 BMI。</Text>}
       </View>
     </>
+  )
+}
+
+function NutritionTargets ({ value }: { value: Record<string, unknown> }) {
+  const calories = objectValue(value.calories_kcal)
+  const protein = objectValue(value.protein_g)
+  if (!calories && !protein) return null
+  return (
+    <Text className='detail-line'>目标区间：{calories ? `${display(calories.min)}–${display(calories.max)} kcal` : '—'} · 蛋白质 {protein ? `${display(protein.min)}–${display(protein.max)} g` : '—'}</Text>
+  )
+}
+
+function MealProposalItem ({ meal }: { meal: Record<string, unknown> }) {
+  const items = Array.isArray(meal.items) ? meal.items.map(item => objectValue(item) || {}) : []
+  const totals = objectValue(meal.totals)
+  return (
+    <View className='nested-item meal-proposal-item'>
+      <Text className='section-title'>{display(meal.meal_type)}</Text>
+      {items.map((item, index) => (
+        <Text className='detail-line' key={index}>
+          {display(item.food_name)} · {display(item.amount_g)} 克 · {display(item.calories)} kcal
+        </Text>
+      ))}
+      {totals && <Text className='meal-total'>本餐合计 {display(totals.calories)} kcal · 蛋白质 {display(totals.protein_g)} g · 碳水 {display(totals.carbs_g)} g · 脂肪 {display(totals.fat_g)} g</Text>}
+    </View>
   )
 }
 
@@ -176,7 +209,7 @@ function display (value: unknown): string {
   if (typeof value === 'boolean') return value ? '是' : '否'
   return String(value)
 }
-function titleFor (type: string): string { return ({ plan_creation_v1: '训练计划创建提案', profile_update_v1: '个人档案与健康更新提案', weight_log_create_v1: '体重记录提案', meal_log_create_v1: '饮食记录提案', meal_log_delete_v1: '饮食删除提案' } as Record<string, string>)[type] || '数据变更提案' }
+function titleFor (type: string): string { return ({ plan_creation_v1: '训练计划创建提案', profile_update_v1: '个人档案与健康更新提案', weight_log_create_v1: '体重记录提案', meal_log_create_v1: '饮食记录提案', daily_meal_log_create_v1: '全天饮食记录提案', meal_log_delete_v1: '饮食删除提案' } as Record<string, string>)[type] || '数据变更提案' }
 function statusLabel (status: GenericProposalReadResponse['status']): string { return ({ pending_confirmation: '待你确认', applied: '已应用', rejected: '已拒绝', expired: '已过期', stale: '已失效', failed: '执行失败' })[status] }
 function terminalCopy (status: GenericProposalReadResponse['status']): string { if (status === 'applied') return '这项变更已经成功应用。'; if (status === 'rejected') return '提案已拒绝，数据没有变化。'; return '当前提案已经不能执行，请重新发起请求。' }
 function formatTime (value: string): string { const parsed = new Date(value); return Number.isNaN(parsed.getTime()) ? value : `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, '0')}-${String(parsed.getDate()).padStart(2, '0')} ${String(parsed.getHours()).padStart(2, '0')}:${String(parsed.getMinutes()).padStart(2, '0')}` }

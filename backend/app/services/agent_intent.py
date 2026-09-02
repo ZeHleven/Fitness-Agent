@@ -34,9 +34,24 @@ IntentDomain = Literal[
     "workout_progress",
     "nutrition",
 ]
-RequestKind = Literal["query", "assessment", "mutation", "proposal_decision"]
+RequestKind = Literal[
+    "query", "assessment", "generation", "mutation", "proposal_decision"
+]
 RequestedEffect = Literal["read", "create", "update", "delete", "decide"]
 ChangeOperation = Literal["create", "update", "delete"]
+RequestedOutput = Literal["answer", "daily_meal_plan"]
+EvidenceRequirement = Literal[
+    "profile_summary",
+    "health_screening",
+    "weight_history",
+    "active_plan",
+    "workout_progress",
+    "workout_daily_context",
+    "nutrition_today",
+    "nutrition_history",
+    "nutrition_recent_context",
+    "food_catalog",
+]
 
 
 class ChangeRequest(BaseModel):
@@ -85,6 +100,10 @@ class IntentResolution(BaseModel):
     request_kind: RequestKind = "query"
     requested_effect: RequestedEffect = "read"
     change_requests: list[ChangeRequest] = Field(default_factory=list, max_length=12)
+    evidence_requirements: list[EvidenceRequirement] = Field(
+        default_factory=list, max_length=6
+    )
+    requested_output: RequestedOutput = "answer"
     resolved_query: str = Field(default="", max_length=4000)
     references: list[ResolvedReference] = Field(default_factory=list, max_length=12)
     expanded_intents: list[IntentName] = Field(default_factory=list, max_length=7)
@@ -397,14 +416,14 @@ _CHINESE_DIGITS = {
 _MUTATION_VERB_PATTERN = re.compile(
     r"(?:调整|修改|更新|改成|改为|改到|设成|设为|设置|增加|新增|"
     r"新建|添加|写入|录入|减少|降低|调低|调高|降一点|缩短|延长|"
-    r"删除|移除|替换|制定|创建|保存|记录|开始|完成)"
+    r"删除|移除|替换|创建|保存|记录|开始|完成)"
 )
 _NEGATED_MUTATION_PATTERN = re.compile(
     r"(?:不要|别|先别|无需|不用|不必|暂不|别再).{0,12}?"
     r"(?:调整|修改|更新|改成|改为|设置|增加|新增|新建|添加|写入|"
-    r"录入|减少|降低|删除|移除|替换|制定|创建|保存|记录|开始|完成)"
+    r"录入|减少|降低|删除|移除|替换|创建|保存|记录|开始|完成)"
 )
-_CREATE_VERB_PATTERN = re.compile(r"(?:新增|新建|添加|制定|创建|写入|录入)")
+_CREATE_VERB_PATTERN = re.compile(r"(?:新增|新建|添加|创建|写入|录入)")
 _DELETE_VERB_PATTERN = re.compile(r"(?:删除|移除)")
 _HOW_TO_PREFIX_PATTERN = re.compile(r"^(?:怎样|怎么|如何|应该怎样|应该怎么)")
 _CONFIRM_DECISION_PATTERN = re.compile(
@@ -422,7 +441,7 @@ _PROFILE_DOMAIN_PATTERN = re.compile(
     r"(?:个人资料|我的资料|身高|体重|训练目标|训练偏好|训练经验)"
 )
 _NUTRITION_DOMAIN_PATTERN = re.compile(
-    r"(?:饮食|营养|餐食|早餐|午餐|晚餐|热量|蛋白质)"
+    r"(?:饮食|营养|餐食|三餐|食谱|早餐|午餐|晚餐|热量|蛋白质|怎么吃|配餐)"
 )
 _SESSION_DOMAIN_PATTERN = re.compile(
     r"(?:这次训练|当前训练|进行中的训练|训练组|开始训练|完成训练|保存训练|记录训练)"
@@ -432,6 +451,69 @@ _PROGRESS_DOMAIN_PATTERN = re.compile(r"(?:训练进度|周进度|完成率|训�
 _ASSESSMENT_PATTERN = re.compile(
     r"(?:评估|分析|是否适合|合不合适|太激进|完成情况|执行情况)"
 )
+_GENERATION_PATTERN = re.compile(
+    r"(?:制定|安排|推荐|设计|规划|搭配|配|做一份|给一份).{0,24}?"
+    r"(?:饮食|三餐|早餐|午餐|晚餐|餐食|食谱|怎么吃)|"
+    r"(?:饮食|三餐|餐食|食谱).{0,24}?(?:制定|安排|推荐|设计|规划|搭配)"
+)
+_DAILY_MEAL_SCOPE_PATTERN = re.compile(
+    r"(?:今天|今日|全天|一天|三餐|饮食方案|一份.{0,8}(?:饮食|食谱)|"
+    r"(?:增肌|减脂|减重|力量).{0,8}(?:饮食|食谱)|"
+    r"早餐.{0,16}午餐.{0,16}晚餐)"
+)
+_ARTIFACT_SAVE_PATTERN = re.compile(
+    r"(?:保存|记录|提交).{0,16}?(?:这份|这个|刚才|上面|上述|当前)?"
+    r".{0,8}?(?:饮食)?方案|"
+    r"(?:这份|这个|刚才|上面|上述|当前).{0,8}?(?:饮食)?方案"
+    r".{0,16}?(?:保存|记录|提交)"
+)
+_ARTIFACT_REVISION_PATTERN = re.compile(
+    r"(?:调整|修改|改一下|换掉|替换).{0,16}?(?:这份|这个|刚才|上面|上述)"
+    r".{0,8}?(?:饮食)?方案|"
+    r"(?:这份|这个|刚才|上面|上述).{0,8}?(?:饮食)?方案"
+    r".{0,16}?(?:调整|修改|改一下|换掉|替换)"
+)
+
+_DAILY_MEAL_EVIDENCE: list[EvidenceRequirement] = [
+    "profile_summary",
+    "health_screening",
+    "weight_history",
+    "workout_daily_context",
+    "nutrition_recent_context",
+    "food_catalog",
+]
+
+_EVIDENCE_BY_INTENT: dict[IntentName, tuple[EvidenceRequirement, ...]] = {
+    "general_qa": (),
+    "profile_query": ("profile_summary",),
+    "health_query": ("health_screening",),
+    "plan_query": ("active_plan",),
+    "next_workout_query": ("workout_daily_context",),
+    "active_workout_query": (),
+    "workout_history_query": (),
+    "workout_progress_query": ("workout_progress",),
+    "weight_history_query": ("weight_history",),
+    "nutrition_today_query": ("nutrition_today",),
+    "nutrition_history_query": ("nutrition_history",),
+    "food_search_query": ("food_catalog",),
+}
+
+
+def _is_daily_meal_generation(message: str) -> bool:
+    normalized = message.strip().lower()
+    return bool(
+        _NUTRITION_DOMAIN_PATTERN.search(normalized)
+        and _GENERATION_PATTERN.search(normalized)
+        and _DAILY_MEAL_SCOPE_PATTERN.search(normalized)
+    )
+
+
+def _is_artifact_save_request(message: str) -> bool:
+    return bool(_ARTIFACT_SAVE_PATTERN.search(message.strip().lower()))
+
+
+def _is_artifact_revision_request(message: str) -> bool:
+    return bool(_ARTIFACT_REVISION_PATTERN.search(message.strip().lower()))
 
 _FREQUENCY_TARGET_PATTERNS = (
     re.compile(
@@ -664,6 +746,28 @@ def _infer_request_semantics(
                 field_path="proposal.status",
                 target_reference="latest_pending_in_conversation",
                 value=decision_action,
+            )],
+            [],
+            None,
+        )
+
+    # A compound first request such as “制定并保存” must still stop at an
+    # inspectable Artifact.  Saving is only meaningful when it refers to an
+    # already displayed plan and does not also ask to generate one.
+    if _is_daily_meal_generation(message) or _is_artifact_revision_request(message):
+        return "nutrition", "generation", "read", [], [], None
+
+    if _is_artifact_save_request(message):
+        return (
+            "nutrition",
+            "mutation",
+            "create",
+            [ChangeRequest(
+                resource="nutrition",
+                operation="create",
+                field_path="daily_meal_plan.save",
+                target_reference="latest_active_artifact_in_conversation",
+                value=None,
             )],
             [],
             None,
@@ -940,8 +1044,18 @@ def resolve_intent(message: str) -> IntentResolution:
         semantic_missing_slots,
         semantic_question,
     ) = _infer_request_semantics(message, fallback_intent=fallback_intent)
+    requested_output: RequestedOutput = (
+        "daily_meal_plan" if request_kind == "generation" else "answer"
+    )
+    evidence_requirements: list[EvidenceRequirement] = (
+        list(_DAILY_MEAL_EVIDENCE)
+        if requested_output == "daily_meal_plan"
+        else []
+    )
 
-    if request_kind in {"mutation", "proposal_decision"}:
+    if request_kind == "generation":
+        matched = ["nutrition_today_query"]
+    elif request_kind in {"mutation", "proposal_decision"}:
         matched = [
             "general_qa"
             if request_kind == "mutation"
@@ -983,6 +1097,8 @@ def resolve_intent(message: str) -> IntentResolution:
             request_kind=request_kind,
             requested_effect=requested_effect,
             change_requests=change_requests,
+            evidence_requirements=evidence_requirements,
+            requested_output=requested_output,
             resolved_query=message.strip(),
             expanded_intents=[],
             subtasks=(
@@ -1016,6 +1132,8 @@ def resolve_intent(message: str) -> IntentResolution:
         )
     elif request_kind == "proposal_decision":
         subtasks = ["定位当前会话唯一待确认提案", "安全执行提案决策"]
+    elif request_kind == "generation":
+        subtasks = ["按需读取个性化证据", "生成并校验全天饮食方案"]
     if (
         _is_active_continuation_comparison(message)
         and primary != "health_query"
@@ -1045,12 +1163,31 @@ def resolve_intent(message: str) -> IntentResolution:
             "读取近期训练进度，失败时改查历史记录",
             "评估并形成待确认的调整建议",
         ])
+    if request_kind == "generation":
+        evidence_requirements = list(_DAILY_MEAL_EVIDENCE)
+    elif request_kind == "assessment" and intent_domain == "workout_plan":
+        evidence_requirements = [
+            "active_plan",
+            "profile_summary",
+            "health_screening",
+            "workout_progress",
+        ]
+    elif request_kind == "mutation" and intent_domain == "workout_plan":
+        evidence_requirements = ["active_plan"]
+    elif request_kind in {"query", "assessment"}:
+        evidence_requirements = list(dict.fromkeys(
+            evidence
+            for intent in matched
+            for evidence in _EVIDENCE_BY_INTENT[intent]
+        ))[:6]
     return IntentResolution(
         primary_intent=primary,
         intent_domain=intent_domain,
         request_kind=request_kind,
         requested_effect=requested_effect,
         change_requests=change_requests,
+        evidence_requirements=evidence_requirements,
+        requested_output=requested_output,
         resolved_query=resolved_query,
         expanded_intents=matched[1:],
         subtasks=subtasks,
@@ -1217,6 +1354,12 @@ def pending_clarification_to_resolution(
                 pending_clarification.get("requested_effect") or "read"
             ),
             change_requests=pending_clarification.get("change_requests") or [],
+            evidence_requirements=(
+                pending_clarification.get("evidence_requirements") or []
+            ),
+            requested_output=(
+                pending_clarification.get("requested_output") or "answer"
+            ),
             resolved_query=str(
                 pending_clarification.get("resolved_query")
                 or _CANONICAL_QUERY_BY_INTENT[primary_intent]
@@ -1260,6 +1403,8 @@ def normalize_resolution(
     request_kind = resolution.request_kind
     requested_effect = resolution.requested_effect
     change_requests = list(resolution.change_requests)
+    evidence_requirements = list(resolution.evidence_requirements)
+    requested_output = resolution.requested_output
     rules_decision_overrides_non_decision = (
         rules_resolution.request_kind == "proposal_decision"
         and request_kind != "proposal_decision"
@@ -1301,6 +1446,15 @@ def normalize_resolution(
         request_kind = "assessment"
         requested_effect = "read"
         change_requests = []
+    elif (
+        rules_resolution.request_kind == "generation"
+        and request_kind in {"query", "assessment"}
+    ):
+        intent_domain = "nutrition"
+        request_kind = "generation"
+        requested_effect = "read"
+        change_requests = []
+        requested_output = "daily_meal_plan"
     elif request_kind in {"mutation", "proposal_decision"}:
         primary = _INTENT_BY_DOMAIN[intent_domain]
         expanded = []
@@ -1314,6 +1468,39 @@ def normalize_resolution(
     else:
         requested_effect = "read"
         change_requests = []
+    if request_kind == "generation":
+        requested_effect = "read"
+        change_requests = []
+        requested_output = "daily_meal_plan"
+        evidence_requirements = list(_DAILY_MEAL_EVIDENCE)
+    elif request_kind == "assessment" and intent_domain == "workout_plan":
+        requested_output = "answer"
+        evidence_requirements = [
+            "active_plan",
+            "profile_summary",
+            "health_screening",
+            "workout_progress",
+        ]
+    elif requested_output == "daily_meal_plan":
+        requested_output = "answer"
+        evidence_requirements = []
+    else:
+        allowed_evidence = {
+            evidence
+            for intent in [primary, *expanded]
+            for evidence in _EVIDENCE_BY_INTENT[intent]
+        }
+        evidence_requirements = list(dict.fromkeys([
+            *[
+                evidence for evidence in evidence_requirements
+                if evidence in allowed_evidence
+            ],
+            *[
+                evidence
+                for intent in [primary, *expanded]
+                for evidence in _EVIDENCE_BY_INTENT[intent]
+            ],
+        ]))[:6]
     risk_rank = {"low": 0, "medium": 1, "high": 2}
     if risk_rank[rules_resolution.risk_level] > risk_rank[risk_level]:
         risk_level = rules_resolution.risk_level
@@ -1417,6 +1604,10 @@ def normalize_resolution(
         primary = _INTENT_BY_DOMAIN[intent_domain]
         expanded = []
         subtasks = ["定位当前会话唯一待确认提案", "安全执行提案决策"]
+    elif request_kind == "generation" and primary != "health_query":
+        primary = "nutrition_today_query"
+        expanded = []
+        subtasks = ["按需读取个性化证据", "生成并校验全天饮食方案"]
     elif (
         is_explicit_plan_adjustment_request(message)
         and rules_resolution.primary_intent != "health_query"
@@ -1447,6 +1638,13 @@ def normalize_resolution(
         missing_slots = list(semantic_validation.missing_slots)[:8]
         clarification_required = bool(missing_slots)
         clarification_question = semantic_validation.clarification_question
+    elif request_kind == "generation":
+        # The understanding model has not read private evidence and therefore
+        # cannot authoritatively declare profile or health slots missing.
+        # The Evidence Coordinator asks only after server-owned reads.
+        missing_slots = []
+        clarification_required = False
+        clarification_question = None
     else:
         missing_slots = list(dict.fromkeys(
             item.strip() for item in resolution.missing_slots if item.strip()
@@ -1501,6 +1699,8 @@ def normalize_resolution(
         "request_kind": request_kind,
         "requested_effect": requested_effect,
         "change_requests": change_requests,
+        "evidence_requirements": evidence_requirements[:6],
+        "requested_output": requested_output,
         "expanded_intents": expanded,
         "risk_level": risk_level,
         "resolved_query": resolved_query,
@@ -1527,6 +1727,19 @@ INTENT_TOOL_ALLOWLIST: dict[IntentName, tuple[str, ...]] = {
     "food_search_query": ("food.search",),
 }
 
+EVIDENCE_TOOL_ALLOWLIST: dict[EvidenceRequirement, tuple[str, ...]] = {
+    "profile_summary": ("profile.get_summary",),
+    "health_screening": ("health.get_screening_summary",),
+    "weight_history": ("weight.list_history",),
+    "active_plan": ("plan.get_active",),
+    "workout_progress": ("workout.get_progress",),
+    "workout_daily_context": ("workout.get_daily_context",),
+    "nutrition_today": ("nutrition.get_today",),
+    "nutrition_history": ("nutrition.list_history",),
+    "nutrition_recent_context": ("nutrition.get_recent_context",),
+    "food_catalog": ("food.list_candidates",),
+}
+
 MAX_ROUTED_TOOLS = 4
 
 
@@ -1535,6 +1748,8 @@ def route_tools(resolution: IntentResolution) -> list[str]:
     if resolution.clarification_required or resolution.risk_level == "high":
         return []
     if resolution.request_kind == "proposal_decision":
+        return []
+    if resolution.request_kind == "generation":
         return []
     if resolution.request_kind == "mutation":
         return (
@@ -1545,8 +1760,17 @@ def route_tools(resolution: IntentResolution) -> list[str]:
             else []
         )
     routed: list[str] = []
-    for intent in [resolution.primary_intent, *resolution.expanded_intents]:
-        for tool_id in INTENT_TOOL_ALLOWLIST[intent]:
+    tool_groups = (
+        [EVIDENCE_TOOL_ALLOWLIST[item] for item in resolution.evidence_requirements]
+        if resolution.evidence_requirements
+        and resolution.request_kind == "assessment"
+        else [
+            INTENT_TOOL_ALLOWLIST[intent]
+            for intent in [resolution.primary_intent, *resolution.expanded_intents]
+        ]
+    )
+    for tool_group in tool_groups:
+        for tool_id in tool_group:
             if tool_id not in routed:
                 routed.append(tool_id)
                 if len(routed) >= MAX_ROUTED_TOOLS:

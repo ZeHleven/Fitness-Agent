@@ -309,6 +309,15 @@ def _missing_profile_slots(
 
 
 def _missing_meal_slots(changes: list[SemanticChange], effect: str) -> list[str]:
+    if (
+        effect == "create"
+        and len(changes) == 1
+        and changes[0].resource == "nutrition"
+        and changes[0].operation == "create"
+        and changes[0].field_path == "daily_meal_plan.save"
+        and changes[0].target_reference
+    ):
+        return []
     if effect == "delete":
         if len(changes) != 1:
             return ["要删除的具体餐次记录"]

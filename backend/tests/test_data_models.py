@@ -1,4 +1,4 @@
-from app.models.agent import AgentRun
+from app.models.agent import AgentArtifact, AgentRun
 from app.models.exercise import Exercise
 from app.models.food import Food, FoodAlias
 from app.models.knowledge import KnowledgeChunk
@@ -51,11 +51,24 @@ def test_knowledge_chunk_model_fields():
     assert k.embedding is None
 
 
-def test_agent_run_persists_v4_intent_semantics():
+def test_agent_run_persists_v5_intent_semantics():
     columns = AgentRun.__table__.columns
 
     assert "intent_domain" in columns
     assert "request_kind" in columns
     assert "requested_effect" in columns
     assert "change_requests" in columns
-    assert columns["understanding_version"].server_default.arg == "v4"
+    assert "evidence_requirements" in columns
+    assert "requested_output" in columns
+    assert columns["understanding_version"].server_default.arg == "v5"
+
+
+def test_daily_meal_artifact_has_owned_versioned_payload_fields():
+    columns = AgentArtifact.__table__.columns
+
+    assert "user_id" in columns
+    assert "conversation_id" in columns
+    assert "source_run_id" in columns
+    assert "payload_fingerprint" in columns
+    assert "context_fingerprints" in columns
+    assert "expires_at" in columns

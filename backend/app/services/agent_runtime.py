@@ -23,7 +23,7 @@ from app.models.agent import (
     AgentRun,
     AgentToolCall,
 )
-from app.schemas.agent import AgentProposalReference
+from app.schemas.agent import AgentArtifactReference, AgentProposalReference
 from app.schemas.agent_plan_adjustment_proposal_api import (
     PlanAdjustmentProposalDecisionRequest,
 )
@@ -60,6 +60,7 @@ from app.services.agent_plan_adjustment_proposals import (
 )
 from app.services.agent_domain_proposals import (
     DOMAIN_PROPOSAL_TYPES,
+    create_agent_daily_meal_proposal,
     create_agent_meal_create_proposal,
     create_agent_meal_delete_proposal,
     create_agent_plan_creation_proposal,
@@ -67,6 +68,11 @@ from app.services.agent_domain_proposals import (
     create_agent_profile_update_proposal,
     create_agent_weight_proposal,
     decide_agent_domain_proposal,
+)
+from app.services.agent_daily_meal_plans import (
+    DailyMealPlanError,
+    artifact_reference,
+    generate_daily_meal_artifact,
 )
 from app.services.plan_management_proposals import (
     PLAN_MANAGEMENT_TYPES,
@@ -199,6 +205,7 @@ class AgentRuntimeResult:
     cards: list[dict[str, Any]] = field(default_factory=list)
     execution_trace: AgentExecutionTrace | None = None
     proposal: AgentProposalReference | None = None
+    artifact: AgentArtifactReference | None = None
 
 
 class AgentRunOwnershipLost(RuntimeError):
@@ -212,6 +219,17 @@ def _proposal_reference_from_data(
         return None
     try:
         return AgentProposalReference.model_validate(value)
+    except ValueError:
+        return None
+
+
+def _artifact_reference_from_data(
+    value: Any,
+) -> AgentArtifactReference | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        return AgentArtifactReference.model_validate(value)
     except ValueError:
         return None
 
@@ -715,10 +733,25 @@ async def _create_structured_mutation_proposal(
             )
     elif resolution.intent_domain == "nutrition":
         if resolution.requested_effect == "create":
-            reference = await create_agent_meal_create_proposal(
-                enabled=settings.AGENT_NUTRITION_PROPOSALS_ENABLED,
-                **common,
+            saves_daily_artifact = any(
+                change.resource == "nutrition"
+                and change.operation == "create"
+                and change.field_path == "daily_meal_plan.save"
+                for change in changes
             )
+            if saves_daily_artifact:
+                reference = await create_agent_daily_meal_proposal(
+                    db=db,
+                    enabled=settings.AGENT_NUTRITION_PROPOSALS_ENABLED,
+                    user_id=run.user_id,
+                    conversation_id=conversation.id,
+                    run_id=run.id,
+                )
+            else:
+                reference = await create_agent_meal_create_proposal(
+                    enabled=settings.AGENT_NUTRITION_PROPOSALS_ENABLED,
+                    **common,
+                )
         elif resolution.requested_effect == "delete":
             reference = await create_agent_meal_delete_proposal(
                 enabled=settings.AGENT_NUTRITION_PROPOSALS_ENABLED,
@@ -842,6 +875,9 @@ async def execute_agent_run(
             proposal_reference = _proposal_reference_from_data(
                 existing.content_data.get("proposal")
             )
+            artifact_reference_value = _artifact_reference_from_data(
+                existing.content_data.get("artifact")
+            )
             if run.execution_trace:
                 execution_trace = AgentExecutionTrace.model_validate(
                     run.execution_trace
@@ -861,6 +897,7 @@ async def execute_agent_run(
                 cards=cards if isinstance(cards, list) else [],
                 execution_trace=execution_trace,
                 proposal=proposal_reference,
+                artifact=artifact_reference_value,
             )
 
         shadow_session = create_registry_shadow_session(
@@ -917,6 +954,8 @@ async def execute_agent_run(
         run.change_requests = [
             item.model_dump(mode="json") for item in resolution.change_requests
         ]
+        run.evidence_requirements = list(resolution.evidence_requirements)
+        run.requested_output = resolution.requested_output
         run.resolved_query = resolution.resolved_query
         run.references = [item.model_dump() for item in resolution.references]
         run.expanded_intents = resolution.expanded_intents
@@ -928,7 +967,7 @@ async def execute_agent_run(
         run.risk_level = resolution.risk_level
         run.clarification_required = resolution.clarification_required
         run.clarification_question = resolution.clarification_question
-        run.understanding_version = "v4"
+        run.understanding_version = "v5"
         run.intent_source = intent_outcome.source
         run.intent_confidence = resolution.confidence
         run.intent_attempt_count = intent_outcome.attempt_count
@@ -954,13 +993,15 @@ async def execute_agent_run(
                     item.model_dump(mode="json")
                     for item in resolution.change_requests
                 ],
+                "evidence_requirements": list(resolution.evidence_requirements),
+                "requested_output": resolution.requested_output,
                 "expanded_intents": resolution.expanded_intents,
                 "subtasks": resolution.subtasks,
                 "missing_slots": resolution.missing_slots,
                 "clarification_question": resolution.clarification_question,
                 "risk_level": resolution.risk_level,
                 "confidence": resolution.confidence,
-                "understanding_version": "v4",
+                "understanding_version": "v5",
             }
         else:
             conversation.pending_clarification = {}
@@ -1029,11 +1070,13 @@ async def execute_agent_run(
                         item.model_dump(mode="json")
                         for item in resolution.change_requests
                     ],
+                    "evidence_requirements": list(resolution.evidence_requirements),
+                    "requested_output": resolution.requested_output,
                     "missing_slots": slots,
                     "clarification_question": reply,
                     "risk_level": resolution.risk_level,
                     "confidence": resolution.confidence,
-                    "understanding_version": "v4",
+                    "understanding_version": "v5",
                 }
             else:
                 conversation.pending_clarification = {}
@@ -1042,11 +1085,17 @@ async def execute_agent_run(
             short_proposal = _proposal_reference_from_data(
                 (content_data or {}).get("proposal")
             )
+            short_artifact = _artifact_reference_from_data(
+                (content_data or {}).get("artifact")
+            )
+            short_cards = (content_data or {}).get("cards", [])
             return AgentRuntimeResult(
                 reply=reply,
                 run_id=run.id,
+                cards=short_cards if isinstance(short_cards, list) else [],
                 execution_trace=execution_trace,
                 proposal=short_proposal,
+                artifact=short_artifact,
             )
 
         write_structure_unavailable = (
@@ -1056,7 +1105,7 @@ async def execute_agent_run(
         )
         persisted_partial_mutation = (
             bool(pending_clarification_state)
-            and pending_clarification_state.get("understanding_version") == "v4"
+            and pending_clarification_state.get("understanding_version") in {"v4", "v5"}
             and pending_clarification_state.get("request_kind") == "mutation"
             and bool(pending_clarification_state.get("change_requests"))
             and bool(resolution.change_requests)
@@ -1181,6 +1230,65 @@ async def execute_agent_run(
                 reply=reply,
                 run_id=run.id,
                 execution_trace=execution_trace,
+            )
+
+        if (
+            resolution.request_kind == "generation"
+            and resolution.requested_output == "daily_meal_plan"
+        ):
+            generation_message = user_message
+            if (
+                pending_clarification_state
+                and pending_clarification_state.get("request_kind") == "generation"
+            ):
+                generation_message = (
+                    f"原始生成目标：{pending_clarification_state.get('resolved_query') or ''}\n"
+                    f"上一轮缺少：{'、'.join(pending_clarification_state.get('missing_slots') or [])}\n"
+                    f"用户本轮补充：{user_message}"
+                )[:3000]
+            try:
+                generated = await generate_daily_meal_artifact(
+                    db,
+                    user_id=run.user_id,
+                    conversation_id=conversation.id,
+                    run_id=run.id,
+                    user_message=generation_message,
+                    revise_latest=(
+                        "这份方案" in user_message
+                        or "刚才的方案" in user_message
+                        or "上个方案" in user_message
+                    ),
+                )
+            except DailyMealPlanError as exc:
+                reply = f"{exc.message}。本次没有写入任何饮食记录。"
+                terminal_action = "clarify" if exc.missing_slots else "answer"
+                return await complete_semantic_short_circuit(
+                    reply,
+                    terminal_action=terminal_action,
+                    termination_reason=exc.code,
+                    missing_slots=exc.missing_slots or None,
+                )
+            for index, audit in enumerate(generated.audits, start=1):
+                db.add(AgentToolCall(
+                    run_id=run.id,
+                    call_id=f"evidence:{run.id}:{index}",
+                    tool_name=audit.tool_id,
+                    arguments_data={"identity_source": "server_context"},
+                    result_data={
+                        "fields": list(audit.fields),
+                        "result_fingerprint": audit.result_fingerprint,
+                    },
+                    status="completed",
+                    duration_ms=audit.duration_ms,
+                ))
+            artifact_data = artifact_reference(generated.artifact)
+            return await complete_semantic_short_circuit(
+                generated.reply,
+                termination_reason="daily_meal_artifact_created",
+                content_data={
+                    "artifact": artifact_data,
+                    "cards": [generated.card],
+                },
             )
 
         if resolution.request_kind == "proposal_decision":
@@ -1459,7 +1567,7 @@ async def execute_agent_run(
                     "clarification_question": reply,
                     "risk_level": resolution.risk_level,
                     "confidence": resolution.confidence,
-                    "understanding_version": "v4",
+                    "understanding_version": "v5",
                 }
             elif execution_trace.terminal_action == "safe_stop":
                 run.risk_level = "high"

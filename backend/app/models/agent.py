@@ -74,8 +74,8 @@ class AgentRun(Base):
             name="ck_agent_runs_intent_domain",
         ),
         CheckConstraint(
-            "request_kind IN ('query', 'assessment', 'mutation', "
-            "'proposal_decision')",
+            "request_kind IN ('query', 'assessment', 'generation', "
+            "'mutation', 'proposal_decision')",
             name="ck_agent_runs_request_kind",
         ),
         CheckConstraint(
@@ -86,6 +86,14 @@ class AgentRun(Base):
         CheckConstraint(
             "jsonb_typeof(change_requests) = 'array'",
             name="ck_agent_runs_change_requests_array",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(evidence_requirements) = 'array'",
+            name="ck_agent_runs_evidence_requirements_array",
+        ),
+        CheckConstraint(
+            "requested_output IN ('answer', 'daily_meal_plan')",
+            name="ck_agent_runs_requested_output",
         ),
     )
 
@@ -125,6 +133,12 @@ class AgentRun(Base):
     change_requests: Mapped[list] = mapped_column(
         JSONB, default=list, server_default=text("'[]'::jsonb")
     )
+    evidence_requirements: Mapped[list] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'::jsonb")
+    )
+    requested_output: Mapped[str] = mapped_column(
+        String(40), default="answer", server_default="answer"
+    )
     resolved_query: Mapped[str | None] = mapped_column(Text, nullable=True)
     references: Mapped[list] = mapped_column(
         JSONB, default=list, server_default=text("'[]'::jsonb")
@@ -155,7 +169,7 @@ class AgentRun(Base):
     )
     clarification_question: Mapped[str | None] = mapped_column(Text, nullable=True)
     understanding_version: Mapped[str | None] = mapped_column(
-        String(20), default="v4", server_default="v4", nullable=True
+        String(20), default="v5", server_default="v5", nullable=True
     )
     intent_source: Mapped[str] = mapped_column(
         String(20), default="rules", server_default="rules"
@@ -210,6 +224,84 @@ class AgentMessage(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class AgentArtifact(Base):
+    __tablename__ = "agent_artifacts"
+    __table_args__ = (
+        Index(
+            "uq_agent_artifacts_one_active_type_per_conversation",
+            "conversation_id",
+            "artifact_type",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+        ),
+        Index(
+            "ix_agent_artifacts_user_conversation_status",
+            "user_id",
+            "conversation_id",
+            "status",
+        ),
+        CheckConstraint(
+            "artifact_type IN ('daily_meal_plan_v1')",
+            name="ck_agent_artifacts_type",
+        ),
+        CheckConstraint(
+            "status IN ('active', 'superseded', 'proposed', 'consumed', 'expired')",
+            name="ck_agent_artifacts_status",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(payload_data) = 'object'",
+            name="ck_agent_artifacts_payload_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(context_fingerprints) = 'object'",
+            name="ck_agent_artifacts_context_fingerprints_object",
+        ),
+        CheckConstraint(
+            "payload_fingerprint ~ '^[0-9a-f]{64}$'",
+            name="ck_agent_artifacts_fingerprint",
+        ),
+        CheckConstraint(
+            "expires_at > created_at AND "
+            "expires_at <= created_at + INTERVAL '24 hours'",
+            name="ck_agent_artifacts_expiry_window",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(
+        String, ForeignKey("users.id"), index=True
+    )
+    conversation_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("agent_conversations.id", ondelete="CASCADE"),
+        index=True,
+    )
+    source_run_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("agent_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    artifact_type: Mapped[str] = mapped_column(String(60), index=True)
+    schema_version: Mapped[str] = mapped_column(String(20), default="1.0.0")
+    status: Mapped[str] = mapped_column(
+        String(20), default="active", server_default="active", index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    payload_data: Mapped[dict] = mapped_column(JSONB)
+    payload_fingerprint: Mapped[str] = mapped_column(String(64))
+    context_fingerprints: Mapped[dict] = mapped_column(
+        JSONB, default=dict, server_default=text("'{}'::jsonb")
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
 

@@ -115,9 +115,9 @@ def test_personal_plan_fit_fallback_also_includes_profile():
     ]
     assert route_tools(resolution) == [
         "plan.get_active",
-        "workout.get_progress",
-        "workout.list_history",
         "profile.get_summary",
+        "health.get_screening_summary",
+        "workout.get_progress",
     ]
 
 
@@ -452,3 +452,44 @@ def test_natural_language_proposal_decision_is_structured(
     assert resolution.change_requests[0].field_path == "proposal.status"
     assert resolution.change_requests[0].value == expected_action
     assert route_tools(resolution) == []
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "请读取我的个人档案、健康情况、体重和近期饮食记录，根据我的训练目标制定今天全天饮食，包括每种食品的克数。",
+        "结合我的情况安排今天怎么吃",
+        "按今天训练量给我配三餐",
+        "看看我最近状态，做一份增肌饮食",
+    ],
+)
+def test_daily_meal_generation_is_read_only_and_selects_bounded_evidence(message):
+    resolution = resolve_intent(message)
+
+    assert resolution.intent_domain == "nutrition"
+    assert resolution.request_kind == "generation"
+    assert resolution.requested_effect == "read"
+    assert resolution.requested_output == "daily_meal_plan"
+    assert resolution.change_requests == []
+    assert resolution.evidence_requirements == [
+        "profile_summary",
+        "health_screening",
+        "weight_history",
+        "workout_daily_context",
+        "nutrition_recent_context",
+        "food_catalog",
+    ]
+    assert route_tools(resolution) == []
+
+
+def test_daily_meal_generation_save_and_single_meal_record_are_distinct():
+    generation = resolve_intent("制定并保存今天的全天饮食方案")
+    save = resolve_intent("保存这份方案")
+    single_meal = resolve_intent("记录今天午餐")
+
+    assert generation.request_kind == "generation"
+    assert generation.requested_effect == "read"
+    assert save.request_kind == "mutation"
+    assert save.change_requests[0].field_path == "daily_meal_plan.save"
+    assert single_meal.request_kind == "mutation"
+    assert single_meal.change_requests[0].field_path != "daily_meal_plan.save"

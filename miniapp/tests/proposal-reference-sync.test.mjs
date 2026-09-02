@@ -60,6 +60,7 @@ test('agent proposal references accept every supported domain type', () => {
     'profile_update_v1',
     'weight_log_create_v1',
     'meal_log_create_v1',
+    'daily_meal_log_create_v1',
     'meal_log_delete_v1'
   ]) {
     const value = { ...pendingReference, proposal_type: proposalType }
@@ -107,6 +108,27 @@ test('agent page refreshes proposal authority on restore and page return', () =>
   assert.match(source, /synchronizeProposalReferences\(restored\)/)
   assert.match(source, /proposalSyncQueued\.current = true/)
   assert.match(source, /presentation\.terminal \? '查看结果 →' : '查看详情 →'/)
+})
+
+test('daily meal artifact card stays review-only until save is requested', () => {
+  const source = readFileSync(
+    new URL('../src/pages/agent/index.tsx', import.meta.url),
+    'utf8'
+  )
+  assert.match(source, /card\.type === 'daily_meal_plan'/)
+  assert.match(source, /本次参考：/)
+  assert.match(source, /保存为待确认提案/)
+  assert.match(source, /onAction\('保存这份方案'\)/)
+})
+
+test('multi-meal proposal detail renders per-meal items and nutrition totals', () => {
+  const source = readFileSync(
+    new URL('../src/pages/domain-proposal-detail/index.tsx', import.meta.url),
+    'utf8'
+  )
+  assert.match(source, /daily_meal_log_create_v1/)
+  assert.match(source, /value\.meals/)
+  assert.match(source, /全天合计/)
 })
 
 test('fresh confirm bypasses modal while reject and uncertain retry reconfirm', () => {

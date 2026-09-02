@@ -17,6 +17,7 @@ ToolIntentName = Literal[
     "nutrition_today_query",
     "nutrition_history_query",
     "food_search_query",
+    "daily_meal_generation",
 ]
 
 

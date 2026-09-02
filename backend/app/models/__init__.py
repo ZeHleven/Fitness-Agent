@@ -8,7 +8,7 @@ from app.models.workout import WorkoutPlan, PlannedExercise, WorkoutSession, Ses
 from app.models.meal import MealLog, MealItem
 from app.models.wechat import WeChatIdentity
 from app.models.agent import (
-    AgentConversation, AgentMessage, AgentRun, AgentToolCall,
+    AgentArtifact, AgentConversation, AgentMessage, AgentRun, AgentToolCall,
     AgentProposal, AgentMemory,
 )
 
@@ -19,6 +19,6 @@ __all__ = [
     "WorkoutPlan", "PlannedExercise", "WorkoutSession", "SessionExercise",
     "MealLog", "MealItem",
     "WeChatIdentity",
-    "AgentConversation", "AgentMessage", "AgentRun", "AgentToolCall",
+    "AgentArtifact", "AgentConversation", "AgentMessage", "AgentRun", "AgentToolCall",
     "AgentProposal", "AgentMemory",
 ]

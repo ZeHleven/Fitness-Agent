@@ -99,8 +99,10 @@ INTENT_SYSTEM_PROMPT = """你是 Fitness Agent 的意图解析器，只做分类
 先独立判断业务领域和请求动作，再生成兼容意图。把用户最后一条消息解析为严格 JSON。
 
 intent_domain 只能是：general、profile、health、workout_plan、workout_session、workout_history、workout_progress、nutrition。
-request_kind 只能是：query、assessment、mutation、proposal_decision。
+request_kind 只能是：query、assessment、generation、mutation、proposal_decision。
 requested_effect 只能是：read、create、update、delete、decide。
+requested_output 只能是：answer、daily_meal_plan。
+evidence_requirements 只能包含：profile_summary、health_screening、weight_history、active_plan、workout_progress、workout_daily_context、nutrition_today、nutrition_history、nutrition_recent_context、food_catalog，最多 6 项。
 
 兼容 primary_intent 只能使用：
 - general_qa：不依赖用户私有数据的一般健身知识问答
@@ -119,12 +121,15 @@ requested_effect 只能是：read、create、update、delete、decide。
 规则：
 0. 先判断用户是读取/咨询，还是要求创建、修改、删除数据。不要把“改成、调整为、设置、增加、减少、删除、保存、记录”等明确写入要求当作查询。
    “怎样/如何安排三天训练”是咨询；“把我的计划改成每周三天”是修改。
+   “根据我的情况制定今天全天饮食”是 generation/read，不是写入；制定、安排、推荐、设计方案本身不会修改数据。
+   “保存这份饮食方案”才是 mutation/create，change_requests 使用 field_path=daily_meal_plan.save、target_reference=latest_active_artifact_in_conversation。
    用户明确要求修改时 request_kind=mutation、requested_effect=update，即使执行能力可能暂不支持。
    “确认刚才的调整”“拒绝这个方案”为 proposal_decision/decide。
    assessment 只用于要求根据档案、进度或历史评估是否需要变化，不能代替明确 mutation。
 1. resolved_query 必须把省略、指代、时间范围和目标补成可独立理解的完整查询；无法可靠补全时不要猜，进入澄清。
 2. references 只记录实际发生的指代消解，包含原表达、解析值、类型和来源；没有指代时返回空数组。
 3. primary_intent 是直接服务用户目标的主意图；每个确实需要私有数据的关联目标都放入 expanded_intents。
+   evidence_requirements 单独表达完成任务需要读取的事实，不要再用 expanded_intents 代替证据选择。
 4. subtasks 把多目标查询拆成简短、互不重复的语义任务，但不指定工具名称或固定执行顺序。
 5. 不要因为可能有帮助就泛化意图；不要把固定场景绑定成固定步骤。
 6. 只有缺失信息会实质改变结果或涉及安全风险时，clarification_required 才为 true；此时填写 missing_slots 和单一、具体的 clarification_question。
@@ -141,10 +146,15 @@ requested_effect 只能是：read、create、update、delete、decide。
 17. mutation 缺少目标值、克数、动作或餐次标识时，填写 missing_slots 并要求澄清。proposal_decision 的 change_requests 使用 field_path=proposal.status，value=confirm 或 reject；提案决策的 resource 使用用户所指领域，无法判断时可用 general。
 18. 食品重量统一输出 amount_g 数值：g/克保持原值，kg/千克/公斤换算为克。不要输出单位字符串，也不要估算用户未提供的重量。
 19. missing_slots 只是模型提示，最终由服务端根据 change_requests 从头验证。已提供的嵌套字段必须保留，不要因为规则或上下文未提取到就删除。
+20. generation 必须 requested_effect=read、change_requests=[]。全天饮食方案使用 requested_output=daily_meal_plan，并请求 profile_summary、health_screening、weight_history、workout_daily_context、nutrition_recent_context、food_catalog。
+21. query、assessment、generation 默认 requested_output=answer，除非明确生成全天饮食结构化方案。mutation 和 proposal_decision 必须 requested_output=answer。
 
-顶层字段只能是 primary_intent、intent_domain、request_kind、requested_effect、change_requests、resolved_query、references、expanded_intents、subtasks、missing_slots、clarification_required、clarification_question、risk_level、confidence。
+顶层字段只能是 primary_intent、intent_domain、request_kind、requested_effect、change_requests、evidence_requirements、requested_output、resolved_query、references、expanded_intents、subtasks、missing_slots、clarification_required、clarification_question、risk_level、confidence。
 
 JSON 示例：
+用户：请结合我的个人档案、健康、体重和训练情况，制定今天全天饮食，包括每种食品的克数。
+输出：{"primary_intent":"nutrition_today_query","intent_domain":"nutrition","request_kind":"generation","requested_effect":"read","change_requests":[],"evidence_requirements":["profile_summary","health_screening","weight_history","workout_daily_context","nutrition_recent_context","food_catalog"],"requested_output":"daily_meal_plan","resolved_query":"根据当前用户的档案、健康、体重趋势、当日训练和近期饮食生成今天全天饮食方案","references":[],"expanded_intents":[],"subtasks":["读取个性化证据","生成并校验全天饮食方案"],"missing_slots":[],"clarification_required":false,"clarification_question":null,"risk_level":"low","confidence":0.98}
+
 用户：结合我的当前计划和最近训练进度，告诉我下一练做什么。
 输出：{"primary_intent":"next_workout_query","intent_domain":"workout_session","request_kind":"query","requested_effect":"read","change_requests":[],"resolved_query":"结合我的当前计划和最近训练进度，查询下一练应该做什么","references":[],"expanded_intents":["plan_query","workout_progress_query"],"subtasks":["读取下一练","核对当前计划","参考近期进度"],"missing_slots":[],"clarification_required":false,"clarification_question":null,"risk_level":"low","confidence":0.94}
 
@@ -223,6 +233,8 @@ async def _invoke_model_intent(
                 "request_kind",
                 "requested_effect",
                 "change_requests",
+                "evidence_requirements",
+                "requested_output",
                 "expanded_intents",
                 "subtasks",
                 "missing_slots",
@@ -276,7 +288,7 @@ def _should_use_rules_first(
         marker in message for marker in _CONTEXT_DEPENDENT_MARKERS
     ):
         return False
-    if resolution.request_kind in {"mutation", "proposal_decision"}:
+    if resolution.request_kind in {"generation", "mutation", "proposal_decision"}:
         return False
     # A red flag normally short-circuits immediately.  The one exception is an
     # explicit request to record a fully specified health/profile update: let
@@ -315,7 +327,7 @@ def _safe_rules_fallback_resolution(
         return resolution
     trusted_partial = (
         bool(pending_clarification)
-        and pending_clarification.get("understanding_version") == "v4"
+        and pending_clarification.get("understanding_version") in {"v4", "v5"}
         and pending_clarification.get("request_kind") == "mutation"
         and bool(pending_clarification.get("change_requests"))
     )
@@ -476,6 +488,17 @@ async def resolve_intent_with_fallback(
             ):
                 raise IntentStructuredOutputError(
                     "semantic_mutation_structure_missing"
+                )
+            if (
+                direct_rules_resolution.request_kind == "generation"
+                and (
+                    resolution.request_kind != "generation"
+                    or resolution.requested_effect != "read"
+                    or bool(resolution.change_requests)
+                )
+            ):
+                raise IntentStructuredOutputError(
+                    "semantic_generation_conflict"
                 )
             attempt_timings.append(IntentAttemptTiming(
                 attempt=attempt,

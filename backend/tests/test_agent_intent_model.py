@@ -586,6 +586,58 @@ async def test_deterministic_proposal_decision_fills_missing_model_action():
 
 
 @pytest.mark.asyncio
+async def test_generation_mutation_conflict_is_repaired_instead_of_overwritten():
+    unsafe = IntentResolution(
+        primary_intent="profile_query",
+        intent_domain="profile",
+        request_kind="mutation",
+        requested_effect="update",
+        change_requests=[ChangeRequest(
+            resource="profile",
+            operation="update",
+            field_path="profile.primary_goal",
+            value="增肌",
+        )],
+        resolved_query="修改资料",
+        confidence=0.9,
+    )
+    repaired = IntentResolution(
+        primary_intent="nutrition_today_query",
+        intent_domain="nutrition",
+        request_kind="generation",
+        requested_effect="read",
+        requested_output="daily_meal_plan",
+        evidence_requirements=[
+            "profile_summary",
+            "health_screening",
+            "weight_history",
+            "workout_daily_context",
+            "nutrition_recent_context",
+            "food_catalog",
+        ],
+        resolved_query="生成今天全天饮食方案",
+        confidence=0.98,
+    )
+    with (
+        patch.object(settings, "DEEPSEEK_API_KEY", "test-key"),
+        patch(
+            "app.services.agent_intent_model._invoke_model_intent",
+            new=AsyncMock(side_effect=[unsafe, repaired]),
+        ) as invoked,
+    ):
+        outcome = await resolve_intent_with_fallback(
+            "结合我的情况安排今天怎么吃",
+            use_model=True,
+        )
+
+    assert invoked.await_count == 2
+    assert outcome.source == "model"
+    assert outcome.resolution.request_kind == "generation"
+    assert outcome.resolution.requested_effect == "read"
+    assert outcome.resolution.change_requests == []
+
+
+@pytest.mark.asyncio
 async def test_plan_mutation_uses_model_first_and_safe_structured_fallback():
     with (
         patch.object(settings, "AGENT_RULES_FIRST_ENABLED", True),
@@ -774,9 +826,9 @@ async def test_plan_fit_overlay_restores_profile_and_history_candidates():
     ]
     assert route_tools(outcome.resolution) == [
         "plan.get_active",
-        "workout.get_progress",
-        "workout.list_history",
         "profile.get_summary",
+        "health.get_screening_summary",
+        "workout.get_progress",
     ]
 
 

@@ -89,7 +89,7 @@ def test_every_read_tool_schema_excludes_identity_fields(db_session):
         allowlist=allowlist,
     )
 
-    assert len(tools) == 11
+    assert len(tools) == 14
     assert all(
         "user_id" not in str(item.args_schema.model_json_schema())
         for item in tools

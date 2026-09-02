@@ -603,7 +603,7 @@ async def test_chat_model_failure_does_not_persist_rule_extracted_write_slots(
     assert "proposal" not in response.json()
     run = await db_session.get(AgentRun, response.json()["run_id"])
     assert run is not None
-    assert run.understanding_version == "v4"
+    assert run.understanding_version == "v5"
     assert run.change_requests == []
     assert run.error_code == "intent_structure_unavailable"
     await db_session.refresh(conversation)
@@ -703,7 +703,7 @@ async def test_chat_partial_meal_structure_is_filled_by_model_across_turns(
     assert second.json()["proposal"]["proposal_type"] == "meal_log_create_v1"
     assert resolver.await_count == 2
     pending = resolver.await_args_list[1].kwargs["pending_clarification"]
-    assert pending["understanding_version"] == "v4"
+    assert pending["understanding_version"] == "v5"
     assert pending["change_requests"][0]["value"]["items"] == [
         {"food_name": "多轮鸡胸肉"}
     ]
