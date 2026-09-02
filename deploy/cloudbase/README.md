@@ -3,14 +3,16 @@
 Release ZIP 是可重复生成的部署产物，不提交到 Git。构建当前版本：
 
 ```powershell
-.\scripts\package_cloudbase_backend.ps1 -Version 0.5.28
+.\scripts\package_cloudbase_backend.ps1 -Version 0.5.29
 ```
 
-输出文件为 `deploy/cloudbase/fitness-agent-backend-0.5.28.zip`。
+输出文件为 `deploy/cloudbase/fitness-agent-backend-0.5.29.zip`。
 
-`0.5.28` 修复全天饮食方案的结构化生成契约：优先使用严格函数调用，并在供应商能力不兼容时回退到包含明确 Schema 与示例的 JSON Mode。两次生成共享统一的服务端校验与精确修复反馈，失败时保留脱敏诊断且继续保证零 Artifact、零 Proposal、零饮食写入。
+`0.5.29` 将全天饮食的精确营养配平从模型移交给服务端 HiGHS 混合整数优化器：模型选择餐次和食品，服务端以整数克数优先求理想区间，必要时在明确展示的均衡偏差范围内返回可审阅方案。食品真实性、饮食限制、医学边界和确认前零写入仍是硬约束。
 
-本热修不新增数据库迁移，数据库版本仍为 Alembic `0024`；从 `0.5.27` 升级不需要重新开启启动迁移。若从更早版本直接升级，仍需先将数据库升级到 `0024`，确认 `/ready` 正常后关闭启动迁移。打包脚本会拒绝包含 `.env`、测试目录、缓存或 Python 字节码的产物，并校验迁移、Proposal schema/service、Planner 与 Trace 核心文件齐全。
+本版本不新增数据库迁移，数据库版本仍为 Alembic `0024`；从 `0.5.27` 或 `0.5.28` 升级不需要重新开启启动迁移。若从更早版本直接升级，仍需先将数据库升级到 `0024`，确认 `/ready` 正常后关闭启动迁移。打包脚本会拒绝包含 `.env`、测试目录、缓存或 Python 字节码的产物，并校验迁移、Proposal schema/service、Planner、Trace 与营养优化器核心文件齐全。
+
+正式打包前还必须在 GitHub `main` 分支手动运行 `Daily Meal Live Model Release Gate`。该工作流使用受保护的 `agent-live-eval` Environment 和其中的 `DEEPSEEK_API_KEY`，要求原句连续 10 次全部成功、20 条同义表达成功率至少 95%，并验证未确认写入数为零。评测报告只包含脱敏状态和统计，不记录个人资料、食品候选或模型原文。
 
 内部联调首次部署建议保持新增 Proposal 开关关闭，完成迁移与健康检查后再按需逐项开启：
 

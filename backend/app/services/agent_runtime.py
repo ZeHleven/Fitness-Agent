@@ -240,6 +240,7 @@ def _persist_daily_meal_diagnostics(
     run_id: str,
     evidence_audits: tuple[Any, ...],
     generation_attempts: tuple[Any, ...],
+    optimization_attempts: tuple[Any, ...] = (),
 ) -> None:
     for index, audit in enumerate(evidence_audits, start=1):
         db.add(AgentToolCall(
@@ -262,6 +263,20 @@ def _persist_daily_meal_diagnostics(
             arguments_data={
                 "attempt": audit.attempt,
                 "transport": audit.transport,
+            },
+            result_data=audit.result_data(),
+            status=audit.status,
+            error_code=audit.error_code,
+            duration_ms=audit.duration_ms,
+        ))
+    for audit in optimization_attempts:
+        db.add(AgentToolCall(
+            run_id=run_id,
+            call_id=f"optimizer:{run_id}:daily-meal:{audit.attempt}:{audit.mode}",
+            tool_name="agent.daily_meal_optimizer",
+            arguments_data={
+                "attempt": audit.attempt,
+                "mode": audit.mode,
             },
             result_data=audit.result_data(),
             status=audit.status,
@@ -1301,6 +1316,7 @@ async def execute_agent_run(
                     run_id=run.id,
                     evidence_audits=tuple(exc.evidence_audits),
                     generation_attempts=tuple(exc.generation_attempts),
+                    optimization_attempts=tuple(exc.optimization_attempts),
                 )
                 reply = f"{exc.message}。本次没有写入任何饮食记录。"
                 terminal_action = "clarify" if exc.missing_slots else "answer"
@@ -1315,6 +1331,7 @@ async def execute_agent_run(
                 run_id=run.id,
                 evidence_audits=generated.audits,
                 generation_attempts=generated.generation_attempts,
+                optimization_attempts=generated.optimization_attempts,
             )
             artifact_data = artifact_reference(generated.artifact)
             return await complete_semantic_short_circuit(

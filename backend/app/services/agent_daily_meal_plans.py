@@ -29,6 +29,14 @@ from app.services.ai_client import (
     StructuredCompletionResult,
     structured_chat_completion,
 )
+from app.services.daily_meal_optimizer import (
+    SOLVER_VERSION,
+    DailyMealOptimizationError,
+    OptimizedMealDraft,
+    nutrition_fit,
+    optimize_daily_meal_amounts,
+    target_gaps,
+)
 from app.services.workout_queries import (
     build_plan_detail,
     get_workout_progress_summary,
@@ -113,12 +121,14 @@ class DailyMealPlanError(ValueError):
         missing_slots: list[str] | None = None,
         evidence_audits: tuple[Any, ...] = (),
         generation_attempts: tuple[Any, ...] = (),
+        optimization_attempts: tuple[Any, ...] = (),
     ):
         self.code = code
         self.message = message
         self.missing_slots = missing_slots or []
         self.evidence_audits = evidence_audits
         self.generation_attempts = generation_attempts
+        self.optimization_attempts = optimization_attempts
         super().__init__(message)
 
 
@@ -196,6 +206,32 @@ class GenerationAttemptAudit:
 
 
 @dataclass(frozen=True)
+class OptimizationAttemptAudit:
+    attempt: int
+    mode: Literal["ideal", "acceptable"]
+    status: Literal["completed", "infeasible", "failed"]
+    duration_ms: int
+    error_code: str | None = None
+    violated_metrics: tuple[str, ...] = ()
+    target_deviations: tuple[dict[str, Any], ...] = ()
+    objective_value: float | None = None
+    nutrition_score: float | None = None
+    portion_score: float | None = None
+
+    def result_data(self) -> dict[str, Any]:
+        return {
+            "attempt": self.attempt,
+            "mode": self.mode,
+            "solver_version": SOLVER_VERSION,
+            "violated_metrics": list(self.violated_metrics),
+            "target_deviations": list(self.target_deviations),
+            "objective_value": self.objective_value,
+            "nutrition_score": self.nutrition_score,
+            "portion_score": self.portion_score,
+        }
+
+
+@dataclass(frozen=True)
 class DailyMealEvidence:
     values: dict[str, Any]
     fingerprints: dict[str, str]
@@ -209,6 +245,16 @@ class DailyMealArtifactResult:
     reply: str
     audits: tuple[EvidenceAudit, ...]
     generation_attempts: tuple[GenerationAttemptAudit, ...]
+    optimization_attempts: tuple[OptimizationAttemptAudit, ...]
+
+
+@dataclass(frozen=True)
+class _OptimizedCandidate:
+    draft: DailyMealDraft
+    meals: list[dict[str, Any]]
+    totals: dict[str, float]
+    fit: dict[str, Any]
+    optimization: OptimizedMealDraft
 
 
 def canonical_fingerprint(value: Any) -> str:
@@ -370,6 +416,11 @@ async def collect_daily_meal_evidence(
                 "protein_g": float(item.protein_g),
                 "carbs_g": float(item.carbs_g),
                 "fat_g": float(item.fat_g),
+                "common_portion_g": (
+                    float(item.common_portion_g)
+                    if item.common_portion_g is not None
+                    else None
+                ),
                 "diet_tags": item.diet_tags or [],
             } for item in foods],
         }
@@ -401,7 +452,10 @@ async def collect_daily_meal_evidence(
         ),
         (
             "food_catalog",
-            ("id", "name", "category", "nutrition_per_100g", "diet_tags"),
+            (
+                "id", "name", "category", "nutrition_per_100g",
+                "common_portion_g", "diet_tags",
+            ),
             load_foods,
         ),
     )
@@ -798,7 +852,7 @@ async def canonicalize_daily_meal_draft(
     return meals
 
 
-def _all_totals(
+def calculate_daily_nutrition_totals(
     evidence: DailyMealEvidence,
     generated_meals: list[dict[str, Any]],
 ) -> dict[str, float]:
@@ -811,6 +865,16 @@ def _all_totals(
         "protein_g": round(float(today.get("total_protein_g", 0)) + generated["protein_g"], 1),
         "carbs_g": round(float(today.get("total_carbs_g", 0)) + generated["carbs_g"], 1),
         "fat_g": round(float(today.get("total_fat_g", 0)) + generated["fat_g"], 1),
+    }
+
+
+def _existing_nutrition_totals(evidence: DailyMealEvidence) -> dict[str, float]:
+    today = evidence.values["nutrition_recent_context"].get("today", {})
+    return {
+        "calories": float(today.get("total_calories", 0)),
+        "protein_g": float(today.get("total_protein_g", 0)),
+        "carbs_g": float(today.get("total_carbs_g", 0)),
+        "fat_g": float(today.get("total_fat_g", 0)),
     }
 
 
@@ -982,11 +1046,13 @@ async def _generate_draft(
                 "role": "system",
                 "content": (
                     "你是全天饮食结构化方案生成器。只能使用 food_candidates 中的稳定 food_id，"
-                    "不得输出食品名称或营养数值。只生成今天尚未记录的餐次；默认补足三顿主餐，"
+                    "不得输出食品名称或营养数值。amount_g 是建议份量，服务端会用确定性算法"
+                    "在安全边界内调整克数。只生成今天尚未记录的餐次；默认补足三顿主餐，"
                     "只有确有需要才增加加餐。每餐 1-8 项，全天最多 4 餐。目标是让已有餐次加"
                     "新餐次后的全天热量、蛋白质和供能比例落入 targets。revision_source 仅表示"
                     "用户正在修改的已有方案；repair_context 仅表示上一次失败及需要修复的字段。"
-                    "严格按提交函数的参数结构返回。"
+                    "如果 repair_context 表示当前食品组合无法配平，应更换食品组合，而不是只"
+                    "改 JSON 格式。严格按提交函数的参数结构返回。"
                 ),
             },
             {
@@ -1031,6 +1097,7 @@ def artifact_card(artifact: AgentArtifact) -> dict[str, Any]:
             "meals": payload["meals"],
             "nutrition_targets": payload["nutrition_targets"],
             "daily_totals": payload["daily_totals"],
+            "nutrition_fit": payload.get("nutrition_fit"),
             "evidence_sources": payload["evidence_sources"],
             "assumptions": payload["assumptions"],
             "safety_notes": payload["safety_notes"],
@@ -1145,11 +1212,13 @@ async def generate_daily_meal_artifact(
             evidence_audits=evidence.audits,
         )
     attempts: list[GenerationAttemptAudit] = []
+    optimization_attempts: list[OptimizationAttemptAudit] = []
+    acceptable_candidates: list[_OptimizedCandidate] = []
     repair_context: dict[str, Any] | None = None
     last_failure_stage = "structure"
-    draft: DailyMealDraft | None = None
-    meals: list[dict[str, Any]] | None = None
-    totals: dict[str, float] | None = None
+    last_failure_message = "全天饮食方案生成服务暂时未能形成有效结构，请稍后重试"
+    selected: _OptimizedCandidate | None = None
+    existing_totals = _existing_nutrition_totals(evidence)
     for attempt_number in (1, 2):
         last_failure_stage = "structure"
         try:
@@ -1184,6 +1253,7 @@ async def generate_daily_meal_artifact(
                 "全天饮食方案生成服务暂时不可用，请稍后重试",
                 evidence_audits=evidence.audits,
                 generation_attempts=tuple(attempts),
+                optimization_attempts=tuple(optimization_attempts),
             ) from exc
 
         if completion.payload is None:
@@ -1241,7 +1311,6 @@ async def generate_daily_meal_artifact(
                 "invalid_draft": _safe_repair_draft(completion.payload),
                 "finish_reason": completion.finish_reason,
             }
-            draft = None
             logger.warning(
                 "daily_meal_generation_attempt run_id=%s attempt=%s "
                 "transport=%s status=failed error_code=%s validation_paths=%s "
@@ -1260,15 +1329,13 @@ async def generate_daily_meal_artifact(
             continue
 
         try:
-            meals = await canonicalize_daily_meal_draft(
+            canonical_draft_meals = await canonicalize_daily_meal_draft(
                 db,
                 draft=draft,
                 evidence=evidence,
             )
-            totals = _all_totals(evidence, meals)
-            validate_daily_totals(totals, targets)
         except (DailyMealPlanError, ValidationError) as exc:
-            last_failure_stage = "target_validation"
+            last_failure_stage = "food_validation"
             error_code = getattr(
                 exc,
                 "code",
@@ -1295,10 +1362,11 @@ async def generate_daily_meal_artifact(
                 "error_code": error_code,
                 "validation_paths": list(validation_paths),
                 "invalid_draft": draft.model_dump(mode="json"),
-                "instruction": str(exc),
+                "instruction": (
+                    "食品、餐次或克数不符合硬性安全约束，请只使用候选食品并修正结构"
+                ),
             }
-            meals = None
-            totals = None
+            last_failure_message = "模型选择的食品、餐次或克数未通过安全校验"
             logger.warning(
                 "daily_meal_generation_attempt run_id=%s attempt=%s "
                 "transport=%s status=failed error_code=%s validation_paths=%s "
@@ -1338,24 +1406,182 @@ async def generate_daily_meal_artifact(
             audit.duration_ms,
             audit.fallback_reason,
         )
-        break
-    if draft is None or meals is None or totals is None:
-        code = (
-            "daily_meal_target_validation_failed"
-            if last_failure_stage == "target_validation"
-            else "daily_meal_generation_invalid"
+
+        initial_totals = calculate_daily_nutrition_totals(
+            evidence, canonical_draft_meals
         )
-        message = (
-            "两次生成结果均未满足服务端营养和食品安全校验"
-            if code == "daily_meal_target_validation_failed"
-            else "全天饮食方案生成服务暂时未能形成有效结构，请稍后重试"
+        candidate_for_repair: _OptimizedCandidate | None = None
+        for optimization_mode in ("ideal", "acceptable"):
+            try:
+                optimized = await asyncio.to_thread(
+                    optimize_daily_meal_amounts,
+                    meals=[{
+                        "meal_type": meal.meal_type,
+                        "items": [item.model_dump(mode="json") for item in meal.items],
+                    } for meal in draft.meals],
+                    food_candidates=compatible_foods,
+                    existing_totals=existing_totals,
+                    targets=targets,
+                    mode=optimization_mode,
+                )
+                optimized_draft = DailyMealDraft.model_validate({
+                    "meals": optimized.meals,
+                    "rationale": draft.rationale,
+                })
+                optimized_meals = await canonicalize_daily_meal_draft(
+                    db,
+                    draft=optimized_draft,
+                    evidence=evidence,
+                )
+                optimized_totals = calculate_daily_nutrition_totals(
+                    evidence, optimized_meals
+                )
+                fit = nutrition_fit(optimized_totals, targets)
+            except DailyMealOptimizationError as exc:
+                violated_metrics = exc.violated_metrics or tuple(
+                    item["metric"] for item in target_gaps(initial_totals, targets)
+                )
+                status = (
+                    "infeasible"
+                    if exc.code == "daily_meal_optimization_infeasible"
+                    else "failed"
+                )
+                optimization_audit = OptimizationAttemptAudit(
+                    attempt=attempt_number,
+                    mode=optimization_mode,
+                    status=status,
+                    duration_ms=exc.duration_ms,
+                    error_code=exc.code,
+                    violated_metrics=violated_metrics,
+                    target_deviations=tuple(
+                        target_gaps(initial_totals, targets)
+                    ),
+                )
+                optimization_attempts.append(optimization_audit)
+                logger.warning(
+                    "daily_meal_optimization_attempt run_id=%s attempt=%s "
+                    "mode=%s status=%s error_code=%s violated_metrics=%s "
+                    "duration_ms=%s solver_version=%s",
+                    run_id,
+                    attempt_number,
+                    optimization_mode,
+                    status,
+                    exc.code,
+                    list(violated_metrics),
+                    exc.duration_ms,
+                    SOLVER_VERSION,
+                )
+                if exc.code == "daily_meal_optimizer_unavailable":
+                    raise DailyMealPlanError(
+                        exc.code,
+                        exc.message,
+                        evidence_audits=evidence.audits,
+                        generation_attempts=tuple(attempts),
+                        optimization_attempts=tuple(optimization_attempts),
+                    ) from exc
+                continue
+            except (DailyMealPlanError, ValidationError) as exc:
+                optimization_audit = OptimizationAttemptAudit(
+                    attempt=attempt_number,
+                    mode=optimization_mode,
+                    status="failed",
+                    duration_ms=0,
+                    error_code="daily_meal_optimizer_result_invalid",
+                )
+                optimization_attempts.append(optimization_audit)
+                raise DailyMealPlanError(
+                    "daily_meal_optimizer_unavailable",
+                    "营养配平结果未通过服务端复验",
+                    evidence_audits=evidence.audits,
+                    generation_attempts=tuple(attempts),
+                    optimization_attempts=tuple(optimization_attempts),
+                ) from exc
+
+            optimization_audit = OptimizationAttemptAudit(
+                attempt=attempt_number,
+                mode=optimization_mode,
+                status="completed",
+                duration_ms=optimized.duration_ms,
+                target_deviations=tuple(
+                    target_gaps(optimized_totals, targets)
+                ),
+                objective_value=round(optimized.objective_value, 6),
+                nutrition_score=round(optimized.nutrition_score, 6),
+                portion_score=round(optimized.portion_score, 6),
+            )
+            optimization_attempts.append(optimization_audit)
+            logger.info(
+                "daily_meal_optimization_attempt run_id=%s attempt=%s "
+                "mode=%s status=completed fit_status=%s duration_ms=%s "
+                "solver_version=%s",
+                run_id,
+                attempt_number,
+                optimization_mode,
+                fit["status"],
+                optimized.duration_ms,
+                SOLVER_VERSION,
+            )
+            candidate = _OptimizedCandidate(
+                draft=optimized_draft,
+                meals=optimized_meals,
+                totals=optimized_totals,
+                fit=fit,
+                optimization=optimized,
+            )
+            if fit["status"] == "within_target":
+                selected = candidate
+                break
+            candidate_for_repair = candidate
+            acceptable_candidates.append(candidate)
+        if selected is not None:
+            break
+
+        last_failure_stage = "optimization"
+        last_failure_message = "当前食品组合无法在允许偏差内满足全天营养目标"
+        repair_totals = (
+            candidate_for_repair.totals
+            if candidate_for_repair is not None
+            else initial_totals
         )
+        repair_gaps = target_gaps(repair_totals, targets)
+        repair_context = {
+            "error_code": "daily_meal_ideal_optimization_infeasible",
+            "candidate_totals": repair_totals,
+            "target_gaps": repair_gaps,
+            "infeasible_metrics": [item["metric"] for item in repair_gaps],
+            "acceptable_candidate_found": candidate_for_repair is not None,
+            "instruction": (
+                "当前食品组合无法完全落入理想区间；请更换食品组合，服务端会重新配平克数"
+            ),
+        }
+
+    if selected is None and acceptable_candidates:
+        selected = min(
+            acceptable_candidates,
+            key=lambda item: (
+                float(item.fit.get("nutrition_score", 0)),
+                item.optimization.portion_score,
+                canonical_fingerprint(item.meals),
+            ),
+        )
+    if selected is None:
+        code = {
+            "structure": "daily_meal_generation_invalid",
+            "food_validation": "daily_meal_food_validation_failed",
+            "optimization": "daily_meal_optimization_infeasible",
+        }.get(last_failure_stage, "daily_meal_generation_invalid")
         raise DailyMealPlanError(
             code,
-            message,
+            last_failure_message,
             evidence_audits=evidence.audits,
             generation_attempts=tuple(attempts),
+            optimization_attempts=tuple(optimization_attempts),
         )
+
+    draft = selected.draft
+    meals = selected.meals
+    totals = selected.totals
+    fit = selected.fit
 
     today = evidence.values["nutrition_recent_context"].get("today", {})
     assumptions: list[str] = []
@@ -1376,6 +1602,7 @@ async def generate_daily_meal_artifact(
         "meals": meals,
         "nutrition_targets": targets,
         "daily_totals": totals,
+        "nutrition_fit": fit,
         "rationale": draft.rationale,
         "evidence_sources": list(DAILY_MEAL_EVIDENCE),
         "assumptions": assumptions,
@@ -1431,9 +1658,16 @@ async def generate_daily_meal_artifact(
         card=card,
         reply=(
             "我已根据你的档案、健康、体重趋势、今天训练情况、近期饮食和食品库，"
-            "生成今天的全天饮食方案。它目前只是可审阅方案，没有写入饮食记录；"
+            "生成今天的全天饮食方案。"
+            + (
+                "其中有少量营养指标接近但未完全落入理想区间，已在卡片中明确标注。"
+                if fit["status"] == "acceptable_deviation"
+                else "各项营养指标已落入理想范围。"
+            )
+            + "它目前只是可审阅方案，没有写入饮食记录；"
             "核对后可以选择“保存为待确认提案”。"
         ),
         audits=evidence.audits,
         generation_attempts=tuple(attempts),
+        optimization_attempts=tuple(optimization_attempts),
     )

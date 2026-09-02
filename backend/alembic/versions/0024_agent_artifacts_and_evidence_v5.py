@@ -178,6 +178,11 @@ def downgrade() -> None:
     op.drop_constraint(
         "ck_agent_runs_request_kind", "agent_runs", type_="check"
     )
+    op.execute(
+        "UPDATE agent_runs "
+        "SET request_kind = 'query', requested_effect = 'read' "
+        "WHERE request_kind = 'generation'"
+    )
     op.create_check_constraint(
         "ck_agent_runs_request_kind",
         "agent_runs",

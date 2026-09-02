@@ -34,9 +34,14 @@ from app.services.agent_daily_meal_plans import (
     DailyMealPlanError,
     EphemeralNutritionInputs,
     apply_ephemeral_inputs,
+    calculate_daily_nutrition_totals,
     canonical_fingerprint,
     canonicalize_daily_meal_draft,
     collect_daily_meal_evidence,
+)
+from app.services.daily_meal_optimizer import (
+    DailyMealOptimizationError,
+    nutrition_fit,
 )
 from app.services.food import resolve_food_reference
 from app.services.personalized_planner import (
@@ -630,6 +635,39 @@ async def create_agent_daily_meal_proposal(
             "食品库营养数据已变化，请重新生成方案",
             status_code=409,
         )
+    try:
+        recalculated_totals = calculate_daily_nutrition_totals(
+            current, canonical_meals
+        )
+        recalculated_fit = nutrition_fit(
+            recalculated_totals,
+            payload_data.get("nutrition_targets", {}),
+        )
+    except (KeyError, TypeError, DailyMealOptimizationError) as exc:
+        raise PlanProposalError(
+            "artifact_nutrition_fit_invalid",
+            "方案营养适配状态已失效，请重新生成方案",
+            status_code=409,
+        ) from exc
+    stored_artifact_fit = payload_data.get("nutrition_fit")
+    if (
+        recalculated_totals != payload_data.get("daily_totals")
+        or (
+            isinstance(stored_artifact_fit, dict)
+            and recalculated_fit != stored_artifact_fit
+        )
+    ):
+        raise PlanProposalError(
+            "artifact_nutrition_fit_changed",
+            "方案营养计算结果已变化，请重新生成方案",
+            status_code=409,
+        )
+    safety_notes = [
+        "确认后将一次写入全部待新增餐次；任一餐次冲突时整份失败。",
+        "所有营养值均由服务端按食品库和克数重新计算。",
+    ]
+    if recalculated_fit["status"] == "acceptable_deviation":
+        safety_notes.append("部分营养指标接近但未完全落入理想区间，请确认已核对偏差。")
     proposal_payload = {
         "schema_version": "1.0.0",
         "proposal_type": "daily_meal_log_create_v1",
@@ -643,18 +681,16 @@ async def create_agent_daily_meal_proposal(
         "after": {
             "logged_at": payload_data["target_date"],
             "meals": canonical_meals,
-            "daily_totals": payload_data.get("daily_totals", {}),
+            "daily_totals": recalculated_totals,
             "nutrition_targets": payload_data.get("nutrition_targets", {}),
+            "nutrition_fit": recalculated_fit,
         },
         "changes": [{
             "field_path": "meal_logs",
             "before": payload_data.get("existing_meals", []),
             "after": canonical_meals,
         }],
-        "safety_notes": [
-            "确认后将一次写入全部待新增餐次；任一餐次冲突时整份失败。",
-            "所有营养值均由服务端按食品库和克数重新计算。",
-        ],
+        "safety_notes": safety_notes,
     }
     artifact.status = "proposed"
     artifact.version += 1
@@ -1316,6 +1352,31 @@ async def _apply_daily_meal_create(
         raise PlanProposalError(
             "proposal_base_changed",
             "食品库营养数据已变化，请重新生成方案",
+        )
+    try:
+        recalculated_totals = calculate_daily_nutrition_totals(
+            current, canonical_meals
+        )
+        recalculated_fit = nutrition_fit(
+            recalculated_totals,
+            after.get("nutrition_targets", {}),
+        )
+    except (KeyError, TypeError, DailyMealOptimizationError) as exc:
+        raise PlanProposalError(
+            "proposal_nutrition_fit_invalid",
+            "全天饮食提案的营养适配状态已失效，请重新生成方案",
+        ) from exc
+    stored_proposal_fit = after.get("nutrition_fit")
+    if (
+        recalculated_totals != after.get("daily_totals")
+        or (
+            isinstance(stored_proposal_fit, dict)
+            and recalculated_fit != stored_proposal_fit
+        )
+    ):
+        raise PlanProposalError(
+            "proposal_base_changed",
+            "全天饮食提案的营养计算结果已变化，请重新生成方案",
         )
 
     meal_types = [item["meal_type"] for item in canonical_meals]

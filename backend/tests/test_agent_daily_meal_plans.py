@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from datetime import date, datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
@@ -25,11 +26,13 @@ from app.services.agent_daily_meal_plans import (
     DailyMealDraft,
     DailyMealPlanError,
     calculate_nutrition_targets,
+    calculate_daily_nutrition_totals,
     canonical_fingerprint,
     canonicalize_daily_meal_draft,
     collect_daily_meal_evidence,
     generate_daily_meal_artifact,
 )
+from app.services.daily_meal_optimizer import nutrition_fit
 from app.services.agent_domain_proposals import (
     create_agent_daily_meal_proposal,
     decide_agent_domain_proposal,
@@ -124,8 +127,9 @@ async def _artifact(db_session, *, user, conversation, run, foods):
             {
                 "meal_type": meal_type,
                 "items": [
-                    {"food_id": foods[0].id, "amount_g": 150},
-                    {"food_id": foods[2].id, "amount_g": 120},
+                    {"food_id": foods[0].id, "amount_g": 300},
+                    {"food_id": foods[2].id, "amount_g": 100},
+                    {"food_id": foods[1].id, "amount_g": 20},
                 ],
             }
             for meal_type in ("早餐", "午餐", "晚餐")
@@ -136,19 +140,17 @@ async def _artifact(db_session, *, user, conversation, run, foods):
         draft=draft,
         evidence=evidence,
     )
+    targets = calculate_nutrition_targets(evidence)
+    totals = calculate_daily_nutrition_totals(evidence, meals)
     payload = {
         "schema_version": "1.0.0",
         "artifact_type": "daily_meal_plan_v1",
         "target_date": date.today().isoformat(),
         "existing_meals": [],
         "meals": meals,
-        "nutrition_targets": calculate_nutrition_targets(evidence),
-        "daily_totals": {
-            "calories": 1194.0,
-            "protein_g": 125.1,
-            "carbs_g": 126.0,
-            "fat_g": 17.4,
-        },
+        "nutrition_targets": targets,
+        "daily_totals": totals,
+        "nutrition_fit": nutrition_fit(totals, targets),
         "rationale": [],
         "evidence_sources": list(DAILY_MEAL_EVIDENCE),
         "assumptions": [],
@@ -302,6 +304,15 @@ async def test_original_chat_request_returns_artifact_and_six_audits_without_pro
         AgentToolCall.run_id == run.id,
         AgentToolCall.tool_name == "agent.daily_meal_generator",
     )) == 1
+    optimizer_calls = list((await db_session.execute(select(AgentToolCall).where(
+        AgentToolCall.run_id == run.id,
+        AgentToolCall.tool_name == "agent.daily_meal_optimizer",
+    ))).scalars().all())
+    assert len(optimizer_calls) == 1
+    assert optimizer_calls[0].status == "completed"
+    assert optimizer_calls[0].result_data["solver_version"] == "highs_milp_v1"
+    assert optimizer_calls[0].result_data["target_deviations"] == []
+    assert "food_candidates" not in optimizer_calls[0].result_data
     assert await db_session.scalar(select(func.count(MealLog.id)).where(
         MealLog.user_id == user.id
     )) == 0
@@ -348,7 +359,7 @@ async def test_generation_repairs_precise_schema_error_on_second_attempt(
 
 
 @pytest.mark.asyncio
-async def test_generation_repairs_nutrition_validation_on_second_attempt(
+async def test_generation_deterministically_repairs_bad_model_amounts(
     db_session,
 ):
     user, conversation, run, foods = await _daily_context(db_session, "repair-target")
@@ -366,11 +377,9 @@ async def test_generation_repairs_nutrition_validation_on_second_attempt(
         ],
         "rationale": [],
     })
-    valid = _target_compliant_draft(foods)
-    model_call = AsyncMock(side_effect=[
-        _completion(invalid.model_dump(mode="json")),
-        _completion(valid.model_dump(mode="json")),
-    ])
+    model_call = AsyncMock(
+        return_value=_completion(invalid.model_dump(mode="json"))
+    )
 
     with patch(
         "app.services.agent_daily_meal_plans.structured_chat_completion",
@@ -384,11 +393,155 @@ async def test_generation_repairs_nutrition_validation_on_second_attempt(
             user_message="按今天训练量给我配三餐",
         )
 
+    assert model_call.await_count == 1
+    assert result.generation_attempts[0].status == "completed"
+    assert result.optimization_attempts[-1].status == "completed"
+    assert result.artifact.payload_data["nutrition_fit"]["status"] == "within_target"
+
+
+@pytest.mark.asyncio
+async def test_generation_reselects_foods_after_optimizer_reports_infeasible(
+    db_session,
+):
+    user, conversation, run, foods = await _daily_context(
+        db_session, "reselect-foods"
+    )
+    infeasible = {
+        "meals": [
+            {
+                "meal_type": meal_type,
+                "items": [{"food_id": foods[2].id, "amount_g": 150}],
+            }
+            for meal_type in ("早餐", "午餐", "晚餐")
+        ],
+        "rationale": ["第一次组合缺少碳水来源"],
+    }
+    valid = _target_compliant_draft(foods).model_dump(mode="json")
+    model_call = AsyncMock(side_effect=[_completion(infeasible), _completion(valid)])
+
+    with patch(
+        "app.services.agent_daily_meal_plans.structured_chat_completion",
+        new=model_call,
+    ):
+        result = await generate_daily_meal_artifact(
+            db_session,
+            user_id=user.id,
+            conversation_id=conversation.id,
+            run_id=run.id,
+            user_message="结合我的情况安排今天怎么吃",
+        )
+
     assert model_call.await_count == 2
-    assert result.generation_attempts[0].error_code == "daily_calories_out_of_target"
-    assert result.generation_attempts[1].status == "completed"
-    second_messages = model_call.await_args_list[1].args[0]
-    assert "daily_calories_out_of_target" in second_messages[1]["content"]
+    second_payload = model_call.await_args_list[1].args[0][1]["content"]
+    assert "daily_meal_ideal_optimization_infeasible" in second_payload
+    assert "target_gaps" in second_payload
+    assert "infeasible_metrics" in second_payload
+    assert result.artifact.payload_data["nutrition_fit"]["status"] == "within_target"
+    assert any(
+        item.status == "infeasible" for item in result.optimization_attempts
+    )
+
+
+@pytest.mark.asyncio
+async def test_generation_returns_acceptable_deviation_with_visible_fit(
+    db_session,
+):
+    user, conversation, run, _ = await _daily_context(
+        db_session, "acceptable-fit"
+    )
+    near_food = Food(
+        id="daily-acceptable-fit-mixed",
+        name_zh="测试均衡餐",
+        category="混合",
+        calories_per_100g=150,
+        protein_g=8,
+        carbs_g=25.5,
+        fat_g=2.7,
+        common_portion_g=400,
+        diet_tags=[],
+        is_common_in_china=True,
+        is_active=True,
+    )
+    db_session.add(near_food)
+    await db_session.commit()
+    draft = {
+        "meals": [
+            {
+                "meal_type": meal_type,
+                "items": [{"food_id": near_food.id, "amount_g": 400}],
+            }
+            for meal_type in ("早餐", "午餐", "晚餐")
+        ],
+        "rationale": ["测试允许偏差"],
+    }
+
+    with patch(
+        "app.services.agent_daily_meal_plans.structured_chat_completion",
+        new=AsyncMock(side_effect=[_completion(draft), _completion(draft)]),
+    ):
+        result = await generate_daily_meal_artifact(
+            db_session,
+            user_id=user.id,
+            conversation_id=conversation.id,
+            run_id=run.id,
+            user_message="给我安排今天三餐",
+        )
+
+    fit = result.artifact.payload_data["nutrition_fit"]
+    assert fit["status"] == "acceptable_deviation"
+    assert {item["metric"] for item in fit["deviations"]} == {
+        "fat_energy_percent",
+        "carb_energy_percent",
+    }
+    assert result.card["data"]["nutrition_fit"] == fit
+    assert "少量营养指标" in result.reply
+    reference = await create_agent_daily_meal_proposal(
+        db_session,
+        enabled=True,
+        user_id=user.id,
+        conversation_id=conversation.id,
+        run_id=run.id,
+    )
+    proposal = await db_session.get(AgentProposal, reference.id)
+    assert proposal.payload_data["after"]["nutrition_fit"] == fit
+    assert any("核对偏差" in item for item in proposal.payload_data["safety_notes"])
+
+
+@pytest.mark.asyncio
+async def test_saved_diet_restriction_remains_a_hard_food_gate(db_session):
+    user, _, _, foods = await _daily_context(db_session, "vegan-hard-gate")
+    profile = await db_session.scalar(select(UserProfile).where(
+        UserProfile.user_id == user.id
+    ))
+    profile.diet_restriction = "vegan"
+    foods[0].diet_tags = ["vegan"]
+    foods[1].diet_tags = ["vegan"]
+    foods[2].diet_tags = []
+    await db_session.commit()
+    evidence = await collect_daily_meal_evidence(
+        db_session,
+        user_id=user.id,
+        use_isolated_sessions=False,
+    )
+    draft = DailyMealDraft.model_validate({
+        "meals": [
+            {
+                "meal_type": meal_type,
+                "items": [{"food_id": foods[2].id, "amount_g": 150}],
+            }
+            for meal_type in ("早餐", "午餐", "晚餐")
+        ],
+        "rationale": [],
+    })
+
+    with pytest.raises(DailyMealPlanError) as raised:
+        await canonicalize_daily_meal_draft(
+            db_session,
+            draft=draft,
+            evidence=evidence,
+        )
+
+    assert raised.value.code == "food_candidate_invalid"
 
 
 @pytest.mark.asyncio
@@ -536,6 +689,33 @@ async def test_daily_artifact_becomes_one_multi_meal_proposal_and_confirms_once(
     assert await db_session.scalar(select(func.count(MealLog.id)).where(
         MealLog.user_id == user.id
     )) == 3
+
+
+@pytest.mark.asyncio
+async def test_legacy_daily_artifact_without_fit_remains_proposable(db_session):
+    user, conversation, run, foods = await _daily_context(db_session, "legacy-fit")
+    artifact = await _artifact(
+        db_session,
+        user=user,
+        conversation=conversation,
+        run=run,
+        foods=foods,
+    )
+    legacy_payload = copy.deepcopy(artifact.payload_data)
+    legacy_payload.pop("nutrition_fit")
+    artifact.payload_data = legacy_payload
+    artifact.payload_fingerprint = canonical_fingerprint(legacy_payload)
+    await db_session.commit()
+
+    reference = await create_agent_daily_meal_proposal(
+        db_session,
+        enabled=True,
+        user_id=user.id,
+        conversation_id=conversation.id,
+        run_id=run.id,
+    )
+    proposal = await db_session.get(AgentProposal, reference.id)
+    assert proposal.payload_data["after"]["nutrition_fit"]["status"] == "within_target"
 
 
 @pytest.mark.asyncio

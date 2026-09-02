@@ -154,6 +154,33 @@
   display: block;
 }
 
+.daily-meal-fit {
+  display: inline-block;
+  margin-top: 12px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  font-size: 19px;
+  font-weight: 800;
+}
+
+.daily-meal-fit.success {
+  background: #dcf2e3;
+  color: #16603e;
+}
+
+.daily-meal-fit.warning {
+  background: #fff1c9;
+  color: #75570e;
+}
+
+.daily-meal-fit-detail {
+  display: block;
+  margin-top: 8px;
+  color: #75570e;
+  font-size: 20px;
+  line-height: 1.5;
+}
+
 .daily-meal-title {
   color: #244b38;
   font-size: 24px;

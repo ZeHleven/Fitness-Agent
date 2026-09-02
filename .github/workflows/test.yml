@@ -56,6 +56,9 @@ jobs:
       - name: Install backend dependencies
         run: python -m pip install -r backend/requirements.txt
 
+      - name: Verify deterministic nutrition optimizer dependency
+        run: python -c "import scipy; from scipy.optimize import milp; print(scipy.__version__, milp.__name__)"
+
       - name: Verify database migration upgrade and downgrade
         working-directory: backend
         run: |
@@ -69,6 +72,13 @@ jobs:
 
       - name: Run deterministic Agent evaluation
         run: python backend/scripts/evaluate_agent_intents.py --mode rules --strict
+
+      - name: Build Python 3.13 backend container
+        run: >-
+          docker build
+          --build-arg PYTHON_IMAGE=python:3.13-slim-bookworm
+          --tag fitness-agent-backend-ci:${{ github.sha }}
+          backend
 
   miniapp:
     name: Mini program typecheck and build
