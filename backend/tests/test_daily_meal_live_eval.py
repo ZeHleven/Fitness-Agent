@@ -69,6 +69,23 @@ def test_live_gate_seeds_food_catalog_before_model_evaluation():
     assert seed_index < evaluation_index
 
 
+def test_live_gate_checks_out_an_owner_selected_immutable_revision():
+    workflow = (
+        Path(__file__).resolve().parents[2]
+        / ".github"
+        / "workflows"
+        / "daily-meal-live-eval.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "candidate_sha:" in workflow
+    assert "if: github.actor == github.repository_owner" in workflow
+    assert "^[0-9a-fA-F]{40}$" in workflow
+    assert "ref: ${{ inputs.candidate_sha }}" in workflow
+    assert "if: github.ref == 'refs/heads/main'" not in workflow
+    assert "evaluated_sha=\"$(git rev-parse HEAD)\"" in workflow
+    assert "daily-meal-live-eval-${{ steps.revision.outputs.sha }}" in workflow
+
+
 async def test_live_eval_seed_persists_user_before_dependent_records(db_session):
     suffix = f"test-{uuid.uuid4().hex[:12]}"
 

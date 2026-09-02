@@ -2,13 +2,18 @@ name: Daily Meal Live Model Release Gate
 
 on:
   workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Full 40-character commit SHA to evaluate
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 jobs:
   evaluate:
-    if: github.ref == 'refs/heads/main'
+    if: github.actor == github.repository_owner
     runs-on: ubuntu-latest
     timeout-minutes: 45
     environment: agent-live-eval
@@ -35,8 +40,31 @@ jobs:
       AGENT_ENABLED: "true"
       AGENT_INTENT_MODEL_ENABLED: "true"
     steps:
-      - name: Check out main release candidate
+      - name: Validate requested candidate SHA
+        shell: bash
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          if [[ ! "${CANDIDATE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "candidate_sha must be a full 40-character commit SHA" >&2
+            exit 2
+          fi
+
+      - name: Check out requested release candidate
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha }}
+
+      - name: Report evaluated revision
+        id: revision
+        shell: bash
+        env:
+          REQUESTED_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          evaluated_sha="$(git rev-parse HEAD)"
+          echo "sha=${evaluated_sha}" >> "${GITHUB_OUTPUT}"
+          echo "Requested SHA: ${REQUESTED_SHA}"
+          echo "Evaluated SHA: ${evaluated_sha}"
 
       - name: Set up Python 3.13
         uses: actions/setup-python@v5
@@ -66,7 +94,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: daily-meal-live-eval-${{ github.sha }}
+          name: daily-meal-live-eval-${{ steps.revision.outputs.sha }}
           path: daily-meal-live-eval.json
           if-no-files-found: warn
           retention-days: 14
