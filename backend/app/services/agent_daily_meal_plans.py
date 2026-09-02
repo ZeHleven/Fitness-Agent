@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -21,6 +23,11 @@ from app.models.workout import WorkoutPlan
 from app.services.nutrition_queries import (
     build_daily_nutrition_summary,
     list_nutrition_history,
+)
+from app.services.ai_client import (
+    StructuredAIServiceError,
+    StructuredCompletionResult,
+    structured_chat_completion,
 )
 from app.services.workout_queries import (
     build_plan_detail,
@@ -51,6 +58,50 @@ MEDICAL_NUTRITION_MARKERS = (
     "孕",
     "哺乳",
 )
+DAILY_MEAL_DRAFT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "meals": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "meal_type": {
+                        "type": "string",
+                        "enum": list(MEAL_TYPES),
+                    },
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "food_id": {"type": "string"},
+                                "amount_g": {
+                                    "type": "number",
+                                    "exclusiveMinimum": 0,
+                                    "maximum": 500,
+                                },
+                            },
+                            "required": ["food_id", "amount_g"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["meal_type", "items"],
+                "additionalProperties": False,
+            },
+        },
+        "rationale": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+    },
+    "required": ["meals", "rationale"],
+    "additionalProperties": False,
+}
+
+
+logger = logging.getLogger("uvicorn.error")
 
 
 class DailyMealPlanError(ValueError):
@@ -60,10 +111,14 @@ class DailyMealPlanError(ValueError):
         message: str,
         *,
         missing_slots: list[str] | None = None,
+        evidence_audits: tuple[Any, ...] = (),
+        generation_attempts: tuple[Any, ...] = (),
     ):
         self.code = code
         self.message = message
         self.missing_slots = missing_slots or []
+        self.evidence_audits = evidence_audits
+        self.generation_attempts = generation_attempts
         super().__init__(message)
 
 
@@ -118,6 +173,29 @@ class EvidenceAudit:
 
 
 @dataclass(frozen=True)
+class GenerationAttemptAudit:
+    attempt: int
+    transport: str
+    status: Literal["completed", "failed"]
+    duration_ms: int
+    output_chars: int = 0
+    finish_reason: str | None = None
+    error_code: str | None = None
+    validation_paths: tuple[str, ...] = ()
+    fallback_reason: str | None = None
+
+    def result_data(self) -> dict[str, Any]:
+        return {
+            "attempt": self.attempt,
+            "transport": self.transport,
+            "finish_reason": self.finish_reason,
+            "output_chars": self.output_chars,
+            "validation_paths": list(self.validation_paths),
+            "fallback_reason": self.fallback_reason,
+        }
+
+
+@dataclass(frozen=True)
 class DailyMealEvidence:
     values: dict[str, Any]
     fingerprints: dict[str, str]
@@ -130,6 +208,7 @@ class DailyMealArtifactResult:
     card: dict[str, Any]
     reply: str
     audits: tuple[EvidenceAudit, ...]
+    generation_attempts: tuple[GenerationAttemptAudit, ...]
 
 
 def canonical_fingerprint(value: Any) -> str:
@@ -765,14 +844,127 @@ def _model() -> ChatOpenAI:
     )
 
 
+def _validation_paths(exc: ValidationError) -> tuple[str, ...]:
+    paths: list[str] = []
+    for item in exc.errors(include_url=False)[:8]:
+        location = ".".join(
+            str(value)
+            if isinstance(value, int)
+            else (
+                str(value)
+                if re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]{0,39}", str(value))
+                else "<field>"
+            )
+            for value in item.get("loc", ())
+        )
+        error_type = str(item.get("type") or "validation_error")
+        paths.append(f"{location or '$'}:{error_type}")
+    return tuple(paths)
+
+
+def _safe_repair_draft(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Keep only structural draft values that are safe to send for repair."""
+
+    if payload is None:
+        return None
+    safe: dict[str, Any] = {}
+    meals = payload.get("meals")
+    if isinstance(meals, list):
+        safe_meals: list[Any] = []
+        for meal in meals[:4]:
+            if not isinstance(meal, dict):
+                safe_meals.append({"invalid_value_type": type(meal).__name__})
+                continue
+            safe_meal: dict[str, Any] = {
+                "meal_type": (
+                    str(meal.get("meal_type"))[:20]
+                    if isinstance(meal.get("meal_type"), str)
+                    else f"<{type(meal.get('meal_type')).__name__}>"
+                ),
+            }
+            items = meal.get("items")
+            if isinstance(items, list):
+                safe_meal["items"] = [
+                    {
+                        "food_id": (
+                            str(item.get("food_id"))[:100]
+                            if isinstance(item.get("food_id"), str)
+                            else f"<{type(item.get('food_id')).__name__}>"
+                        ),
+                        "amount_g": (
+                            item.get("amount_g")
+                            if isinstance(item.get("amount_g"), (int, float))
+                            else f"<{type(item.get('amount_g')).__name__}>"
+                        ),
+                        **(
+                            {"unexpected_field_count": sum(
+                                1 for key in item
+                                if key not in {"food_id", "amount_g"}
+                            )}
+                            if isinstance(item, dict)
+                            and any(
+                                key not in {"food_id", "amount_g"}
+                                for key in item
+                            )
+                            else {}
+                        ),
+                    }
+                    if isinstance(item, dict)
+                    else {"invalid_value_type": type(item).__name__}
+                    for item in items[:8]
+                ]
+            else:
+                safe_meal["items_type"] = type(items).__name__
+            unexpected_count = sum(
+                1 for key in meal
+                if key not in {"meal_type", "items"}
+            )
+            if unexpected_count:
+                safe_meal["unexpected_field_count"] = unexpected_count
+            safe_meals.append(safe_meal)
+        safe["meals"] = safe_meals
+    else:
+        safe["meals_type"] = type(meals).__name__
+    rationale = payload.get("rationale")
+    safe["rationale_type"] = type(rationale).__name__
+    if isinstance(rationale, list):
+        safe["rationale_count"] = len(rationale)
+    unexpected_count = sum(
+        1 for key in payload
+        if key not in {"meals", "rationale"}
+    )
+    if unexpected_count:
+        safe["unexpected_field_count"] = unexpected_count
+    return safe
+
+
+def _draft_example(foods: list[dict[str, Any]]) -> dict[str, Any]:
+    food_ids = [str(item["id"]) for item in foods[:3]]
+    while len(food_ids) < 3:
+        food_ids.append(food_ids[0] if food_ids else "candidate-food-id")
+    return {
+        "meals": [
+            {
+                "meal_type": meal_type,
+                "items": [
+                    {"food_id": food_ids[index], "amount_g": 100},
+                ],
+            }
+            for index, meal_type in enumerate(("早餐", "午餐", "晚餐"))
+        ],
+        "rationale": ["根据目标区间搭配三餐"],
+    }
+
+
 async def _generate_draft(
     *,
     user_message: str,
     evidence: DailyMealEvidence,
+    foods: list[dict[str, Any]],
     targets: dict[str, Any],
-    previous_artifact: dict[str, Any] | None,
-) -> DailyMealDraft:
-    foods = _allowed_foods(evidence)
+    revision_source: dict[str, Any] | None,
+    repair_context: dict[str, Any] | None,
+) -> StructuredCompletionResult:
     existing_types = [item.get("meal_type") for item in _existing_meals(evidence)]
     prompt_data = {
         "request": user_message[:1000],
@@ -781,38 +973,39 @@ async def _generate_draft(
         "existing_today": evidence.values["nutrition_recent_context"].get("today", {}),
         "existing_meal_types": existing_types,
         "food_candidates": foods,
-        "previous_plan": previous_artifact,
+        "revision_source": revision_source,
+        "repair_context": repair_context,
     }
-    structured = _model().with_structured_output(
-        DailyMealDraft,
-        method="json_mode",
-        include_raw=True,
-    )
-    repair = ""
-    last_error: Exception | None = None
-    for _ in range(2):
-        result = await structured.ainvoke([
+    return await structured_chat_completion(
+        [
             {
                 "role": "system",
                 "content": (
                     "你是全天饮食结构化方案生成器。只能使用 food_candidates 中的稳定 food_id，"
-                    "不得输出营养数值。只生成今天尚未记录的餐次；默认补足三顿主餐，只有确有"
-                    "需要才增加加餐。每餐 1-8 项。目标是让已有餐次加新餐次后的全天热量、"
-                    "蛋白质和供能比例落入 targets。若 previous_plan 存在，按用户要求修改它。"
-                    "只输出符合 schema 的 JSON。" + repair
+                    "不得输出食品名称或营养数值。只生成今天尚未记录的餐次；默认补足三顿主餐，"
+                    "只有确有需要才增加加餐。每餐 1-8 项，全天最多 4 餐。目标是让已有餐次加"
+                    "新餐次后的全天热量、蛋白质和供能比例落入 targets。revision_source 仅表示"
+                    "用户正在修改的已有方案；repair_context 仅表示上一次失败及需要修复的字段。"
+                    "严格按提交函数的参数结构返回。"
                 ),
             },
-            {"role": "user", "content": json.dumps(prompt_data, ensure_ascii=False, default=str)},
-        ])
-        parsed = result.get("parsed") if isinstance(result, dict) else None
-        if isinstance(parsed, DailyMealDraft):
-            return parsed
-        last_error = result.get("parsing_error") if isinstance(result, dict) else None
-        repair = " 上一次结构无效，请修复字段、枚举、数量和数值边界。"
-    raise DailyMealPlanError(
-        "daily_meal_generation_invalid",
-        "模型未能生成可验证的全天饮食结构",
-    ) from last_error
+            {
+                "role": "user",
+                "content": json.dumps(
+                    prompt_data,
+                    ensure_ascii=False,
+                    default=str,
+                ),
+            },
+        ],
+        model=settings.AGENT_MODEL,
+        max_tokens=1800,
+        temperature=0,
+        function_name="submit_daily_meal_draft",
+        function_description="提交仅含候选食品稳定 ID 和克数的全天饮食草案",
+        json_schema=DAILY_MEAL_DRAFT_SCHEMA,
+        json_example=_draft_example(foods),
+    )
 
 
 def artifact_reference(artifact: AgentArtifact) -> dict[str, Any]:
@@ -883,12 +1076,35 @@ async def generate_daily_meal_artifact(
                 "daily_meal_critical_fields_missing",
                 f"生成可保存方案前还缺少：{'、'.join(missing)}",
                 missing_slots=missing,
+                evidence_audits=evidence.audits,
             )
     boundary = _medical_boundary_reason(evidence)
     if boundary:
-        raise DailyMealPlanError("daily_meal_medical_boundary", boundary)
+        raise DailyMealPlanError(
+            "daily_meal_medical_boundary",
+            boundary,
+            evidence_audits=evidence.audits,
+        )
     if not evidence.values["food_catalog"].get("foods"):
-        raise DailyMealPlanError("food_catalog_empty", "食品库暂无可用于生成方案的食品")
+        raise DailyMealPlanError(
+            "food_catalog_empty",
+            "食品库暂无可用于生成方案的食品",
+            evidence_audits=evidence.audits,
+        )
+    try:
+        compatible_foods = _allowed_foods(evidence)
+    except DailyMealPlanError as exc:
+        raise DailyMealPlanError(
+            exc.code,
+            exc.message,
+            evidence_audits=evidence.audits,
+        ) from exc
+    if not compatible_foods:
+        raise DailyMealPlanError(
+            "food_catalog_no_compatible_candidates",
+            "食品库暂无符合当前饮食限制的可用食品",
+            evidence_audits=evidence.audits,
+        )
 
     artifacts = list((await db.execute(
         select(AgentArtifact)
@@ -903,8 +1119,19 @@ async def generate_daily_meal_artifact(
         .with_for_update()
     )).scalars().all())
     latest = artifacts[0] if artifacts else None
-    previous = latest.payload_data if revise_latest and latest is not None else None
-    targets = calculate_nutrition_targets(evidence)
+    revision_source = (
+        latest.payload_data
+        if revise_latest and latest is not None
+        else None
+    )
+    try:
+        targets = calculate_nutrition_targets(evidence)
+    except DailyMealPlanError as exc:
+        raise DailyMealPlanError(
+            exc.code,
+            exc.message,
+            evidence_audits=evidence.audits,
+        ) from exc
     existing_today = evidence.values["nutrition_recent_context"].get("today", {})
     if (
         float(existing_today.get("total_calories", 0))
@@ -915,18 +1142,123 @@ async def generate_daily_meal_artifact(
         raise DailyMealPlanError(
             "daily_meal_existing_total_exceeds_target",
             "今天已记录饮食已达到或超过估算目标，不能再生成可保存的补充方案",
+            evidence_audits=evidence.audits,
         )
-    last_error: Exception | None = None
+    attempts: list[GenerationAttemptAudit] = []
+    repair_context: dict[str, Any] | None = None
+    last_failure_stage = "structure"
     draft: DailyMealDraft | None = None
     meals: list[dict[str, Any]] | None = None
     totals: dict[str, float] | None = None
-    for _ in range(2):
-        draft = await _generate_draft(
-            user_message=user_message,
-            evidence=evidence,
-            targets=targets,
-            previous_artifact=previous,
-        )
+    for attempt_number in (1, 2):
+        last_failure_stage = "structure"
+        try:
+            completion = await _generate_draft(
+                user_message=user_message,
+                evidence=evidence,
+                foods=compatible_foods,
+                targets=targets,
+                revision_source=revision_source,
+                repair_context=repair_context,
+            )
+        except StructuredAIServiceError as exc:
+            audit = GenerationAttemptAudit(
+                attempt=attempt_number,
+                transport=exc.mode,
+                status="failed",
+                duration_ms=exc.duration_ms,
+                error_code=exc.category,
+            )
+            attempts.append(audit)
+            logger.warning(
+                "daily_meal_generation_attempt run_id=%s attempt=%s "
+                "transport=%s status=failed error_code=%s duration_ms=%s",
+                run_id,
+                attempt_number,
+                audit.transport,
+                audit.error_code,
+                audit.duration_ms,
+            )
+            raise DailyMealPlanError(
+                "daily_meal_generation_unavailable",
+                "全天饮食方案生成服务暂时不可用，请稍后重试",
+                evidence_audits=evidence.audits,
+                generation_attempts=tuple(attempts),
+            ) from exc
+
+        if completion.payload is None:
+            error_code = completion.parse_error or "structured_payload_missing"
+            audit = GenerationAttemptAudit(
+                attempt=attempt_number,
+                transport=completion.mode,
+                status="failed",
+                duration_ms=completion.duration_ms,
+                output_chars=completion.output_chars,
+                finish_reason=completion.finish_reason,
+                error_code=error_code,
+                fallback_reason=completion.fallback_reason,
+            )
+            attempts.append(audit)
+            repair_context = {
+                "error_code": error_code,
+                "finish_reason": completion.finish_reason,
+                "instruction": "返回完整 JSON 对象并严格匹配字段结构",
+            }
+            logger.warning(
+                "daily_meal_generation_attempt run_id=%s attempt=%s "
+                "transport=%s status=failed error_code=%s finish_reason=%s "
+                "output_chars=%s duration_ms=%s fallback_reason=%s",
+                run_id,
+                attempt_number,
+                audit.transport,
+                audit.error_code,
+                audit.finish_reason,
+                audit.output_chars,
+                audit.duration_ms,
+                audit.fallback_reason,
+            )
+            continue
+
+        try:
+            draft = DailyMealDraft.model_validate(completion.payload)
+        except ValidationError as exc:
+            validation_paths = _validation_paths(exc)
+            audit = GenerationAttemptAudit(
+                attempt=attempt_number,
+                transport=completion.mode,
+                status="failed",
+                duration_ms=completion.duration_ms,
+                output_chars=completion.output_chars,
+                finish_reason=completion.finish_reason,
+                error_code="schema_validation_failed",
+                validation_paths=validation_paths,
+                fallback_reason=completion.fallback_reason,
+            )
+            attempts.append(audit)
+            repair_context = {
+                "error_code": "schema_validation_failed",
+                "validation_paths": list(validation_paths),
+                "invalid_draft": _safe_repair_draft(completion.payload),
+                "finish_reason": completion.finish_reason,
+            }
+            draft = None
+            logger.warning(
+                "daily_meal_generation_attempt run_id=%s attempt=%s "
+                "transport=%s status=failed error_code=%s validation_paths=%s "
+                "finish_reason=%s output_chars=%s duration_ms=%s "
+                "fallback_reason=%s",
+                run_id,
+                attempt_number,
+                audit.transport,
+                audit.error_code,
+                list(audit.validation_paths),
+                audit.finish_reason,
+                audit.output_chars,
+                audit.duration_ms,
+                audit.fallback_reason,
+            )
+            continue
+
         try:
             meals = await canonicalize_daily_meal_draft(
                 db,
@@ -935,19 +1267,95 @@ async def generate_daily_meal_artifact(
             )
             totals = _all_totals(evidence, meals)
             validate_daily_totals(totals, targets)
-            break
         except (DailyMealPlanError, ValidationError) as exc:
-            last_error = exc
-            previous = {
+            last_failure_stage = "target_validation"
+            error_code = getattr(
+                exc,
+                "code",
+                "schema_validation_failed",
+            )
+            validation_paths = (
+                _validation_paths(exc)
+                if isinstance(exc, ValidationError)
+                else ()
+            )
+            audit = GenerationAttemptAudit(
+                attempt=attempt_number,
+                transport=completion.mode,
+                status="failed",
+                duration_ms=completion.duration_ms,
+                output_chars=completion.output_chars,
+                finish_reason=completion.finish_reason,
+                error_code=error_code,
+                validation_paths=validation_paths,
+                fallback_reason=completion.fallback_reason,
+            )
+            attempts.append(audit)
+            repair_context = {
+                "error_code": error_code,
+                "validation_paths": list(validation_paths),
                 "invalid_draft": draft.model_dump(mode="json"),
-                "validation_error": getattr(exc, "code", "schema_validation_failed"),
+                "instruction": str(exc),
             }
             meals = None
+            totals = None
+            logger.warning(
+                "daily_meal_generation_attempt run_id=%s attempt=%s "
+                "transport=%s status=failed error_code=%s validation_paths=%s "
+                "finish_reason=%s output_chars=%s duration_ms=%s "
+                "fallback_reason=%s",
+                run_id,
+                attempt_number,
+                audit.transport,
+                audit.error_code,
+                list(audit.validation_paths),
+                audit.finish_reason,
+                audit.output_chars,
+                audit.duration_ms,
+                audit.fallback_reason,
+            )
+            continue
+
+        audit = GenerationAttemptAudit(
+            attempt=attempt_number,
+            transport=completion.mode,
+            status="completed",
+            duration_ms=completion.duration_ms,
+            output_chars=completion.output_chars,
+            finish_reason=completion.finish_reason,
+            fallback_reason=completion.fallback_reason,
+        )
+        attempts.append(audit)
+        logger.info(
+            "daily_meal_generation_attempt run_id=%s attempt=%s "
+            "transport=%s status=completed finish_reason=%s output_chars=%s "
+            "duration_ms=%s fallback_reason=%s",
+            run_id,
+            attempt_number,
+            audit.transport,
+            audit.finish_reason,
+            audit.output_chars,
+            audit.duration_ms,
+            audit.fallback_reason,
+        )
+        break
     if draft is None or meals is None or totals is None:
+        code = (
+            "daily_meal_target_validation_failed"
+            if last_failure_stage == "target_validation"
+            else "daily_meal_generation_invalid"
+        )
+        message = (
+            "两次生成结果均未满足服务端营养和食品安全校验"
+            if code == "daily_meal_target_validation_failed"
+            else "全天饮食方案生成服务暂时未能形成有效结构，请稍后重试"
+        )
         raise DailyMealPlanError(
-            "daily_meal_target_validation_failed",
-            "两次生成结果均未满足服务端营养和食品安全校验",
-        ) from last_error
+            code,
+            message,
+            evidence_audits=evidence.audits,
+            generation_attempts=tuple(attempts),
+        )
 
     today = evidence.values["nutrition_recent_context"].get("today", {})
     assumptions: list[str] = []
@@ -1027,4 +1435,5 @@ async def generate_daily_meal_artifact(
             "核对后可以选择“保存为待确认提案”。"
         ),
         audits=evidence.audits,
+        generation_attempts=tuple(attempts),
     )

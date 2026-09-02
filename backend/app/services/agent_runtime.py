@@ -234,6 +234,42 @@ def _artifact_reference_from_data(
         return None
 
 
+def _persist_daily_meal_diagnostics(
+    db: AsyncSession,
+    *,
+    run_id: str,
+    evidence_audits: tuple[Any, ...],
+    generation_attempts: tuple[Any, ...],
+) -> None:
+    for index, audit in enumerate(evidence_audits, start=1):
+        db.add(AgentToolCall(
+            run_id=run_id,
+            call_id=f"evidence:{run_id}:{index}",
+            tool_name=audit.tool_id,
+            arguments_data={"identity_source": "server_context"},
+            result_data={
+                "fields": list(audit.fields),
+                "result_fingerprint": audit.result_fingerprint,
+            },
+            status="completed",
+            duration_ms=audit.duration_ms,
+        ))
+    for audit in generation_attempts:
+        db.add(AgentToolCall(
+            run_id=run_id,
+            call_id=f"model:{run_id}:daily-meal:{audit.attempt}",
+            tool_name="agent.daily_meal_generator",
+            arguments_data={
+                "attempt": audit.attempt,
+                "transport": audit.transport,
+            },
+            result_data=audit.result_data(),
+            status=audit.status,
+            error_code=audit.error_code,
+            duration_ms=audit.duration_ms,
+        ))
+
+
 def _proposal_reference_from_model(proposal: Any) -> AgentProposalReference:
     return AgentProposalReference(
         id=proposal.id,
@@ -1260,6 +1296,12 @@ async def execute_agent_run(
                     ),
                 )
             except DailyMealPlanError as exc:
+                _persist_daily_meal_diagnostics(
+                    db,
+                    run_id=run.id,
+                    evidence_audits=tuple(exc.evidence_audits),
+                    generation_attempts=tuple(exc.generation_attempts),
+                )
                 reply = f"{exc.message}。本次没有写入任何饮食记录。"
                 terminal_action = "clarify" if exc.missing_slots else "answer"
                 return await complete_semantic_short_circuit(
@@ -1268,19 +1310,12 @@ async def execute_agent_run(
                     termination_reason=exc.code,
                     missing_slots=exc.missing_slots or None,
                 )
-            for index, audit in enumerate(generated.audits, start=1):
-                db.add(AgentToolCall(
-                    run_id=run.id,
-                    call_id=f"evidence:{run.id}:{index}",
-                    tool_name=audit.tool_id,
-                    arguments_data={"identity_source": "server_context"},
-                    result_data={
-                        "fields": list(audit.fields),
-                        "result_fingerprint": audit.result_fingerprint,
-                    },
-                    status="completed",
-                    duration_ms=audit.duration_ms,
-                ))
+            _persist_daily_meal_diagnostics(
+                db,
+                run_id=run.id,
+                evidence_audits=generated.audits,
+                generation_attempts=generated.generation_attempts,
+            )
             artifact_data = artifact_reference(generated.artifact)
             return await complete_semantic_short_circuit(
                 generated.reply,

@@ -3,14 +3,14 @@
 Release ZIP 是可重复生成的部署产物，不提交到 Git。构建当前版本：
 
 ```powershell
-.\scripts\package_cloudbase_backend.ps1 -Version 0.5.27
+.\scripts\package_cloudbase_backend.ps1 -Version 0.5.28
 ```
 
-输出文件为 `deploy/cloudbase/fitness-agent-backend-0.5.27.zip`。
+输出文件为 `deploy/cloudbase/fitness-agent-backend-0.5.28.zip`。
 
-`0.5.27` 将 Agent 理解层升级为 `v5`：生成任务与数据写入分离，Agent 会按任务自动选择档案、健康、体重、训练、饮食和食品库证据。全天饮食先生成不可直接执行的结构化方案；只有用户保存方案并再次确认多餐 Proposal 后，服务端才会在单一事务中写入全部餐次。食品营养仍只由服务端标准食品库和克数计算。
+`0.5.28` 修复全天饮食方案的结构化生成契约：优先使用严格函数调用，并在供应商能力不兼容时回退到包含明确 Schema 与示例的 JSON Mode。两次生成共享统一的服务端校验与精确修复反馈，失败时保留脱敏诊断且继续保证零 Artifact、零 Proposal、零饮食写入。
 
-该版本新增 Alembic `0024`。首次部署必须先设 `RUN_DB_MIGRATIONS_ON_STARTUP=true`；确认 `/ready` 正常且数据库版本为 `0024` 后，再将其恢复为 `false`。打包脚本会拒绝包含 `.env`、测试目录、缓存或 Python 字节码的产物，并校验迁移、Proposal schema/service、Planner 与 Trace 核心文件齐全。
+本热修不新增数据库迁移，数据库版本仍为 Alembic `0024`；从 `0.5.27` 升级不需要重新开启启动迁移。若从更早版本直接升级，仍需先将数据库升级到 `0024`，确认 `/ready` 正常后关闭启动迁移。打包脚本会拒绝包含 `.env`、测试目录、缓存或 Python 字节码的产物，并校验迁移、Proposal schema/service、Planner 与 Trace 核心文件齐全。
 
 内部联调首次部署建议保持新增 Proposal 开关关闭，完成迁移与健康检查后再按需逐项开启：
 

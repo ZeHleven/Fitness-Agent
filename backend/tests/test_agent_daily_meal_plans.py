@@ -34,6 +34,7 @@ from app.services.agent_domain_proposals import (
     create_agent_daily_meal_proposal,
     decide_agent_domain_proposal,
 )
+from app.services.ai_client import StructuredCompletionResult
 from app.services.plan_management_proposals import PlanProposalError
 from app.services.auth import create_access_token
 
@@ -188,6 +189,24 @@ def _target_compliant_draft(foods: list[Food]) -> DailyMealDraft:
     })
 
 
+def _completion(
+    payload: dict | None,
+    *,
+    parse_error: str | None = None,
+    finish_reason: str = "stop",
+) -> StructuredCompletionResult:
+    return StructuredCompletionResult(
+        payload=payload,
+        raw_output="{}" if payload is not None else "",
+        mode="deepseek_json_mode",
+        finish_reason=finish_reason,
+        duration_ms=12,
+        output_chars=2 if payload is not None else 0,
+        parse_error=parse_error,
+        fallback_reason="custom_gateway",
+    )
+
+
 @pytest.mark.asyncio
 async def test_evidence_coordinator_collects_exact_six_groups_without_identity_input(
     db_session,
@@ -214,8 +233,8 @@ async def test_generation_creates_reviewable_artifact_without_writing_meals(
     draft = _target_compliant_draft(foods)
 
     with patch(
-        "app.services.agent_daily_meal_plans._generate_draft",
-        new=AsyncMock(return_value=draft),
+        "app.services.agent_daily_meal_plans.structured_chat_completion",
+        new=AsyncMock(return_value=_completion(draft.model_dump(mode="json"))),
     ):
         result = await generate_daily_meal_artifact(
             db_session,
@@ -249,8 +268,10 @@ async def test_original_chat_request_returns_artifact_and_six_audits_without_pro
     with (
         patch.object(settings, "AGENT_INTENT_MODEL_ENABLED", False),
         patch(
-            "app.services.agent_daily_meal_plans._generate_draft",
-            new=AsyncMock(return_value=_target_compliant_draft(foods)),
+            "app.services.agent_daily_meal_plans.structured_chat_completion",
+            new=AsyncMock(return_value=_completion(
+                _target_compliant_draft(foods).model_dump(mode="json")
+            )),
         ),
     ):
         response = await client.post(
@@ -258,10 +279,7 @@ async def test_original_chat_request_returns_artifact_and_six_audits_without_pro
             headers={"Authorization": f"Bearer {token}"},
             json={
                 "conversation_id": conversation.id,
-                "message": (
-                    "请读取我的个人档案、健康情况、体重和近期饮食记录，"
-                    "根据我的训练目标制定今天全天饮食，包括每种食品的克数。"
-                ),
+                "message": "结合我的情况安排今天怎么吃",
             },
         )
 
@@ -277,8 +295,157 @@ async def test_original_chat_request_returns_artifact_and_six_audits_without_pro
     assert run.change_requests == []
     assert run.evidence_requirements == list(DAILY_MEAL_EVIDENCE)
     assert await db_session.scalar(select(func.count(AgentToolCall.id)).where(
-        AgentToolCall.run_id == run.id
+        AgentToolCall.run_id == run.id,
+        AgentToolCall.call_id.like("evidence:%"),
     )) == 6
+    assert await db_session.scalar(select(func.count(AgentToolCall.id)).where(
+        AgentToolCall.run_id == run.id,
+        AgentToolCall.tool_name == "agent.daily_meal_generator",
+    )) == 1
+    assert await db_session.scalar(select(func.count(MealLog.id)).where(
+        MealLog.user_id == user.id
+    )) == 0
+
+
+@pytest.mark.asyncio
+async def test_generation_repairs_precise_schema_error_on_second_attempt(
+    db_session,
+):
+    user, conversation, run, foods = await _daily_context(db_session, "repair-schema")
+    valid = _target_compliant_draft(foods).model_dump(mode="json")
+    invalid = _target_compliant_draft(foods).model_dump(mode="json")
+    invalid["meals"][0]["items"][0]["food_name"] = "不应由模型提交"
+    model_call = AsyncMock(side_effect=[
+        _completion(invalid),
+        _completion(valid),
+    ])
+
+    with patch(
+        "app.services.agent_daily_meal_plans.structured_chat_completion",
+        new=model_call,
+    ):
+        result = await generate_daily_meal_artifact(
+            db_session,
+            user_id=user.id,
+            conversation_id=conversation.id,
+            run_id=run.id,
+            user_message="结合我的情况安排今天怎么吃",
+        )
+
+    assert model_call.await_count == 2
+    assert [item.status for item in result.generation_attempts] == [
+        "failed",
+        "completed",
+    ]
+    first = result.generation_attempts[0]
+    assert first.error_code == "schema_validation_failed"
+    assert any("extra_forbidden" in path for path in first.validation_paths)
+    second_messages = model_call.await_args_list[1].args[0]
+    second_payload = second_messages[1]["content"]
+    assert "schema_validation_failed" in second_payload
+    assert "extra_forbidden" in second_payload
+    assert "unexpected_field_count" in second_payload
+
+
+@pytest.mark.asyncio
+async def test_generation_repairs_nutrition_validation_on_second_attempt(
+    db_session,
+):
+    user, conversation, run, foods = await _daily_context(db_session, "repair-target")
+    invalid = DailyMealDraft.model_validate({
+        "meals": [
+            {
+                "meal_type": meal_type,
+                "items": [
+                    {"food_id": foods[0].id, "amount_g": 5},
+                    {"food_id": foods[2].id, "amount_g": 5},
+                    {"food_id": foods[1].id, "amount_g": 1},
+                ],
+            }
+            for meal_type in ("早餐", "午餐", "晚餐")
+        ],
+        "rationale": [],
+    })
+    valid = _target_compliant_draft(foods)
+    model_call = AsyncMock(side_effect=[
+        _completion(invalid.model_dump(mode="json")),
+        _completion(valid.model_dump(mode="json")),
+    ])
+
+    with patch(
+        "app.services.agent_daily_meal_plans.structured_chat_completion",
+        new=model_call,
+    ):
+        result = await generate_daily_meal_artifact(
+            db_session,
+            user_id=user.id,
+            conversation_id=conversation.id,
+            run_id=run.id,
+            user_message="按今天训练量给我配三餐",
+        )
+
+    assert model_call.await_count == 2
+    assert result.generation_attempts[0].error_code == "daily_calories_out_of_target"
+    assert result.generation_attempts[1].status == "completed"
+    second_messages = model_call.await_args_list[1].args[0]
+    assert "daily_calories_out_of_target" in second_messages[1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_two_invalid_generations_persist_safe_diagnostics_and_write_nothing(
+    client,
+    db_session,
+):
+    user, conversation, _, _ = await _daily_context(db_session, "invalid-twice")
+    token = create_access_token(user.id)
+    invalid = {"meals": "not-a-list", "rationale": []}
+    model_call = AsyncMock(side_effect=[
+        _completion(invalid),
+        _completion(invalid),
+    ])
+
+    with (
+        patch.object(settings, "AGENT_INTENT_MODEL_ENABLED", False),
+        patch(
+            "app.services.agent_daily_meal_plans.structured_chat_completion",
+            new=model_call,
+        ),
+    ):
+        response = await client.post(
+            "/api/v1/agent/chat",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "conversation_id": conversation.id,
+                "message": "结合我的情况安排今天怎么吃",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "暂时未能形成有效结构" in body["reply"]
+    assert "artifact" not in body
+    run = await db_session.get(AgentRun, body["run_id"])
+    assert run.execution_trace["termination_reason"] == "daily_meal_generation_invalid"
+    evidence_calls = await db_session.scalar(select(func.count(AgentToolCall.id)).where(
+        AgentToolCall.run_id == run.id,
+        AgentToolCall.call_id.like("evidence:%"),
+    ))
+    model_calls = list((await db_session.execute(select(AgentToolCall).where(
+        AgentToolCall.run_id == run.id,
+        AgentToolCall.tool_name == "agent.daily_meal_generator",
+    ).order_by(AgentToolCall.created_at))).scalars().all())
+    assert evidence_calls == 6
+    assert len(model_calls) == 2
+    assert all(item.status == "failed" for item in model_calls)
+    assert all(item.error_code == "schema_validation_failed" for item in model_calls)
+    assert all("validation_paths" in item.result_data for item in model_calls)
+    assert all("raw_output" not in item.result_data for item in model_calls)
+    assert await db_session.scalar(select(func.count(AgentArtifact.id)).where(
+        AgentArtifact.user_id == user.id
+    )) == 0
+    assert await db_session.scalar(select(func.count(AgentProposal.id)).where(
+        AgentProposal.user_id == user.id
+    )) == 0
     assert await db_session.scalar(select(func.count(MealLog.id)).where(
         MealLog.user_id == user.id
     )) == 0
@@ -436,8 +603,10 @@ async def test_revising_artifact_stales_existing_multi_meal_proposal(db_session)
     await db_session.commit()
 
     with patch(
-        "app.services.agent_daily_meal_plans._generate_draft",
-        new=AsyncMock(return_value=_target_compliant_draft(foods)),
+        "app.services.agent_daily_meal_plans.structured_chat_completion",
+        new=AsyncMock(return_value=_completion(
+            _target_compliant_draft(foods).model_dump(mode="json")
+        )),
     ):
         replacement = await generate_daily_meal_artifact(
             db_session,
