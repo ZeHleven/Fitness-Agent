@@ -155,6 +155,10 @@ class IntentResolverOutcome:
     error_category: str | None = None
     latency_ms: int = 0
     attempt_timings: tuple[IntentAttemptTiming, ...] = ()
+    # True means neither the model nor a high-confidence deterministic route
+    # produced a trustworthy action. Runtime must stop instead of executing a
+    # semantically different rules fallback.
+    understanding_failed: bool = False
 
 
 _INTENT_KEYWORDS: tuple[tuple[IntentName, tuple[str, ...]], ...] = (

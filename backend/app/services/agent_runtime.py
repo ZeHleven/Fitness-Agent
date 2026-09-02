@@ -1149,6 +1149,18 @@ async def execute_agent_run(
                 artifact=short_artifact,
             )
 
+        if intent_outcome.understanding_failed:
+            reply = (
+                "意图理解服务暂时未能可靠完成，请稍后重试。"
+                "本次没有读取你的业务数据，也没有修改任何数据。"
+            )
+            run.error_code = "intent_understanding_unavailable"
+            run.error_message = reply
+            return await complete_semantic_short_circuit(
+                reply,
+                termination_reason="intent_understanding_unavailable",
+            )
+
         write_structure_unavailable = (
             resolution.request_kind == "mutation"
             and intent_outcome.source == "rules"

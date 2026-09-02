@@ -414,6 +414,55 @@ async def test_agent_run_exposes_privacy_safe_intent_error_category(client):
 
 
 @pytest.mark.asyncio
+async def test_untrusted_intent_fallback_stops_before_tools_or_private_reads(
+    client,
+):
+    token = await _token(client, "agent-intent-unavailable@example.com")
+    outcome = IntentResolverOutcome(
+        resolution=IntentResolution(
+            primary_intent="workout_progress_query",
+            intent_domain="workout_progress",
+            request_kind="assessment",
+            requested_effect="read",
+            resolved_query="评估近期执行情况",
+            confidence=0.45,
+        ),
+        source="rules",
+        attempt_count=2,
+        fallback_reason="model_timeout",
+        error_category="TimeoutError",
+        understanding_failed=True,
+    )
+    with (
+        patch(
+            "app.services.agent_runtime.resolve_intent_with_fallback",
+            new=AsyncMock(return_value=outcome),
+        ),
+        patch(
+            "app.services.agent_runtime.invoke_langchain_agent",
+            new=AsyncMock(),
+        ) as invoke_agent,
+    ):
+        response = await client.post(
+            "/api/v1/agent/chat",
+            json={"message": "综合我的资料给我配今天三顿饭"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert "没有读取你的业务数据" in response.json()["reply"]
+    run = await client.get(
+        f"/api/v1/agent/runs/{response.json()['run_id']}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert run.json()["error_code"] == "intent_understanding_unavailable"
+    assert run.json()["execution_trace"]["termination_reason"] == (
+        "intent_understanding_unavailable"
+    )
+    invoke_agent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_agent_health_red_flag_is_intercepted_before_model(client):
     token = await _token(client, "agent-red-flag@example.com")
     with patch(

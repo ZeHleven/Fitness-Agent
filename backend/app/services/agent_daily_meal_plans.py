@@ -1423,6 +1423,9 @@ async def generate_daily_meal_artifact(
                     existing_totals=existing_totals,
                     targets=targets,
                     mode=optimization_mode,
+                    time_limit_seconds=(
+                        settings.DAILY_MEAL_OPTIMIZER_TIMEOUT_SECONDS
+                    ),
                 )
                 optimized_draft = DailyMealDraft.model_validate({
                     "meals": optimized.meals,

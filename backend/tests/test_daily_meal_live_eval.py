@@ -111,6 +111,10 @@ def test_live_eval_writes_sanitized_report_for_fatal_evaluation_error(
         "stage": "evaluation",
         "type": "RuntimeError",
     }
+    assert report["intent_timeout_runs"] == 0
+    assert report["rules_fallback_runs"] == 0
+    assert report["semantic_misroute_runs"] == 0
+    assert report["optimizer_unavailable_runs"] == 0
     assert "sensitive database and user details" not in report_text
 
 

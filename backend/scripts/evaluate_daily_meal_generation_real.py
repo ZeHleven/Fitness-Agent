@@ -208,6 +208,16 @@ async def evaluate() -> dict[str, Any]:
                 "group": "original" if index <= 10 else "synonym",
                 "success": success,
                 "request_kind": run.request_kind if run is not None else None,
+                "intent_source": run.intent_source if run is not None else None,
+                "intent_attempt_count": (
+                    run.intent_attempt_count if run is not None else 0
+                ),
+                "intent_fallback_reason": (
+                    run.intent_fallback_reason if run is not None else None
+                ),
+                "intent_error_category": (
+                    run.intent_error_category if run is not None else None
+                ),
                 "termination_reason": (
                     (run.execution_trace or {}).get("termination_reason")
                     if run is not None
@@ -234,6 +244,23 @@ async def evaluate() -> dict[str, Any]:
         status: sum(item["fit_status"] == status for item in results)
         for status in ("within_target", "acceptable_deviation")
     }
+    intent_timeout_runs = sum(
+        item["intent_fallback_reason"] == "model_timeout"
+        or "timeout" in str(item["intent_error_category"] or "").lower()
+        for item in results
+    )
+    rules_fallback_runs = sum(
+        item["intent_source"] == "rules" for item in results
+    )
+    semantic_misroute_runs = sum(
+        item["intent_source"] == "model"
+        and item["request_kind"] != "generation"
+        for item in results
+    )
+    optimizer_unavailable_runs = sum(
+        item["termination_reason"] == "daily_meal_optimizer_unavailable"
+        for item in results
+    )
     return {
         "model": settings.AGENT_MODEL,
         "prerequisites": prerequisite_diagnostics,
@@ -246,6 +273,10 @@ async def evaluate() -> dict[str, Any]:
         "unconfirmed_meal_writes": int(meal_count or 0),
         "proposal_count": int(proposal_count or 0),
         "fit_counts": fit_counts,
+        "intent_timeout_runs": intent_timeout_runs,
+        "rules_fallback_runs": rules_fallback_runs,
+        "semantic_misroute_runs": semantic_misroute_runs,
+        "optimizer_unavailable_runs": optimizer_unavailable_runs,
         "passed": (
             original_successes == 10
             and synonym_successes / len(synonyms) >= 0.95
@@ -282,6 +313,10 @@ def _fatal_report(*, stage: str, error_type: str) -> dict[str, Any]:
             "within_target": 0,
             "acceptable_deviation": 0,
         },
+        "intent_timeout_runs": 0,
+        "rules_fallback_runs": 0,
+        "semantic_misroute_runs": 0,
+        "optimizer_unavailable_runs": 0,
         "passed": False,
         "fatal_error": {
             "stage": stage,

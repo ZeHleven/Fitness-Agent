@@ -13,7 +13,9 @@ from app.services.agent_intent import (
     route_tools,
 )
 from app.services.agent_intent_model import (
+    IntentRouteDecision,
     IntentStructuredOutputError,
+    _invoke_model_intent,
     _intent_attempt_timeout_seconds,
     _structured_error_category,
     resolve_intent_with_fallback,
@@ -31,6 +33,85 @@ class SafeFakeValidationError(Exception):
             "loc": ("expanded_intents", 0),
             "input": "must-never-appear-in-category",
         }]
+
+
+@pytest.mark.asyncio
+async def test_compact_generation_route_does_not_call_change_extractor():
+    route = IntentRouteDecision(
+        primary_intent="nutrition_today_query",
+        intent_domain="nutrition",
+        request_kind="generation",
+        requested_effect="read",
+        requested_output="daily_meal_plan",
+        resolved_query="结合当前用户情况生成今天全天饮食方案",
+        confidence=0.97,
+    )
+    with (
+        patch(
+            "app.services.agent_intent_model._invoke_model_route",
+            new=AsyncMock(return_value=route),
+        ),
+        patch(
+            "app.services.agent_intent_model._invoke_model_change_extraction",
+            new=AsyncMock(),
+        ) as extract,
+    ):
+        resolution = await _invoke_model_intent(
+            "综合我的资料给我配今天三顿饭",
+            timeout_seconds=10,
+        )
+
+    assert resolution.request_kind == "generation"
+    assert resolution.requested_output == "daily_meal_plan"
+    assert resolution.change_requests == []
+    extract.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_compact_mutation_route_calls_detailed_change_extractor():
+    route = IntentRouteDecision(
+        primary_intent="nutrition_today_query",
+        intent_domain="nutrition",
+        request_kind="mutation",
+        requested_effect="create",
+        resolved_query="记录今天午餐",
+        confidence=0.98,
+    )
+    extracted = IntentResolution(
+        primary_intent="nutrition_today_query",
+        intent_domain="nutrition",
+        request_kind="mutation",
+        requested_effect="create",
+        change_requests=[ChangeRequest(
+            resource="nutrition",
+            operation="create",
+            field_path="meal",
+            value={
+                "logged_at": "today",
+                "meal_type": "午餐",
+                "items": [{"food_name": "鸡胸肉", "amount_g": 150}],
+            },
+        )],
+        confidence=0.98,
+    )
+    with (
+        patch(
+            "app.services.agent_intent_model._invoke_model_route",
+            new=AsyncMock(return_value=route),
+        ),
+        patch(
+            "app.services.agent_intent_model._invoke_model_change_extraction",
+            new=AsyncMock(return_value=extracted),
+        ) as extract,
+    ):
+        resolution = await _invoke_model_intent(
+            "把今天午餐记录为鸡胸肉150克",
+            timeout_seconds=10,
+        )
+
+    assert resolution.request_kind == "mutation"
+    assert len(resolution.change_requests) == 1
+    extract.assert_awaited_once()
 
 
 @pytest.fixture(autouse=True)
@@ -296,14 +377,7 @@ async def test_intent_timeout_stops_after_exactly_two_attempts():
 
 
 def test_intent_attempt_timeout_reserves_total_retry_budget():
-    with (
-        patch.object(settings, "AGENT_INTENT_TIMEOUT_SECONDS", 6.0),
-        patch.object(
-            settings,
-            "AGENT_INTENT_RETRY_MIN_REMAINING_SECONDS",
-            2.0,
-        ),
-    ):
+    with patch.object(settings, "AGENT_INTENT_ROUTE_TIMEOUT_SECONDS", 6.0):
         first = _intent_attempt_timeout_seconds(
             attempt=1,
             remaining_seconds=10.0,
@@ -313,7 +387,7 @@ def test_intent_attempt_timeout_reserves_total_retry_budget():
             remaining_seconds=4.0,
         )
 
-    assert first == 6.0
+    assert first == 5.0
     assert second == 4.0
 
 
@@ -329,13 +403,7 @@ async def test_intent_retries_stay_inside_total_deadline():
 
     with (
         patch.object(settings, "DEEPSEEK_API_KEY", "test-key"),
-        patch.object(settings, "AGENT_INTENT_TIMEOUT_SECONDS", 0.03),
-        patch.object(settings, "AGENT_INTENT_TOTAL_TIMEOUT_SECONDS", 0.08),
-        patch.object(
-            settings,
-            "AGENT_INTENT_RETRY_MIN_REMAINING_SECONDS",
-            0.01,
-        ),
+        patch.object(settings, "AGENT_INTENT_ROUTE_TIMEOUT_SECONDS", 0.03),
         patch(
             "app.services.agent_intent_model._invoke_model_intent",
             new=slow_intent,
@@ -350,8 +418,28 @@ async def test_intent_retries_stay_inside_total_deadline():
 
     assert outcome.source == "rules"
     assert outcome.fallback_reason == "model_timeout"
+    assert outcome.understanding_failed is True
     assert calls == 2
     assert elapsed < 0.2
+
+
+@pytest.mark.asyncio
+async def test_timeout_does_not_silently_turn_ambiguous_generation_into_query():
+    with (
+        patch.object(settings, "DEEPSEEK_API_KEY", "test-key"),
+        patch(
+            "app.services.agent_intent_model._invoke_model_intent",
+            new=AsyncMock(side_effect=IntentModelTimeoutError("timeout")),
+        ),
+    ):
+        outcome = await resolve_intent_with_fallback(
+            "综合我的资料给我配今天三顿饭",
+            use_model=True,
+        )
+
+    assert outcome.source == "rules"
+    assert outcome.fallback_reason == "model_timeout"
+    assert outcome.understanding_failed is True
 
 
 def test_structured_error_category_exposes_path_without_raw_value():
