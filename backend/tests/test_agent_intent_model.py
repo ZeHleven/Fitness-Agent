@@ -59,10 +59,6 @@ def test_semantic_route_contract_defines_every_domain_in_prompt_and_schema():
     assert "要求记录非急性疼痛、旧伤、伤病史或慢性病" in schema_risk[
         "description"
     ]
-    assert (
-        "把伤病史更新为左膝旧伤”是 health/mutation/update/answer"
-        in INTENT_ROUTE_SYSTEM_PROMPT
-    )
 
 
 @pytest.mark.asyncio

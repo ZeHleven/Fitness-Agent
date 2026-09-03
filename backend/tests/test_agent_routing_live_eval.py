@@ -1,7 +1,50 @@
 import json
 
 from app.services.agent_intent import IntentResolution, IntentResolverOutcome
+from app.services.agent_intent_model import INTENT_ROUTE_SYSTEM_PROMPT
 from scripts import evaluate_agent_routing_real as route_eval
+
+
+def test_live_gate_prompts_are_not_copied_verbatim_into_production_prompt():
+    leaked_case_ids = [
+        case.case_id
+        for case in route_eval.CASES
+        if case.prompt in INTENT_ROUTE_SYSTEM_PROMPT
+    ]
+
+    assert leaked_case_ids == []
+
+
+def test_health_risk_generalization_cases_cover_unseen_boundaries():
+    expected = {
+        "health.paraphrase.shoulder": (
+            "health", "query", "read", "medium"
+        ),
+        "health.paraphrase.lumbar": (
+            "health", "query", "read", "medium"
+        ),
+        "health.paraphrase.surgery": (
+            "health", "mutation", "update", "medium"
+        ),
+        "health.paraphrase.screening": (
+            "health", "query", "read", "low"
+        ),
+        "general.paraphrase.physiology": (
+            "general", "query", "read", "low"
+        ),
+    }
+    observed = {
+        case.case_id: (
+            case.domain,
+            case.kind,
+            case.effect,
+            case.risk,
+        )
+        for case in route_eval.CASES
+        if case.case_id in expected
+    }
+
+    assert observed == expected
 
 
 def test_route_report_exposes_enum_only_expected_actual_mismatches():
