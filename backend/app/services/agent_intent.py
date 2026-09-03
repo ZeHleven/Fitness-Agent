@@ -45,11 +45,15 @@ EvidenceRequirement = Literal[
     "health_screening",
     "weight_history",
     "active_plan",
+    "next_workout",
+    "active_workout_session",
+    "workout_history",
     "workout_progress",
     "workout_daily_context",
     "nutrition_today",
     "nutrition_history",
     "nutrition_recent_context",
+    "food_search",
     "food_catalog",
 ]
 
@@ -144,6 +148,9 @@ class IntentAttemptTiming:
     latency_ms: int
     status: Literal["success", "error"]
     error_category: str | None = None
+    transport: str | None = None
+    output_chars: int | None = None
+    finish_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -289,33 +296,6 @@ _EXPLICIT_PLAN_KEYWORDS = (
     "训练计划",
     "计划安排",
     "我的计划",
-)
-
-_AFFIRMATIVE_FOLLOWUPS = frozenset({
-    "需要",
-    "要",
-    "好",
-    "好的",
-    "可以",
-    "行",
-    "是",
-    "是的",
-    "对",
-    "对的",
-    "麻烦了",
-    "帮我查",
-    "查一下",
-    "继续",
-})
-
-_ASSISTANT_OFFER_MARKERS = (
-    "需要我",
-    "要我",
-    "是否需要",
-    "要不要",
-    "可以帮你",
-    "帮你查",
-    "我来查",
 )
 
 _CLARIFICATION_CANCEL_MESSAGES = frozenset({
@@ -492,14 +472,14 @@ _EVIDENCE_BY_INTENT: dict[IntentName, tuple[EvidenceRequirement, ...]] = {
     "profile_query": ("profile_summary",),
     "health_query": ("health_screening",),
     "plan_query": ("active_plan",),
-    "next_workout_query": ("workout_daily_context",),
-    "active_workout_query": (),
-    "workout_history_query": (),
+    "next_workout_query": ("next_workout",),
+    "active_workout_query": ("active_workout_session",),
+    "workout_history_query": ("workout_history",),
     "workout_progress_query": ("workout_progress",),
     "weight_history_query": ("weight_history",),
     "nutrition_today_query": ("nutrition_today",),
     "nutrition_history_query": ("nutrition_history",),
-    "food_search_query": ("food_catalog",),
+    "food_search_query": ("food_search",),
 }
 
 
@@ -1203,63 +1183,6 @@ def resolve_intent(message: str) -> IntentResolution:
     )
 
 
-def resolve_contextual_followup(
-    message: str,
-    context_messages: list[dict[str, str]] | None,
-) -> IntentResolution | None:
-    """Resolve a small whitelist of explicit follow-ups from the last offer.
-
-    This intentionally does not infer from arbitrary history. Only a short,
-    affirmative message immediately following an assistant offer may inherit
-    that offer's intent, keeping tool routing narrow and predictable.
-    """
-    normalized = message.strip().lower().strip("。！？!?，, ")
-    if normalized not in _AFFIRMATIVE_FOLLOWUPS or not context_messages:
-        return None
-
-    last_message = context_messages[-1]
-    if last_message.get("role") != "assistant":
-        return None
-    assistant_content = str(last_message.get("content") or "").strip()
-    marker_positions = [
-        assistant_content.find(marker)
-        for marker in _ASSISTANT_OFFER_MARKERS
-        if marker in assistant_content
-    ]
-    if not marker_positions:
-        return None
-    offer_content = assistant_content[min(marker_positions):]
-
-    inherited = resolve_intent(offer_content)
-    if inherited.primary_intent == "general_qa":
-        return IntentResolution(
-            primary_intent="general_qa",
-            resolved_query=message.strip(),
-            subtasks=["澄清要继续查询的内容"],
-            missing_slots=["要继续查询的具体内容"],
-            clarification_required=True,
-            clarification_question="你希望我继续查询哪一项内容？",
-            confidence=0.7,
-        )
-    return inherited.model_copy(update={
-        "resolved_query": "；".join(
-            _CANONICAL_QUERY_BY_INTENT[intent]
-            for intent in [
-                inherited.primary_intent,
-                *inherited.expanded_intents,
-            ]
-        ),
-        "references": [ResolvedReference(
-            expression=message.strip(),
-            resolved_value=assistant_content[:500],
-            reference_type="message",
-            source="recent_conversation",
-        )],
-        "subtasks": [f"承接上一轮：{item}" for item in inherited.subtasks],
-        "confidence": min(inherited.confidence, 0.88),
-    })
-
-
 def resolve_pending_clarification(
     message: str,
     pending_clarification: dict | None,
@@ -1388,159 +1311,99 @@ def pending_clarification_to_resolution(
         return None
 
 
+_INTENT_BY_EVIDENCE: dict[EvidenceRequirement, IntentName] = {
+    "profile_summary": "profile_query",
+    "health_screening": "health_query",
+    "weight_history": "weight_history_query",
+    "active_plan": "plan_query",
+    "next_workout": "next_workout_query",
+    "active_workout_session": "active_workout_query",
+    "workout_history": "workout_history_query",
+    "workout_progress": "workout_progress_query",
+    "workout_daily_context": "next_workout_query",
+    "nutrition_today": "nutrition_today_query",
+    "nutrition_history": "nutrition_history_query",
+    "nutrition_recent_context": "nutrition_today_query",
+    "food_search": "food_search_query",
+    "food_catalog": "food_search_query",
+}
+
+
+def _project_compatible_intents(
+    *,
+    intent_domain: IntentDomain,
+    request_kind: RequestKind,
+    requested_output: RequestedOutput,
+    evidence_requirements: list[EvidenceRequirement],
+) -> tuple[IntentName, list[IntentName]]:
+    """Project v6 semantics to legacy intent fields without granting access."""
+    if request_kind == "generation" and requested_output == "daily_meal_plan":
+        return "nutrition_today_query", []
+
+    projected = list(dict.fromkeys(
+        _INTENT_BY_EVIDENCE[item] for item in evidence_requirements
+    ))
+    domain_default = _INTENT_BY_DOMAIN[intent_domain]
+    if domain_default in projected:
+        primary = domain_default
+        projected.remove(domain_default)
+    elif projected:
+        primary = projected.pop(0)
+    else:
+        primary = domain_default
+    return primary, projected[:7]
+
+
+def _coordinated_evidence(
+    resolution: IntentResolution,
+    *,
+    intent_domain: IntentDomain,
+    request_kind: RequestKind,
+    requested_output: RequestedOutput,
+) -> list[EvidenceRequirement]:
+    if request_kind == "generation" and requested_output == "daily_meal_plan":
+        return list(_DAILY_MEAL_EVIDENCE)
+    if request_kind == "assessment" and intent_domain == "workout_plan":
+        return [
+            "active_plan",
+            "profile_summary",
+            "health_screening",
+            "workout_progress",
+        ]
+    if request_kind not in {"query", "assessment"}:
+        return []
+
+    requested = list(dict.fromkeys(resolution.evidence_requirements))
+    return list(dict.fromkeys(requested))[:6]
+
+
 def normalize_resolution(
     message: str,
     resolution: IntentResolution,
     *,
     context_messages: list[dict[str, str]] | None = None,
 ) -> IntentResolution:
-    """Apply deterministic safety and deduplication after untrusted model output."""
-    expanded: list[IntentName] = []
-    for intent in resolution.expanded_intents:
-        if intent != resolution.primary_intent and intent not in expanded:
-            expanded.append(intent)
+    """Validate v6 semantics and derive all compatibility projections.
 
-    primary = resolution.primary_intent
-    risk_level = resolution.risk_level
+    Deterministic rules are deliberately restricted to Proposal decisions and
+    health risk escalation.  They cannot convert an ordinary query into a
+    generation/mutation or authorize a read tool.
+    """
     rules_resolution = resolve_intent(message)
-    intent_domain = resolution.intent_domain or _DOMAIN_BY_INTENT[primary]
+    intent_domain = resolution.intent_domain or _DOMAIN_BY_INTENT[
+        resolution.primary_intent
+    ]
     request_kind = resolution.request_kind
     requested_effect = resolution.requested_effect
-    change_requests = list(resolution.change_requests)
-    evidence_requirements = list(resolution.evidence_requirements)
     requested_output = resolution.requested_output
-    rules_decision_overrides_non_decision = (
-        rules_resolution.request_kind == "proposal_decision"
-        and request_kind != "proposal_decision"
-    )
-    model_decision_actions = {
-        str(change.value)
-        for change in change_requests
-        if change.field_path == "proposal.status"
-        and change.value in {"confirm", "reject"}
-    }
-    rules_decision_fills_incomplete_action = (
-        rules_resolution.request_kind == "proposal_decision"
-        and request_kind == "proposal_decision"
-        and len(model_decision_actions) != 1
-    )
-    if rules_resolution.request_kind == "proposal_decision" and (
-        rules_decision_overrides_non_decision
-        or rules_decision_fills_incomplete_action
-    ):
-        intent_domain = rules_resolution.intent_domain
-        request_kind = rules_resolution.request_kind
-        requested_effect = rules_resolution.requested_effect
-        change_requests = list(rules_resolution.change_requests)
-    elif (
-        rules_resolution.request_kind == "mutation"
-        and request_kind not in {"mutation", "proposal_decision"}
-    ):
-        # Rules may correct the read/write classification, but their regex
-        # extraction is never promoted into authoritative write fields.
-        intent_domain = rules_resolution.intent_domain
-        request_kind = "mutation"
-        requested_effect = rules_resolution.requested_effect
-        change_requests = []
-    elif (
-        rules_resolution.request_kind == "assessment"
-        and request_kind == "query"
-    ):
-        intent_domain = rules_resolution.intent_domain
-        request_kind = "assessment"
-        requested_effect = "read"
-        change_requests = []
-    elif (
-        rules_resolution.request_kind == "generation"
-        and request_kind in {"query", "assessment"}
-    ):
-        intent_domain = "nutrition"
-        request_kind = "generation"
-        requested_effect = "read"
-        change_requests = []
-        requested_output = "daily_meal_plan"
-    elif request_kind in {"mutation", "proposal_decision"}:
-        primary = _INTENT_BY_DOMAIN[intent_domain]
-        expanded = []
+    change_requests = list(resolution.change_requests)
 
-    if request_kind == "proposal_decision":
+    if rules_resolution.request_kind == "proposal_decision":
+        intent_domain = rules_resolution.intent_domain or "general"
+        request_kind = "proposal_decision"
         requested_effect = "decide"
-    elif request_kind == "mutation":
-        operations = {change.operation for change in change_requests}
-        if len(operations) == 1:
-            requested_effect = operations.pop()
-    else:
-        requested_effect = "read"
-        change_requests = []
-    if request_kind == "generation":
-        requested_effect = "read"
-        change_requests = []
-        requested_output = "daily_meal_plan"
-        evidence_requirements = list(_DAILY_MEAL_EVIDENCE)
-    elif request_kind == "assessment" and intent_domain == "workout_plan":
         requested_output = "answer"
-        evidence_requirements = [
-            "active_plan",
-            "profile_summary",
-            "health_screening",
-            "workout_progress",
-        ]
-    elif requested_output == "daily_meal_plan":
-        requested_output = "answer"
-        evidence_requirements = []
-    else:
-        allowed_evidence = {
-            evidence
-            for intent in [primary, *expanded]
-            for evidence in _EVIDENCE_BY_INTENT[intent]
-        }
-        evidence_requirements = list(dict.fromkeys([
-            *[
-                evidence for evidence in evidence_requirements
-                if evidence in allowed_evidence
-            ],
-            *[
-                evidence
-                for intent in [primary, *expanded]
-                for evidence in _EVIDENCE_BY_INTENT[intent]
-            ],
-        ]))[:6]
-    risk_rank = {"low": 0, "medium": 1, "high": 2}
-    if risk_rank[rules_resolution.risk_level] > risk_rank[risk_level]:
-        risk_level = rules_resolution.risk_level
-
-    if (
-        is_explicit_plan_adjustment_request(message)
-        and rules_resolution.primary_intent != "health_query"
-    ):
-        primary = "plan_query"
-        expanded = []
-    elif (
-        _is_active_continuation_comparison(message)
-        and rules_resolution.primary_intent != "health_query"
-    ):
-        primary = "active_workout_query"
-        expanded = ["next_workout_query"]
-    elif (
-        _is_plan_adjustment_assessment(message)
-        and rules_resolution.primary_intent != "health_query"
-    ):
-        primary = "plan_query"
-        expanded = [
-            "workout_progress_query",
-            "workout_history_query",
-        ]
-        if _asks_personal_plan_fit(message):
-            expanded.append("profile_query")
-    elif rules_resolution.primary_intent == "health_query":
-        if primary not in ("general_qa", "health_query") and primary not in expanded:
-            expanded.insert(0, primary)
-        primary = "health_query"
-
-    if rules_resolution.primary_intent == primary:
-        for intent in rules_resolution.expanded_intents:
-            if intent != primary and intent not in expanded:
-                expanded.append(intent)
+        change_requests = list(rules_resolution.change_requests)
 
     explicit_health_record = (
         request_kind == "mutation"
@@ -1552,86 +1415,52 @@ def normalize_resolution(
             for change in change_requests
         )
     )
+    risk_rank = {"low": 0, "medium": 1, "high": 2}
+    risk_level = resolution.risk_level
+    if risk_rank[rules_resolution.risk_level] > risk_rank[risk_level]:
+        risk_level = rules_resolution.risk_level
     if contains_health_red_flag(message):
         risk_level = "high"
         intent_domain = "health"
         if not explicit_health_record:
             request_kind = "query"
             requested_effect = "read"
+            requested_output = "answer"
             change_requests = []
-        if primary != "health_query":
-            if primary not in expanded:
-                expanded.insert(0, primary)
-            primary = "health_query"
-    if (
-        primary == "next_workout_query"
-        and not any(keyword in message for keyword in _EXPLICIT_PLAN_KEYWORDS)
-        and not any(
-            reference.reference_type == "plan"
-            for reference in resolution.references
-        )
-        and not any(
-            keyword in resolution.resolved_query
-            for keyword in _EXPLICIT_PLAN_KEYWORDS
-        )
-    ):
-        expanded = [intent for intent in expanded if intent != "plan_query"]
-    expanded = [intent for intent in expanded if intent != primary][:7]
 
-    resolved_query = resolution.resolved_query.strip() or message.strip()
-    subtasks = list(resolution.subtasks)
-    if (
-        _is_active_continuation_comparison(message)
-        and rules_resolution.primary_intent != "health_query"
-    ):
-        resolved_query = (
-            "检查是否存在未完成的活动训练；若不存在，再查询下一练，"
-            "判断现在应该继续上次训练还是开始下一练"
-        )
-        subtasks = ["检查活动训练", "必要时查询下一练"]
-    elif request_kind == "mutation" and primary != "health_query":
-        primary = (
-            "general_qa"
-            if intent_domain != "workout_plan"
-            and contains_unsupported_write_request(message)
-            else _INTENT_BY_DOMAIN[intent_domain]
-        )
-        expanded = []
-        subtasks = (
-            ["读取当前训练计划", _EXPLICIT_PROPOSAL_SUBTASK]
-            if is_explicit_plan_adjustment_request(message)
-            else ["读取当前训练计划", "校验变更并形成待确认提案"]
-            if intent_domain == "workout_plan" and requested_effect == "update"
-            else ["识别写入请求并进行能力校验"]
-        )
-    elif request_kind == "proposal_decision" and primary != "health_query":
-        primary = _INTENT_BY_DOMAIN[intent_domain]
-        expanded = []
-        subtasks = ["定位当前会话唯一待确认提案", "安全执行提案决策"]
-    elif request_kind == "generation" and primary != "health_query":
-        primary = "nutrition_today_query"
-        expanded = []
-        subtasks = ["按需读取个性化证据", "生成并校验全天饮食方案"]
-    elif (
-        is_explicit_plan_adjustment_request(message)
-        and rules_resolution.primary_intent != "health_query"
-    ):
-        subtasks = [
-            "读取当前训练计划",
-            _EXPLICIT_PROPOSAL_SUBTASK,
-        ]
-    elif (
-        _is_plan_adjustment_assessment(message)
-        and rules_resolution.primary_intent != "health_query"
-    ):
-        subtasks = []
-        if _asks_personal_plan_fit(message):
-            subtasks.append("读取用户训练偏好")
-        subtasks.extend([
-            "读取当前训练计划",
-            "读取近期训练进度，失败时改查历史记录",
-            "评估并形成待确认的调整建议",
-        ])
+    if request_kind in {"query", "assessment", "generation"}:
+        requested_effect = "read"
+        change_requests = []
+    elif request_kind == "proposal_decision":
+        requested_effect = "decide"
+        requested_output = "answer"
+    elif request_kind == "mutation":
+        operations = {item.operation for item in change_requests}
+        if len(operations) == 1:
+            requested_effect = operations.pop()
+
+    if request_kind == "generation":
+        if intent_domain != "nutrition" or requested_output != "daily_meal_plan":
+            raise ValueError("generation_requires_daily_meal_plan")
+    elif requested_output != "answer":
+        requested_output = "answer"
+
+    evidence_requirements = _coordinated_evidence(
+        resolution,
+        intent_domain=intent_domain,
+        request_kind=request_kind,
+        requested_output=requested_output,
+    )
+    if risk_level == "high" and not explicit_health_record:
+        evidence_requirements = ["health_screening"]
+
+    primary, expanded = _project_compatible_intents(
+        intent_domain=intent_domain,
+        request_kind=request_kind,
+        requested_output=requested_output,
+        evidence_requirements=evidence_requirements,
+    )
+
     if request_kind in {"mutation", "proposal_decision"}:
         semantic_validation = validate_semantic_changes(
             intent_domain=intent_domain,
@@ -1643,9 +1472,6 @@ def normalize_resolution(
         clarification_required = bool(missing_slots)
         clarification_question = semantic_validation.clarification_question
     elif request_kind == "generation":
-        # The understanding model has not read private evidence and therefore
-        # cannot authoritatively declare profile or health slots missing.
-        # The Evidence Coordinator asks only after server-owned reads.
         missing_slots = []
         clarification_required = False
         clarification_question = None
@@ -1661,40 +1487,31 @@ def normalize_resolution(
             clarification_question = (
                 f"为了继续，我还需要确认：{'、'.join(missing_slots)}。"
                 if missing_slots
-                else "为了准确继续，请补充你希望查询的具体内容。"
+                else "为了准确继续，请补充你希望处理的具体内容。"
             )
-        if not clarification_required:
-            clarification_question = None
 
     references = list(resolution.references)
     if not references and context_messages:
-        expression = next(
-            (
-                marker for marker in _CONTEXT_REFERENCE_MARKERS
-                if marker in message
-            ),
-            None,
-        )
+        expression = next((
+            marker for marker in _CONTEXT_REFERENCE_MARKERS if marker in message
+        ), None)
         last_context = context_messages[-1]
         if expression and last_context.get("role") in {"user", "assistant"}:
-            reference_type: Literal[
-                "message",
-                "exercise",
-                "plan",
-                "time_range",
-                "metric",
-                "other",
-            ] = (
-                "exercise" if "动作" in message
-                else "plan" if "计划" in message
-                else "message"
-            )
             references.append(ResolvedReference(
                 expression=expression,
                 resolved_value=str(last_context.get("content") or "")[:500],
-                reference_type=reference_type,
+                reference_type="message",
                 source="recent_conversation",
             ))
+
+    if request_kind == "generation":
+        subtasks = ["按需读取个性化证据", "生成并校验全天饮食方案"]
+    elif request_kind == "proposal_decision":
+        subtasks = ["定位当前会话唯一待确认提案", "安全执行提案决策"]
+    elif request_kind == "mutation":
+        subtasks = ["识别写入请求并进行能力校验"]
+    else:
+        subtasks = list(resolution.subtasks)
 
     return IntentResolution.model_validate({
         **resolution.model_dump(),
@@ -1703,16 +1520,16 @@ def normalize_resolution(
         "request_kind": request_kind,
         "requested_effect": requested_effect,
         "change_requests": change_requests,
-        "evidence_requirements": evidence_requirements[:6],
+        "evidence_requirements": evidence_requirements,
         "requested_output": requested_output,
+        "resolved_query": resolution.resolved_query.strip() or message.strip(),
         "expanded_intents": expanded,
-        "risk_level": risk_level,
-        "resolved_query": resolved_query,
+        "subtasks": subtasks,
         "missing_slots": missing_slots,
         "clarification_required": clarification_required,
         "clarification_question": clarification_question,
+        "risk_level": risk_level,
         "references": references[:12],
-        "subtasks": subtasks,
     })
 
 
@@ -1736,11 +1553,15 @@ EVIDENCE_TOOL_ALLOWLIST: dict[EvidenceRequirement, tuple[str, ...]] = {
     "health_screening": ("health.get_screening_summary",),
     "weight_history": ("weight.list_history",),
     "active_plan": ("plan.get_active",),
+    "next_workout": ("workout.get_next",),
+    "active_workout_session": ("workout.get_active_session",),
+    "workout_history": ("workout.list_history",),
     "workout_progress": ("workout.get_progress",),
     "workout_daily_context": ("workout.get_daily_context",),
     "nutrition_today": ("nutrition.get_today",),
     "nutrition_history": ("nutrition.list_history",),
     "nutrition_recent_context": ("nutrition.get_recent_context",),
+    "food_search": ("food.search",),
     "food_catalog": ("food.list_candidates",),
 }
 
@@ -1764,15 +1585,12 @@ def route_tools(resolution: IntentResolution) -> list[str]:
             else []
         )
     routed: list[str] = []
-    tool_groups = (
-        [EVIDENCE_TOOL_ALLOWLIST[item] for item in resolution.evidence_requirements]
-        if resolution.evidence_requirements
-        and resolution.request_kind == "assessment"
-        else [
-            INTENT_TOOL_ALLOWLIST[intent]
-            for intent in [resolution.primary_intent, *resolution.expanded_intents]
-        ]
-    )
+    # Evidence requirements are the sole read authority.  Legacy intent names
+    # remain a response/storage projection and must never grant tools.
+    tool_groups = [
+        EVIDENCE_TOOL_ALLOWLIST[item]
+        for item in resolution.evidence_requirements
+    ]
     for tool_group in tool_groups:
         for tool_id in tool_group:
             if tool_id not in routed:

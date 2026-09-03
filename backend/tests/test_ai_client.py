@@ -20,7 +20,7 @@ STRICT_SCHEMA = {
 }
 
 
-async def _structured_call():
+async def _structured_call(*, timeout_seconds=None):
     return await structured_chat_completion(
         [{"role": "user", "content": "produce a value"}],
         model="deepseek-v4-flash",
@@ -30,6 +30,7 @@ async def _structured_call():
         function_description="Submit a value",
         json_schema=STRICT_SCHEMA,
         json_example={"value": "ok"},
+        timeout_seconds=timeout_seconds,
     )
 
 
@@ -107,7 +108,7 @@ async def test_structured_completion_prefers_official_strict_tool_call():
     ):
         client_class.return_value.__aenter__.return_value = client
         client_class.return_value.__aexit__.return_value = False
-        result = await _structured_call()
+        result = await _structured_call(timeout_seconds=14)
 
     assert result.payload == {"value": "ok"}
     assert result.mode == "deepseek_strict_tool"
@@ -115,6 +116,7 @@ async def test_structured_completion_prefers_official_strict_tool_call():
     assert client.post.call_count == 1
     call = client.post.call_args
     assert call.args[0] == "https://api.deepseek.com/beta/chat/completions"
+    assert call.kwargs["timeout"] == 14
     function = call.kwargs["json"]["tools"][0]["function"]
     assert function["strict"] is True
     assert function["parameters"] == STRICT_SCHEMA
@@ -181,6 +183,7 @@ async def test_structured_completion_does_not_fallback_for_provider_errors(
     response = httpx.Response(
         status_code,
         request=request,
+        headers={"Retry-After": "0.25"} if status_code == 429 else None,
         json={"error": {"message": "provider failure"}},
     )
     client = AsyncMock()
@@ -197,6 +200,9 @@ async def test_structured_completion_does_not_fallback_for_provider_errors(
             await _structured_call()
 
     assert raised.value.category == f"http_{status_code}"
+    assert raised.value.retry_after_seconds == (
+        0.25 if status_code == 429 else None
+    )
     assert client.post.call_count == 1
 
 

@@ -597,15 +597,15 @@ async def test_chat_model_failure_does_not_persist_rule_extracted_write_slots(
 
     assert response.status_code == 200
     assert response.json()["reply"] == (
-        "我暂时无法可靠解析这次修改，请稍后重试或换一种说法。"
-        "本次没有修改任何数据。"
+        "意图理解服务暂时未能可靠完成，请稍后重试。"
+        "本次没有读取你的业务数据，也没有修改任何数据。"
     )
     assert "proposal" not in response.json()
     run = await db_session.get(AgentRun, response.json()["run_id"])
     assert run is not None
-    assert run.understanding_version == "v5"
+    assert run.understanding_version == "v6"
     assert run.change_requests == []
-    assert run.error_code == "intent_structure_unavailable"
+    assert run.error_code == "intent_understanding_unavailable"
     await db_session.refresh(conversation)
     assert conversation.pending_clarification == {}
     assert await db_session.scalar(select(AgentProposal.id).where(
@@ -703,7 +703,7 @@ async def test_chat_partial_meal_structure_is_filled_by_model_across_turns(
     assert second.json()["proposal"]["proposal_type"] == "meal_log_create_v1"
     assert resolver.await_count == 2
     pending = resolver.await_args_list[1].kwargs["pending_clarification"]
-    assert pending["understanding_version"] == "v5"
+    assert pending["understanding_version"] == "v6"
     assert pending["change_requests"][0]["value"]["items"] == [
         {"food_name": "多轮鸡胸肉"}
     ]

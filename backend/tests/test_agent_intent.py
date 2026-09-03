@@ -55,6 +55,32 @@ def test_router_never_exposes_write_tools():
     assert "workout.complete" not in routed
 
 
+def test_legacy_intent_projection_cannot_expand_read_authority():
+    resolution = IntentResolution(
+        primary_intent="profile_query",
+        expanded_intents=["health_query", "workout_history_query"],
+        evidence_requirements=["active_plan"],
+        confidence=0.9,
+    )
+
+    assert route_tools(resolution) == ["plan.get_active"]
+
+
+def test_normalization_never_derives_read_authority_from_legacy_intents():
+    normalized = normalize_resolution(
+        "读取我的信息",
+        IntentResolution(
+            primary_intent="profile_query",
+            expanded_intents=["health_query", "workout_history_query"],
+            evidence_requirements=[],
+            confidence=0.9,
+        ),
+    )
+
+    assert normalized.evidence_requirements == []
+    assert route_tools(normalized) == []
+
+
 @pytest.mark.parametrize(
     "message",
     [
@@ -461,6 +487,8 @@ def test_natural_language_proposal_decision_is_structured(
         "结合我的情况安排今天怎么吃",
         "按今天训练量给我配三餐",
         "看看我最近状态，做一份增肌饮食",
+        "请根据我的档案、体重和训练安排制定今天全天饮食",
+        "今天是训练日，帮我推荐一整天每餐怎么吃",
     ],
 )
 def test_daily_meal_generation_is_read_only_and_selects_bounded_evidence(message):

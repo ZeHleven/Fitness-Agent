@@ -30,6 +30,12 @@ from app.services.agent_trace import build_initial_execution_trace
 def _resolution() -> IntentResolution:
     return IntentResolution(
         primary_intent="profile_query",
+        evidence_requirements=[
+            "profile_summary",
+            "active_workout_session",
+            "next_workout",
+            "workout_history",
+        ],
         resolved_query="读取四类训练证据",
         expanded_intents=[
             "active_workout_query",

@@ -14,6 +14,7 @@ from app.services.agent_tool_registry_read_enforcement import (
 def _resolution(**overrides) -> IntentResolution:
     return IntentResolution.model_validate({
         "primary_intent": "profile_query",
+        "evidence_requirements": ["profile_summary"],
         "resolved_query": "查询训练资料",
         "expanded_intents": [],
         "subtasks": ["查询训练资料"],

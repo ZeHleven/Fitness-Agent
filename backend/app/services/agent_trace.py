@@ -84,6 +84,15 @@ def _intent_stage_timings(
             status=item.status,
             latency_ms=item.latency_ms,
             error_category=item.error_category,
+            transport=item.transport,
+            output_chars=item.output_chars,
+            finish_reason=(
+                item.finish_reason
+                if item.finish_reason in {
+                    "stop", "length", "tool_calls", "content_filter", "other"
+                }
+                else "other" if item.finish_reason else None
+            ),
         )
         for item in outcome.attempt_timings
     ]
@@ -190,6 +199,7 @@ def build_initial_execution_trace(
         steps=steps,
     )
     return AgentExecutionTrace(
+        router_version="semantic_route_v2",
         execution_mode=execution_mode,
         risk_level=resolution.risk_level,
         mode_reasons=mode_reasons,

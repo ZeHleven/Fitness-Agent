@@ -161,6 +161,7 @@ class AgentStageTimingTrace(BaseModel):
     status: Literal["success", "error"]
     latency_ms: int = Field(ge=0)
     error_category: str | None = Field(default=None, max_length=160)
+    transport: str | None = Field(default=None, max_length=80)
     input_chars: int | None = Field(default=None, ge=0)
     output_chars: int | None = Field(default=None, ge=0)
     input_tokens: int | None = Field(default=None, ge=0)
@@ -228,6 +229,7 @@ class AgentExecutionTrace(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     trace_version: Literal["1.0", "1.1", "1.2"] = "1.0"
+    router_version: str = Field(default="semantic_route_v2", max_length=40)
     execution_mode: ExecutionMode
     risk_level: Literal["low", "medium", "high"]
     mode_reasons: list[str] = Field(default_factory=list, max_length=8)

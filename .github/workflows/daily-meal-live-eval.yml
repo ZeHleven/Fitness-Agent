@@ -15,7 +15,7 @@ jobs:
   evaluate:
     if: github.actor == github.repository_owner
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     environment: agent-live-eval
     services:
       postgres:
@@ -62,6 +62,10 @@ jobs:
           REQUESTED_SHA: ${{ inputs.candidate_sha }}
         run: |
           evaluated_sha="$(git rev-parse HEAD)"
+          if [[ "${evaluated_sha}" != "${REQUESTED_SHA,,}" ]]; then
+            echo "checked out SHA does not match requested candidate" >&2
+            exit 2
+          fi
           echo "sha=${evaluated_sha}" >> "${GITHUB_OUTPUT}"
           echo "Requested SHA: ${REQUESTED_SHA}"
           echo "Evaluated SHA: ${evaluated_sha}"
@@ -84,10 +88,19 @@ jobs:
         working-directory: backend
         run: python scripts/seed_foods.py
 
-      - name: Run real-model daily meal gate
+      - name: Run real-model semantic route preflight
+        run: >-
+          python backend/scripts/evaluate_agent_routing_real.py
+          --strict
+          --candidate-sha ${{ steps.revision.outputs.sha }}
+          --output agent-route-live-eval.json
+
+      - name: Run real-model daily meal gate twice
         run: >-
           python backend/scripts/evaluate_daily_meal_generation_real.py
           --strict
+          --repeat 2
+          --candidate-sha ${{ steps.revision.outputs.sha }}
           --output daily-meal-live-eval.json
 
       - name: Upload sanitized evaluation report
@@ -95,6 +108,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: daily-meal-live-eval-${{ steps.revision.outputs.sha }}
-          path: daily-meal-live-eval.json
+          path: |
+            agent-route-live-eval.json
+            daily-meal-live-eval.json
           if-no-files-found: warn
           retention-days: 14

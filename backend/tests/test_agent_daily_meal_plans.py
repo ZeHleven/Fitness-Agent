@@ -32,14 +32,31 @@ from app.services.agent_daily_meal_plans import (
     collect_daily_meal_evidence,
     generate_daily_meal_artifact,
 )
-from app.services.daily_meal_optimizer import nutrition_fit
+from app.services.daily_meal_optimizer import (
+    DailyMealOptimizationError,
+    nutrition_fit,
+    optimize_daily_meal_amounts,
+)
 from app.services.agent_domain_proposals import (
     create_agent_daily_meal_proposal,
     decide_agent_domain_proposal,
 )
 from app.services.ai_client import StructuredCompletionResult
+from app.services.agent_intent import (
+    IntentResolverOutcome,
+    normalize_resolution,
+    resolve_intent,
+)
 from app.services.plan_management_proposals import PlanProposalError
 from app.services.auth import create_access_token
+
+
+async def _deterministic_model_intent(message, **_kwargs):
+    return IntentResolverOutcome(
+        resolution=normalize_resolution(message, resolve_intent(message)),
+        source="model",
+        attempt_count=1,
+    )
 
 
 async def _daily_context(db_session, suffix: str):
@@ -268,7 +285,10 @@ async def test_original_chat_request_returns_artifact_and_six_audits_without_pro
     token = create_access_token(user.id)
 
     with (
-        patch.object(settings, "AGENT_INTENT_MODEL_ENABLED", False),
+        patch(
+            "app.services.agent_runtime.resolve_intent_with_fallback",
+            new=_deterministic_model_intent,
+        ),
         patch(
             "app.services.agent_daily_meal_plans.structured_chat_completion",
             new=AsyncMock(return_value=_completion(
@@ -310,7 +330,7 @@ async def test_original_chat_request_returns_artifact_and_six_audits_without_pro
     ))).scalars().all())
     assert len(optimizer_calls) == 1
     assert optimizer_calls[0].status == "completed"
-    assert optimizer_calls[0].result_data["solver_version"] == "highs_milp_v1"
+    assert optimizer_calls[0].result_data["solver_version"] == "highs_milp_v2"
     assert optimizer_calls[0].result_data["target_deviations"] == []
     assert "food_candidates" not in optimizer_calls[0].result_data
     assert await db_session.scalar(select(func.count(MealLog.id)).where(
@@ -443,6 +463,57 @@ async def test_generation_reselects_foods_after_optimizer_reports_infeasible(
 
 
 @pytest.mark.asyncio
+async def test_optimizer_timeout_without_solution_retries_next_food_candidate(
+    db_session,
+):
+    user, conversation, run, foods = await _daily_context(
+        db_session, "optimizer-timeout-retry"
+    )
+    valid = _target_compliant_draft(foods).model_dump(mode="json")
+    model_call = AsyncMock(side_effect=[_completion(valid), _completion(valid)])
+    optimizer_calls = 0
+
+    def temporarily_timed_out(**kwargs):
+        nonlocal optimizer_calls
+        optimizer_calls += 1
+        if optimizer_calls <= 2:
+            raise DailyMealOptimizationError(
+                "daily_meal_optimizer_timeout_no_solution",
+                "当前候选未在时限内找到可行解",
+                duration_ms=1,
+            )
+        return optimize_daily_meal_amounts(**kwargs)
+
+    with (
+        patch(
+            "app.services.agent_daily_meal_plans.structured_chat_completion",
+            new=model_call,
+        ),
+        patch(
+            "app.services.agent_daily_meal_plans.optimize_daily_meal_amounts",
+            new=temporarily_timed_out,
+        ),
+    ):
+        result = await generate_daily_meal_artifact(
+            db_session,
+            user_id=user.id,
+            conversation_id=conversation.id,
+            run_id=run.id,
+            user_message="结合我的情况安排今天怎么吃",
+        )
+
+    assert model_call.await_count == 2
+    assert optimizer_calls >= 3
+    assert any(
+        item.error_code == "daily_meal_optimizer_timeout_no_solution"
+        for item in result.optimization_attempts
+    )
+    assert result.artifact.payload_data["nutrition_fit"]["status"] == (
+        "within_target"
+    )
+
+
+@pytest.mark.asyncio
 async def test_generation_returns_acceptable_deviation_with_visible_fit(
     db_session,
 ):
@@ -558,7 +629,10 @@ async def test_two_invalid_generations_persist_safe_diagnostics_and_write_nothin
     ])
 
     with (
-        patch.object(settings, "AGENT_INTENT_MODEL_ENABLED", False),
+        patch(
+            "app.services.agent_runtime.resolve_intent_with_fallback",
+            new=_deterministic_model_intent,
+        ),
         patch(
             "app.services.agent_daily_meal_plans.structured_chat_completion",
             new=model_call,

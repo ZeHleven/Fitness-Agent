@@ -106,6 +106,8 @@ def build_agent_startup_diagnostic(
         "weight_proposals_enabled": bool(weight_proposals_enabled),
         "nutrition_proposals_enabled": bool(nutrition_proposals_enabled),
         "proposal_runtime_enabled": proposal_runtime_enabled,
+        "intent_router_version": "semantic_route_v2",
+        "rules_first_deprecated": True,
     }
 
 
@@ -129,6 +131,11 @@ def log_agent_startup_diagnostic(
             settings.AGENT_NUTRITION_PROPOSALS_ENABLED
         ),
     )
+    if settings.AGENT_RULES_FIRST_ENABLED:
+        production_logger.warning(
+            "AGENT_RULES_FIRST_ENABLED is deprecated and ignored for "
+            "ordinary semantic requests"
+        )
     production_logger.info(
         "agent_startup_diagnostic %s",
         json.dumps(
