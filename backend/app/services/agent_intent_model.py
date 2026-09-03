@@ -237,7 +237,7 @@ read_targets 只描述回答任务必须读取的事实类型，不得输出工�
 - “今天轮到哪个训练日”是 workout_session/query/read/answer，read_targets=[next_workout]，risk_level=low。
 - “解释延迟性肌肉酸痛的机制”是 general/query/read/answer，read_targets=[]，risk_level=low。
 - “我的膝盖最近疼”是 health/query/read/answer，read_targets=[health_screening]，risk_level=medium。
-- “把伤病史更新为左膝旧伤”是 health/mutation/update/answer，read_targets=[]，decision_action=none，risk_level=medium。
+- “请在健康档案补充多年前的踝关节韧带损伤”是 health/mutation/update/answer，read_targets=[]，decision_action=none，risk_level=medium。
 - 全天饮食方案是 nutrition/generation/read/daily_meal_plan，read_targets=[]。
 """
 
