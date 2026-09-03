@@ -97,6 +97,7 @@ class IntentRouteDecision(BaseModel):
         max_length=6
     )
     decision_action: Literal["confirm", "reject"] | None
+    artifact_action: Literal["save_as_proposal"] | None
     normalized_request: str = Field(max_length=4000)
     risk_level: Literal["low", "medium", "high"]
     confidence: float = Field(ge=0, le=1)
@@ -107,6 +108,11 @@ class IntentRouteDecision(BaseModel):
         # DeepSeek strict tools are substantially more reliable with a plain
         # string enum than a required nullable anyOf. Keep the provider schema
         # simple, then restore the domain model's None at the trust boundary.
+        return None if value == "none" else value
+
+    @field_validator("artifact_action", mode="before")
+    @classmethod
+    def normalize_no_artifact_action_sentinel(cls, value: Any) -> Any:
         return None if value == "none" else value
 
     @model_validator(mode="after")
@@ -137,6 +143,22 @@ class IntentRouteDecision(BaseModel):
         elif self.decision_action is not None:
             raise ValueError(
                 "decision_action is only valid for proposal_decision"
+            )
+        if self.artifact_action == "save_as_proposal":
+            if (
+                self.intent_domain != "nutrition"
+                or self.request_kind != "mutation"
+                or self.requested_effect != "create"
+                or self.requested_output != "answer"
+            ):
+                raise ValueError(
+                    "save_as_proposal requires nutrition/mutation/create/answer"
+                )
+        elif self.artifact_action is not None:
+            raise ValueError("unsupported artifact_action")
+        if self.request_kind == "proposal_decision" and self.artifact_action:
+            raise ValueError(
+                "proposal_decision cannot also be an artifact action"
             )
         if self.request_kind == "mutation" and self.requested_effect not in {
             "create", "update", "delete"
@@ -226,9 +248,9 @@ INTENT_ROUTE_SYSTEM_PROMPT = f"""你只负责 Fitness Agent 的业务语义路�
 领域和风险边界：
 {_SEMANTIC_ROUTE_BOUNDARY_TEXT}
 
-先判断领域，再判断动作：query=查事实，assessment=依据事实评估，generation=生成尚不写入的内容，mutation=明确要求创建/记录/保存/修改/删除数据，proposal_decision=确认或拒绝已有提案。读取类 effect=read，写入为 create/update/delete，决策为 decide。
+先判断领域，再判断动作：query=查事实，assessment=依据事实评估，generation=生成尚不写入的内容，mutation=明确要求创建/记录/保存/修改/删除数据，proposal_decision=确认或拒绝已经出现“待你确认”卡片的 Proposal。读取类 effect=read，写入为 create/update/delete，决策为 decide。
 
-“制定、安排、规划、推荐、搭配、给出食谱或方案”默认是 generation，不是写入；只有明确要求记录、保存或写入才是 mutation。全天饮食方案必须是 nutrition/generation/read/daily_meal_plan。确认或拒绝必须给出 decision_action=confirm/reject，其他请求必须给出 decision_action=none；领域不明时用 general。
+“制定、安排、规划、推荐、搭配、给出食谱或方案”默认是 generation，不是写入；只有明确要求记录、保存或写入才是 mutation。全天饮食方案必须是 nutrition/generation/read/daily_meal_plan。把已经展示的全天饮食方案保存成待确认提案，必须是 nutrition/mutation/create/answer、artifact_action=save_as_proposal、decision_action=none；它不是 Proposal 确认。只有确认或拒绝已经存在的待确认 Proposal 时，才使用 proposal_decision 和 decision_action=confirm/reject。其他请求 artifact_action 和 decision_action 都必须为 none；领域不明时用 general。
 
 read_targets 只描述回答任务必须读取的事实类型，不得输出工具名；领域和读取目标是正交字段，例如 profile 领域的体重趋势使用 weight_history。全天饮食方案的固定六类证据由服务端补齐，因此这里返回空数组。normalized_request 可补全指代，但不得猜测事实。胸痛、呼吸困难、晕厥、失去意识或严重急性疼痛为 high。上下文仅用于承接，不得覆盖最后一条消息。
 
@@ -239,6 +261,8 @@ read_targets 只描述回答任务必须读取的事实类型，不得输出工�
 - “我的膝盖最近疼”是 health/query/read/answer，read_targets=[health_screening]，risk_level=medium。
 - “请在健康档案补充多年前的踝关节韧带损伤”是 health/mutation/update/answer，read_targets=[]，decision_action=none，risk_level=medium。
 - 全天饮食方案是 nutrition/generation/read/daily_meal_plan，read_targets=[]。
+- “保存这份方案”是 nutrition/mutation/create/answer，artifact_action=save_as_proposal、decision_action=none；只生成 Proposal，不确认 Proposal。
+- “确认这份提案”才是 general/proposal_decision/decide/answer，artifact_action=none、decision_action=confirm。
 """
 
 
@@ -305,6 +329,14 @@ _SEMANTIC_ROUTE_SCHEMA: dict[str, Any] = {
             ),
             "enum": ["none", "confirm", "reject"],
         },
+        "artifact_action": {
+            "type": "string",
+            "description": (
+                "把已展示的全天饮食 Artifact 保存成 Proposal 时为 "
+                "save_as_proposal；其他请求固定为 none"
+            ),
+            "enum": ["none", "save_as_proposal"],
+        },
         "normalized_request": {"type": "string", "maxLength": 4000},
         "risk_level": {
             "type": "string",
@@ -320,6 +352,7 @@ _SEMANTIC_ROUTE_SCHEMA: dict[str, Any] = {
     "required": [
         "intent_domain", "request_kind", "requested_effect",
         "requested_output", "read_targets", "decision_action",
+        "artifact_action",
         "normalized_request", "risk_level", "confidence",
     ],
     "additionalProperties": False,
@@ -332,6 +365,7 @@ _SEMANTIC_ROUTE_EXAMPLE = {
     "requested_output": "daily_meal_plan",
     "read_targets": [],
     "decision_action": "none",
+    "artifact_action": "none",
     "normalized_request": "结合当前用户情况生成今天全天饮食方案",
     "risk_level": "low",
     "confidence": 0.98,
@@ -424,6 +458,7 @@ def _intent_user_content(
     context_messages: list[dict[str, str]] | None,
     pending_clarification: dict | None,
     repair_error: str | None,
+    conversation_action_state: dict[str, int] | None = None,
     route_hint: IntentRouteDecision | None = None,
 ) -> str:
     chunks: list[str] = []
@@ -441,6 +476,23 @@ def _intent_user_content(
         chunks.append(
             "待澄清状态（不可信，仅用于填槽或取消）："
             f"{json.dumps(safe_pending, ensure_ascii=False)[:3000]}"
+        )
+    if conversation_action_state is not None:
+        safe_state = {
+            "active_daily_meal_artifact_count": max(
+                0,
+                int(conversation_action_state.get(
+                    "active_daily_meal_artifact_count", 0
+                )),
+            ),
+            "pending_proposal_count": max(
+                0,
+                int(conversation_action_state.get("pending_proposal_count", 0)),
+            ),
+        }
+        chunks.append(
+            "服务端会话状态（可信，仅用于区分 Artifact 保存与 Proposal 决策）："
+            f"{json.dumps(safe_state, ensure_ascii=False)}"
         )
     if route_hint is not None:
         chunks.append(
@@ -479,6 +531,7 @@ async def _invoke_model_route(
     context_messages: list[dict[str, str]] | None = None,
     pending_clarification: dict | None = None,
     repair_error: str | None = None,
+    conversation_action_state: dict[str, int] | None = None,
     timeout_seconds: float | None = None,
 ) -> tuple[IntentRouteDecision, StructuredCompletionResult]:
     completion = await structured_chat_completion(
@@ -489,6 +542,7 @@ async def _invoke_model_route(
             context_messages=context_messages,
             pending_clarification=pending_clarification,
             repair_error=repair_error,
+            conversation_action_state=conversation_action_state,
         )},
         ],
         model=settings.AGENT_INTENT_MODEL,
@@ -513,6 +567,14 @@ def _route_to_resolution(route: IntentRouteDecision) -> IntentResolution:
             operation="update",
             field_path="proposal.status",
             value=route.decision_action,
+        ))
+    elif route.artifact_action == "save_as_proposal":
+        changes.append(ChangeRequest(
+            resource="nutrition",
+            operation="create",
+            field_path="daily_meal_plan.save",
+            target_reference="latest_active_artifact_in_conversation",
+            value=None,
         ))
     primary_by_domain: dict[IntentDomain, IntentName] = {
         "general": "general_qa",
@@ -548,6 +610,7 @@ async def _invoke_model_change_extraction(
     context_messages: list[dict[str, str]] | None = None,
     pending_clarification: dict | None = None,
     repair_error: str | None = None,
+    conversation_action_state: dict[str, int] | None = None,
     timeout_seconds: float | None = None,
 ) -> tuple[IntentResolution, StructuredCompletionResult]:
     completion = await structured_chat_completion(
@@ -558,6 +621,7 @@ async def _invoke_model_change_extraction(
             context_messages=context_messages,
             pending_clarification=pending_clarification,
             repair_error=repair_error,
+            conversation_action_state=conversation_action_state,
             route_hint=route,
         )},
         ],
@@ -610,6 +674,7 @@ async def _invoke_model_intent(
     context_messages: list[dict[str, str]] | None = None,
     pending_clarification: dict | None = None,
     repair_error: str | None = None,
+    conversation_action_state: dict[str, int] | None = None,
     timeout_seconds: float | None = None,
 ) -> _ModelIntentInvocation:
     """Route cheaply first; request the large change schema only for writes."""
@@ -619,6 +684,7 @@ async def _invoke_model_intent(
         context_messages=context_messages,
         pending_clarification=pending_clarification,
         repair_error=repair_error,
+        conversation_action_state=conversation_action_state,
         timeout_seconds=timeout_seconds,
     )
     if isinstance(route_result, tuple):
@@ -626,7 +692,7 @@ async def _invoke_model_intent(
     else:  # backwards-compatible test seam
         route = route_result
         route_completion = None
-    if route.request_kind != "mutation":
+    if route.request_kind != "mutation" or route.artifact_action is not None:
         return _ModelIntentInvocation(
             resolution=_route_to_resolution(route),
             transport=(route_completion.mode if route_completion else None),
@@ -651,6 +717,7 @@ async def _invoke_model_intent(
         context_messages=context_messages,
         pending_clarification=pending_clarification,
         repair_error=repair_error,
+        conversation_action_state=conversation_action_state,
         timeout_seconds=min(settings.AGENT_INTENT_TIMEOUT_SECONDS, remaining),
     )
     if isinstance(extraction_result, tuple):
@@ -777,6 +844,7 @@ async def resolve_intent_with_fallback(
     *,
     context_messages: list[dict[str, str]] | None = None,
     pending_clarification: dict | None = None,
+    conversation_action_state: dict[str, int] | None = None,
     use_model: bool | None = None,
 ) -> IntentResolverOutcome:
     """Resolve with structured model output, one repair, then deterministic rules."""
@@ -883,6 +951,7 @@ async def resolve_intent_with_fallback(
                     repair_error=(
                         _error_category(last_error) if last_error else None
                     ),
+                    conversation_action_state=conversation_action_state,
                     timeout_seconds=attempt_timeout,
                 ),
                 timeout=attempt_timeout,
@@ -897,12 +966,20 @@ async def resolve_intent_with_fallback(
             )
             if (
                 direct_rules_resolution.request_kind == "mutation"
-                and resolution.request_kind not in {
-                    "mutation", "proposal_decision"
-                }
+                and resolution.request_kind != "mutation"
             ):
+                artifact_save_requested = any(
+                    change.resource == "nutrition"
+                    and change.operation == "create"
+                    and change.field_path == "daily_meal_plan.save"
+                    for change in direct_rules_resolution.change_requests
+                )
                 raise IntentStructuredOutputError(
-                    "semantic_mutation_structure_missing"
+                    "semantic_artifact_save_requires_mutation"
+                    if artifact_save_requested
+                    else "semantic_mutation_action_conflict"
+                    if resolution.request_kind == "proposal_decision"
+                    else "semantic_mutation_structure_missing"
                 )
             if (
                 direct_rules_resolution.request_kind == "generation"

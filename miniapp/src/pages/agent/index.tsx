@@ -25,7 +25,11 @@ import type { PendingAgentRequest } from '../../core/storage'
 import { agentApi } from '../../services/agent'
 import { proposalsApi } from '../../services/proposals'
 import { planManagementApi } from '../../services/plan-management'
-import type { AgentCard, AgentMessage } from '../../types/api'
+import type {
+  AgentArtifactAction,
+  AgentCard,
+  AgentMessage
+} from '../../types/api'
 import type { PlanAdjustmentProposalReference } from '../../types/plan-adjustment-proposal'
 import './index.scss'
 
@@ -198,7 +202,8 @@ export default function AgentPage () {
         const submission = await agentApi.submit(
           pending.message,
           pending.client_request_id,
-          pending.conversation_id
+          pending.conversation_id,
+          pending.artifact_action
         )
         pending = {
           ...pending,
@@ -255,7 +260,10 @@ export default function AgentPage () {
     }
   }
 
-  const send = async (prompt?: string) => {
+  const send = async (
+    prompt?: string,
+    artifactAction?: AgentArtifactAction
+  ) => {
     const content = (prompt || input).trim()
     if (!content || sending || sendLock.current) return
     sendLock.current = true
@@ -271,6 +279,7 @@ export default function AgentPage () {
         client_request_id: createClientRequestId(),
         message: content,
         ...(conversationId ? { conversation_id: conversationId } : {}),
+        ...(artifactAction ? { artifact_action: artifactAction } : {}),
         created_at: Date.now()
       }
       savePendingAgentRequest(pending)
@@ -343,7 +352,7 @@ export default function AgentPage () {
                 <AgentDataCard
                   card={card}
                   key={`${message.id}-${card.type}-${index}`}
-                  onAction={prompt => send(prompt)}
+                  onAction={(prompt, action) => send(prompt, action)}
                 />
               ))}
               {message.proposal && (
@@ -524,7 +533,7 @@ function AgentDataCard ({
   onAction
 }: {
   card: AgentCard
-  onAction: (prompt: string) => void
+  onAction: (prompt: string, action?: AgentArtifactAction) => void
 }) {
   const data = card.data
   const titleMap: Record<string, string> = {
@@ -551,6 +560,20 @@ function AgentDataCard ({
     const sources = asList(data.evidence_sources).map(item => evidenceLabel(String(item)))
     const assumptions = asList(data.assumptions).map(String)
     const safetyNotes = asList(data.safety_notes).map(String)
+    const artifact = asRecord(data.artifact)
+    const artifactAction: AgentArtifactAction | null = (
+      typeof artifact.id === 'string' &&
+      typeof artifact.version === 'number' &&
+      typeof artifact.payload_fingerprint === 'string' &&
+      /^[0-9a-f]{64}$/.test(artifact.payload_fingerprint)
+    )
+      ? {
+          action: 'save_as_proposal',
+          artifact_id: artifact.id,
+          expected_version: artifact.version,
+          payload_fingerprint: artifact.payload_fingerprint
+        }
+      : null
     return (
       <View className='agent-data-card daily-meal-card'>
         <Text className='data-card-title'>{title}</Text>
@@ -581,7 +604,15 @@ function AgentDataCard ({
         <Text className='daily-meal-source'>本次参考：{sources.join('、')}</Text>
         {assumptions.map((item, index) => <Text className='daily-meal-note' key={`assumption-${index}`}>• {item}</Text>)}
         {safetyNotes.map((item, index) => <Text className='daily-meal-note' key={`safety-${index}`}>• {item}</Text>)}
-        <Button className='daily-meal-save' onClick={() => onAction('保存这份方案')}>保存为待确认提案</Button>
+        <Button
+          className='daily-meal-save'
+          disabled={!artifactAction}
+          onClick={() => {
+            if (artifactAction) onAction('保存这份方案', artifactAction)
+          }}
+        >
+          保存为待确认提案
+        </Button>
       </View>
     )
   }

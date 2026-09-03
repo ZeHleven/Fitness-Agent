@@ -6,11 +6,23 @@ from pydantic import BaseModel, ConfigDict, Field, model_serializer
 from app.schemas.agent_trace import AgentExecutionTrace, ExecutionMode
 
 
+class AgentArtifactActionRequest(BaseModel):
+    """A user action emitted by an Artifact card, not inferred from its label."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["save_as_proposal"]
+    artifact_id: str = Field(min_length=1, max_length=100)
+    expected_version: int = Field(ge=1)
+    payload_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class AgentChatRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     message: str = Field(min_length=1, max_length=4000)
     conversation_id: str | None = Field(default=None, max_length=100)
+    artifact_action: AgentArtifactActionRequest | None = None
 
 
 class AgentRunCreateRequest(BaseModel):
@@ -19,6 +31,7 @@ class AgentRunCreateRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     conversation_id: str | None = Field(default=None, max_length=100)
     client_request_id: str = Field(min_length=8, max_length=120)
+    artifact_action: AgentArtifactActionRequest | None = None
 
 
 class AgentRunCreateResponse(BaseModel):

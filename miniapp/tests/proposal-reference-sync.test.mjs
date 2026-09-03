@@ -121,7 +121,16 @@ test('daily meal artifact card stays review-only until save is requested', () =>
   assert.match(source, /接近目标/)
   assert.match(source, /理想范围/)
   assert.match(source, /保存为待确认提案/)
-  assert.match(source, /onAction\('保存这份方案'\)/)
+  assert.match(source, /action: 'save_as_proposal'/)
+  assert.match(source, /artifact_id: artifact\.id/)
+  assert.match(source, /expected_version: artifact\.version/)
+  assert.match(source, /onAction\('保存这份方案', artifactAction\)/)
+
+  const serviceSource = readFileSync(
+    new URL('../src/services/agent.ts', import.meta.url),
+    'utf8'
+  )
+  assert.match(serviceSource, /artifact_action: artifactAction/)
 })
 
 test('multi-meal proposal detail renders per-meal items and nutrition totals', () => {

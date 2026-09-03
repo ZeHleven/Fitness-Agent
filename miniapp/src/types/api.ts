@@ -268,6 +268,13 @@ export interface AgentArtifactReference {
   payload_fingerprint: string
 }
 
+export interface AgentArtifactAction {
+  action: 'save_as_proposal'
+  artifact_id: string
+  expected_version: number
+  payload_fingerprint: string
+}
+
 export interface AgentChatResponse {
   reply: string
   conversation_id: string

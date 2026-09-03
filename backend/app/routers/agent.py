@@ -121,6 +121,11 @@ async def agent_chat(
         user_id=current_user.id,
         conversation=conversation,
         user_message=body.message,
+        artifact_action=(
+            body.artifact_action.model_dump(mode="json")
+            if body.artifact_action is not None
+            else None
+        ),
     )
     return AgentChatResponse(
         reply=result.reply,
@@ -159,6 +164,11 @@ async def create_agent_run(
             user_message=body.message,
             client_request_id=body.client_request_id,
             conversation=conversation,
+            artifact_action=(
+                body.artifact_action.model_dump(mode="json")
+                if body.artifact_action is not None
+                else None
+            ),
         )
     except AgentIdempotencyConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

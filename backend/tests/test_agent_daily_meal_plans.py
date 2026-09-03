@@ -43,7 +43,9 @@ from app.services.agent_domain_proposals import (
 )
 from app.services.ai_client import StructuredCompletionResult
 from app.services.agent_intent import (
+    ChangeRequest,
     IntentResolverOutcome,
+    IntentResolution,
     normalize_resolution,
     resolve_intent,
 )
@@ -763,6 +765,138 @@ async def test_daily_artifact_becomes_one_multi_meal_proposal_and_confirms_once(
     assert await db_session.scalar(select(func.count(MealLog.id)).where(
         MealLog.user_id == user.id
     )) == 3
+
+
+@pytest.mark.asyncio
+async def test_artifact_card_action_creates_proposal_without_intent_model(
+    client,
+    db_session,
+):
+    user, conversation, source_run, foods = await _daily_context(
+        db_session, "card-action"
+    )
+    artifact = await _artifact(
+        db_session,
+        user=user,
+        conversation=conversation,
+        run=source_run,
+        foods=foods,
+    )
+    token = create_access_token(user.id)
+
+    with (
+        patch.object(settings, "AGENT_NUTRITION_PROPOSALS_ENABLED", True),
+        patch(
+            "app.services.agent_runtime.resolve_intent_with_fallback",
+            new=AsyncMock(side_effect=AssertionError("card action used model")),
+        ) as resolver,
+    ):
+        response = await client.post(
+            "/api/v1/agent/chat",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "conversation_id": conversation.id,
+                "message": "保存这份方案",
+                "artifact_action": {
+                    "action": "save_as_proposal",
+                    "artifact_id": artifact.id,
+                    "expected_version": artifact.version,
+                    "payload_fingerprint": artifact.payload_fingerprint,
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["proposal"]["proposal_type"] == "daily_meal_log_create_v1"
+    assert "artifact" not in body
+    resolver.assert_not_awaited()
+    await db_session.refresh(artifact)
+    assert artifact.status == "proposed"
+    proposal = await db_session.get(AgentProposal, body["proposal"]["id"])
+    assert proposal is not None
+    assert proposal.target_id == artifact.id
+    assert await db_session.scalar(select(func.count(MealLog.id)).where(
+        MealLog.user_id == user.id
+    )) == 0
+
+
+@pytest.mark.asyncio
+async def test_natural_language_save_repairs_decision_misroute_and_creates_proposal(
+    client,
+    db_session,
+):
+    user, conversation, source_run, foods = await _daily_context(
+        db_session, "natural-save"
+    )
+    await _artifact(
+        db_session,
+        user=user,
+        conversation=conversation,
+        run=source_run,
+        foods=foods,
+    )
+    token = create_access_token(user.id)
+    wrong_decision = IntentResolution(
+        primary_intent="nutrition_today_query",
+        intent_domain="nutrition",
+        request_kind="proposal_decision",
+        requested_effect="decide",
+        change_requests=[ChangeRequest(
+            resource="nutrition",
+            operation="update",
+            field_path="proposal.status",
+            value="confirm",
+        )],
+        confidence=0.9,
+    )
+    repaired_save = IntentResolution(
+        primary_intent="nutrition_today_query",
+        intent_domain="nutrition",
+        request_kind="mutation",
+        requested_effect="create",
+        change_requests=[ChangeRequest(
+            resource="nutrition",
+            operation="create",
+            field_path="daily_meal_plan.save",
+            target_reference="latest_active_artifact_in_conversation",
+        )],
+        confidence=0.98,
+    )
+
+    with (
+        patch.object(settings, "AGENT_INTENT_MODEL_ENABLED", True),
+        patch.object(settings, "DEEPSEEK_API_KEY", "test-key"),
+        patch.object(settings, "AGENT_NUTRITION_PROPOSALS_ENABLED", True),
+        patch(
+            "app.services.agent_intent_model._invoke_model_intent",
+            new=AsyncMock(side_effect=[wrong_decision, repaired_save]),
+        ) as invoke,
+    ):
+        response = await client.post(
+            "/api/v1/agent/chat",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "conversation_id": conversation.id,
+                "message": "保存这份方案",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["proposal"]["proposal_type"] == "daily_meal_log_create_v1"
+    assert invoke.await_count == 2
+    assert invoke.await_args_list[0].kwargs["conversation_action_state"] == {
+        "active_daily_meal_artifact_count": 1,
+        "pending_proposal_count": 0,
+    }
+    run = await db_session.get(AgentRun, body["run_id"])
+    assert run is not None
+    assert run.request_kind == "mutation"
+    assert run.intent_error_category == "semantic_artifact_save_requires_mutation"
+    assert await db_session.scalar(select(func.count(MealLog.id)).where(
+        MealLog.user_id == user.id
+    )) == 0
 
 
 @pytest.mark.asyncio
