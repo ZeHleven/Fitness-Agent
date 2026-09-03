@@ -46,6 +46,7 @@ class SafeFakeValidationError(Exception):
 
 def test_semantic_route_contract_defines_every_domain_in_prompt_and_schema():
     schema_domain = _SEMANTIC_ROUTE_SCHEMA["properties"]["intent_domain"]
+    schema_risk = _SEMANTIC_ROUTE_SCHEMA["properties"]["risk_level"]
 
     assert set(SEMANTIC_ROUTE_DOMAIN_GUIDANCE) == set(schema_domain["enum"])
     for domain, definition in SEMANTIC_ROUTE_DOMAIN_GUIDANCE.items():
@@ -54,6 +55,13 @@ def test_semantic_route_contract_defines_every_domain_in_prompt_and_schema():
     assert all(
         boundary in INTENT_ROUTE_SYSTEM_PROMPT
         for boundary in SEMANTIC_ROUTE_BOUNDARY_GUIDANCE
+    )
+    assert "要求记录非急性疼痛、旧伤、伤病史或慢性病" in schema_risk[
+        "description"
+    ]
+    assert (
+        "把伤病史更新为左膝旧伤”是 health/mutation/update/answer"
+        in INTENT_ROUTE_SYSTEM_PROMPT
     )
 
 
