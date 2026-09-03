@@ -66,7 +66,7 @@ async def test_semantic_route_v2_uses_strict_adapter_without_legacy_fields():
             "requested_effect": "read",
             "requested_output": "daily_meal_plan",
             "read_targets": [],
-            "decision_action": None,
+            "decision_action": "none",
             "normalized_request": "结合当前情况生成今日饮食",
             "risk_level": "low",
             "confidence": 0.97,
@@ -87,6 +87,7 @@ async def test_semantic_route_v2_uses_strict_adapter_without_legacy_fields():
 
     assert route.request_kind == "generation"
     assert route.requested_output == "daily_meal_plan"
+    assert route.decision_action is None
     assert observed.mode == "deepseek_strict_tool"
     kwargs = invoke.await_args.kwargs
     assert kwargs["function_name"] == "submit_semantic_route"
@@ -97,6 +98,38 @@ async def test_semantic_route_v2_uses_strict_adapter_without_legacy_fields():
     assert "read_targets" in properties
     assert "description" in properties["intent_domain"]
     assert "description" in properties["risk_level"]
+    assert properties["decision_action"]["enum"] == [
+        "none", "confirm", "reject"
+    ]
+    assert "anyOf" not in properties["decision_action"]
+
+
+def test_semantic_route_provider_sentinel_restores_optional_decision():
+    ordinary = IntentRouteDecision(
+        intent_domain="general",
+        request_kind="query",
+        requested_effect="read",
+        requested_output="answer",
+        read_targets=[],
+        decision_action="none",
+        normalized_request="解释力量训练后的酸痛",
+        risk_level="low",
+        confidence=0.95,
+    )
+    proposal = IntentRouteDecision(
+        intent_domain="general",
+        request_kind="proposal_decision",
+        requested_effect="decide",
+        requested_output="answer",
+        read_targets=[],
+        decision_action="confirm",
+        normalized_request="确认当前提案",
+        risk_level="low",
+        confidence=0.95,
+    )
+
+    assert ordinary.decision_action is None
+    assert proposal.decision_action == "confirm"
 
 
 @pytest.mark.asyncio
