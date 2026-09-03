@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.config import settings  # noqa: E402
 from app.services.agent_intent import (  # noqa: E402
     IntentDomain,
+    IntentResolverOutcome,
     RequestKind,
     RequestedEffect,
     RequestedOutput,
@@ -65,35 +66,59 @@ CASES = (
 )
 
 
+def _case_result(case: RouteCase, outcome: IntentResolverOutcome) -> dict:
+    """Build an enum-only, privacy-safe diagnostic result for one route."""
+    route = outcome.resolution
+    decision = next((
+        str(item.value)
+        for item in route.change_requests
+        if item.field_path == "proposal.status"
+    ), None)
+    expected = {
+        "intent_domain": case.domain,
+        "request_kind": case.kind,
+        "requested_effect": case.effect,
+        "requested_output": case.output,
+        "risk_level": case.risk,
+        "decision_action": case.decision,
+    }
+    actual = {
+        "intent_domain": route.intent_domain,
+        "request_kind": route.request_kind,
+        "requested_effect": route.requested_effect,
+        "requested_output": route.requested_output,
+        "risk_level": route.risk_level,
+        "decision_action": decision,
+    }
+    mismatch_fields = [
+        field for field, expected_value in expected.items()
+        if actual[field] != expected_value
+    ]
+    safety_shortcut = case.kind == "proposal_decision" or case.risk == "high"
+    ordinary_rules_fallback = outcome.source == "rules" and not safety_shortcut
+    return {
+        "case_id": case.case_id,
+        "passed": not mismatch_fields and not outcome.understanding_failed,
+        "expected": expected,
+        "actual": actual,
+        "mismatch_fields": mismatch_fields,
+        "read_targets": list(route.evidence_requirements),
+        "source": outcome.source,
+        # Retain the original flat fields for report consumers migrating from v1.
+        "request_kind": route.request_kind,
+        "requested_effect": route.requested_effect,
+        "understanding_failed": outcome.understanding_failed,
+        "attempt_count": outcome.attempt_count,
+        "error_category": outcome.error_category,
+        "ordinary_rules_fallback": ordinary_rules_fallback,
+    }
+
+
 async def evaluate() -> dict:
     results: list[dict] = []
     for case in CASES:
         outcome = await resolve_intent_with_fallback(case.prompt, use_model=True)
-        route = outcome.resolution
-        decision = next((
-            str(item.value)
-            for item in route.change_requests
-            if item.field_path == "proposal.status"
-        ), None)
-        semantics_match = (
-            route.intent_domain == case.domain
-            and route.request_kind == case.kind
-            and route.requested_effect == case.effect
-            and route.requested_output == case.output
-            and route.risk_level == case.risk
-            and (case.decision is None or decision == case.decision)
-        )
-        safety_shortcut = case.kind == "proposal_decision" or case.risk == "high"
-        ordinary_rules_fallback = outcome.source == "rules" and not safety_shortcut
-        results.append({
-            "case_id": case.case_id,
-            "passed": semantics_match and not outcome.understanding_failed,
-            "source": outcome.source,
-            "request_kind": route.request_kind,
-            "requested_effect": route.requested_effect,
-            "error_category": outcome.error_category,
-            "ordinary_rules_fallback": ordinary_rules_fallback,
-        })
+        results.append(_case_result(case, outcome))
 
     passed_count = sum(bool(item["passed"]) for item in results)
     structural_valid_count = sum(
@@ -114,7 +139,7 @@ async def evaluate() -> dict:
     )
     total = len(results)
     return {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
         "router_version": "semantic_route_v2",
         "model": settings.AGENT_INTENT_MODEL,
         "total": total,
@@ -146,7 +171,7 @@ def main() -> int:
     args = parse_args()
     if not settings.DEEPSEEK_API_KEY:
         report = {
-            "schema_version": "1.0",
+            "schema_version": "2.0",
             "router_version": "semantic_route_v2",
             "candidate_sha": args.candidate_sha,
             "passed": False,
@@ -160,7 +185,7 @@ def main() -> int:
             status = 1 if args.strict and not report["passed"] else 0
         except Exception as exc:
             report = {
-                "schema_version": "1.0",
+                "schema_version": "2.0",
                 "router_version": "semantic_route_v2",
                 "passed": False,
                 "fatal_error": {"type": type(exc).__name__},

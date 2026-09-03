@@ -89,6 +89,8 @@ jobs:
         run: python scripts/seed_foods.py
 
       - name: Run real-model semantic route preflight
+        id: route_preflight
+        continue-on-error: true
         run: >-
           python backend/scripts/evaluate_agent_routing_real.py
           --strict
@@ -96,6 +98,8 @@ jobs:
           --output agent-route-live-eval.json
 
       - name: Run real-model daily meal gate twice
+        id: daily_meal_gate
+        continue-on-error: true
         run: >-
           python backend/scripts/evaluate_daily_meal_generation_real.py
           --strict
@@ -113,3 +117,15 @@ jobs:
             daily-meal-live-eval.json
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Enforce combined live release verdict
+        if: always()
+        shell: bash
+        env:
+          ROUTE_OUTCOME: ${{ steps.route_preflight.outcome }}
+          DAILY_MEAL_OUTCOME: ${{ steps.daily_meal_gate.outcome }}
+        run: |
+          if [[ "${ROUTE_OUTCOME}" != "success" || "${DAILY_MEAL_OUTCOME}" != "success" ]]; then
+            echo "Live release gate failed: route=${ROUTE_OUTCOME}, daily_meal=${DAILY_MEAL_OUTCOME}" >&2
+            exit 1
+          fi

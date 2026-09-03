@@ -43,6 +43,40 @@ logger = logging.getLogger(__name__)
 _MAX_INTENT_ATTEMPTS = 2
 
 
+SEMANTIC_ROUTE_DOMAIN_GUIDANCE: dict[IntentDomain, str] = {
+    "general": "不依赖当前用户私有数据且不属于其他业务领域的一般健身和运动生理知识问答",
+    "profile": "用户基础档案、训练目标、经验、偏好，以及体重记录、体重历史和体重趋势",
+    "health": "用户个人健康筛查、伤病、慢性病、当前症状、训练禁忌和安全限制",
+    "workout_plan": "整份当前训练计划、计划适配评估，以及训练计划的创建、修改或删除",
+    "workout_session": "下一练、当前应执行的训练，以及正在进行的训练和已记录训练组",
+    "workout_history": "已经完成的具体训练场次、动作和训练记录",
+    "workout_progress": "跨训练场次聚合的次数、组数、容量、完成率和进度趋势",
+    "nutrition": "食品库、饮食记录、营养查询、配餐建议和全天饮食方案",
+}
+
+SEMANTIC_ROUTE_BOUNDARY_GUIDANCE = (
+    "体重记录和趋势的业务领域是 profile；需要读取历史时另选 read_targets=weight_history",
+    "下一练属于 workout_session；只有查询或改变整份计划时才属于 workout_plan",
+    "不涉及当前用户个体症状或私有数据的知识解释属于 general；个人筛查、症状和伤病才属于 health",
+    "风险依据用户是否报告个人状况判断：无症状筛查和一般知识解释为 low，个人非急性疼痛或伤病为 medium，高危红旗为 high",
+)
+
+_SEMANTIC_ROUTE_DOMAIN_TEXT = "\n".join(
+    f"- {domain}: {description}"
+    for domain, description in SEMANTIC_ROUTE_DOMAIN_GUIDANCE.items()
+)
+_SEMANTIC_ROUTE_BOUNDARY_TEXT = "\n".join(
+    f"- {item}" for item in SEMANTIC_ROUTE_BOUNDARY_GUIDANCE
+)
+_SEMANTIC_ROUTE_DOMAIN_DESCRIPTION = (
+    "主业务领域。领域定义："
+    + "；".join(
+        f"{domain}={description}"
+        for domain, description in SEMANTIC_ROUTE_DOMAIN_GUIDANCE.items()
+    )
+)
+
+
 class IntentRouteDecision(BaseModel):
     """SemanticRouteV2: provider-owned semantics without legacy authority."""
 
@@ -169,16 +203,26 @@ def _is_retryable_timeout(error: Exception) -> bool:
     )
 
 
-INTENT_ROUTE_SYSTEM_PROMPT = """你只负责 Fitness Agent 的业务语义路由，不回答问题、不调用工具、不提取写入字段。输出必须符合提供的 schema。
+INTENT_ROUTE_SYSTEM_PROMPT = f"""你只负责 Fitness Agent 的业务语义路由，不回答问题、不调用工具、不提取写入字段。输出必须符合提供的 schema。
+
+领域契约：
+{_SEMANTIC_ROUTE_DOMAIN_TEXT}
+
+领域和风险边界：
+{_SEMANTIC_ROUTE_BOUNDARY_TEXT}
 
 先判断领域，再判断动作：query=查事实，assessment=依据事实评估，generation=生成尚不写入的内容，mutation=明确要求创建/记录/保存/修改/删除数据，proposal_decision=确认或拒绝已有提案。读取类 effect=read，写入为 create/update/delete，决策为 decide。
 
 “制定、安排、规划、推荐、搭配、给出食谱或方案”默认是 generation，不是写入；只有明确要求记录、保存或写入才是 mutation。全天饮食方案必须是 nutrition/generation/read/daily_meal_plan。确认或拒绝必须给出 decision_action，领域不明时用 general。
 
-read_targets 只描述回答任务必须读取的事实类型，不得输出工具名；全天饮食方案的固定六类证据由服务端补齐，因此这里返回空数组。normalized_request 可补全指代，但不得猜测事实。胸痛、呼吸困难、晕厥、失去意识或严重急性疼痛为 high；一般疼痛或伤病为 medium。上下文仅用于承接，不得覆盖最后一条消息。
+read_targets 只描述回答任务必须读取的事实类型，不得输出工具名；领域和读取目标是正交字段，例如 profile 领域的体重趋势使用 weight_history。全天饮食方案的固定六类证据由服务端补齐，因此这里返回空数组。normalized_request 可补全指代，但不得猜测事实。胸痛、呼吸困难、晕厥、失去意识或严重急性疼痛为 high。上下文仅用于承接，不得覆盖最后一条消息。
 
-示例：
-{"intent_domain":"nutrition","request_kind":"generation","requested_effect":"read","requested_output":"daily_meal_plan","read_targets":[],"decision_action":null,"normalized_request":"结合当前用户情况生成今天全天饮食方案","risk_level":"low","confidence":0.98}
+边界示例：
+- “展示近月体重曲线”是 profile/query/read/answer，read_targets=[weight_history]，risk_level=low。
+- “今天轮到哪个训练日”是 workout_session/query/read/answer，read_targets=[next_workout]，risk_level=low。
+- “解释延迟性肌肉酸痛的机制”是 general/query/read/answer，read_targets=[]，risk_level=low。
+- “我的膝盖最近疼”是 health/query/read/answer，read_targets=[health_screening]，risk_level=medium。
+- 全天饮食方案是 nutrition/generation/read/daily_meal_plan，read_targets=[]。
 """
 
 
@@ -203,11 +247,15 @@ INTENT_CHANGE_SYSTEM_PROMPT = """你只负责把已判定的 mutation 路由提�
 _SEMANTIC_ROUTE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "intent_domain": {"type": "string", "enum": [
-            "general", "profile", "health", "workout_plan",
-            "workout_session", "workout_history", "workout_progress",
-            "nutrition",
-        ]},
+        "intent_domain": {
+            "type": "string",
+            "description": _SEMANTIC_ROUTE_DOMAIN_DESCRIPTION,
+            "enum": [
+                "general", "profile", "health", "workout_plan",
+                "workout_session", "workout_history", "workout_progress",
+                "nutrition",
+            ],
+        },
         "request_kind": {"type": "string", "enum": [
             "query", "assessment", "generation", "mutation",
             "proposal_decision",
@@ -220,6 +268,10 @@ _SEMANTIC_ROUTE_SCHEMA: dict[str, Any] = {
         ]},
         "read_targets": {
             "type": "array",
+            "description": (
+                "回答任务必须读取的事实类型，与 intent_domain 正交；"
+                "不需要私有事实时为空，全天饮食方案由服务端补齐所以也为空"
+            ),
             "maxItems": 6,
             "items": {"type": "string", "enum": [
                 "profile_summary", "health_screening", "weight_history",
@@ -237,7 +289,14 @@ _SEMANTIC_ROUTE_SCHEMA: dict[str, Any] = {
             ]
         },
         "normalized_request": {"type": "string", "maxLength": 4000},
-        "risk_level": {"type": "string", "enum": ["low", "medium", "high"]},
+        "risk_level": {
+            "type": "string",
+            "description": (
+                "无症状筛查和一般知识解释为 low；用户报告个人非急性疼痛或伤病为 medium；"
+                "胸痛、呼吸困难、晕厥、失去意识或严重急性疼痛为 high"
+            ),
+            "enum": ["low", "medium", "high"],
+        },
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
     },
     "required": [

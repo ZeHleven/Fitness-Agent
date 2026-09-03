@@ -1386,7 +1386,7 @@ def normalize_resolution(
     """Validate v6 semantics and derive all compatibility projections.
 
     Deterministic rules are deliberately restricted to Proposal decisions and
-    health risk escalation.  They cannot convert an ordinary query into a
+    health red-flag escalation.  They cannot convert an ordinary query into a
     generation/mutation or authorize a read tool.
     """
     rules_resolution = resolve_intent(message)
@@ -1415,10 +1415,11 @@ def normalize_resolution(
             for change in change_requests
         )
     )
-    risk_rank = {"low": 0, "medium": 1, "high": 2}
+    # The model owns ordinary low/medium semantic risk.  Keyword routing is too
+    # coarse to distinguish a generic knowledge question from a user reporting
+    # a personal symptom, so it must not upgrade benign requests.  Only the
+    # narrow, deterministic red-flag detector may override the model.
     risk_level = resolution.risk_level
-    if risk_rank[rules_resolution.risk_level] > risk_rank[risk_level]:
-        risk_level = rules_resolution.risk_level
     if contains_health_red_flag(message):
         risk_level = "high"
         intent_domain = "health"

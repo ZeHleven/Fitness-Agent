@@ -13,8 +13,12 @@ from app.services.agent_intent import (
     route_tools,
 )
 from app.services.agent_intent_model import (
+    INTENT_ROUTE_SYSTEM_PROMPT,
+    SEMANTIC_ROUTE_BOUNDARY_GUIDANCE,
+    SEMANTIC_ROUTE_DOMAIN_GUIDANCE,
     IntentRouteDecision,
     IntentStructuredOutputError,
+    _SEMANTIC_ROUTE_SCHEMA,
     _invoke_model_intent,
     _invoke_model_route,
     _intent_attempt_timeout_seconds,
@@ -38,6 +42,19 @@ class SafeFakeValidationError(Exception):
             "loc": ("expanded_intents", 0),
             "input": "must-never-appear-in-category",
         }]
+
+
+def test_semantic_route_contract_defines_every_domain_in_prompt_and_schema():
+    schema_domain = _SEMANTIC_ROUTE_SCHEMA["properties"]["intent_domain"]
+
+    assert set(SEMANTIC_ROUTE_DOMAIN_GUIDANCE) == set(schema_domain["enum"])
+    for domain, definition in SEMANTIC_ROUTE_DOMAIN_GUIDANCE.items():
+        assert f"- {domain}: {definition}" in INTENT_ROUTE_SYSTEM_PROMPT
+        assert f"{domain}={definition}" in schema_domain["description"]
+    assert all(
+        boundary in INTENT_ROUTE_SYSTEM_PROMPT
+        for boundary in SEMANTIC_ROUTE_BOUNDARY_GUIDANCE
+    )
 
 
 @pytest.mark.asyncio
@@ -78,6 +95,8 @@ async def test_semantic_route_v2_uses_strict_adapter_without_legacy_fields():
     assert "primary_intent" not in properties
     assert "expanded_intents" not in properties
     assert "read_targets" in properties
+    assert "description" in properties["intent_domain"]
+    assert "description" in properties["risk_level"]
 
 
 @pytest.mark.asyncio
