@@ -16,6 +16,48 @@ def test_general_question_has_no_tools():
     assert route_tools(resolution) == []
 
 
+@pytest.mark.parametrize(
+    ("message", "domain", "primary_intent"),
+    [
+        ("查看我的健康筛查", "health", "health_query"),
+        ("力量训练后为什么会酸痛", "general", "general_qa"),
+    ],
+)
+def test_non_red_flag_keyword_rules_do_not_upgrade_model_risk(
+    message,
+    domain,
+    primary_intent,
+):
+    normalized = normalize_resolution(
+        message,
+        IntentResolution(
+            primary_intent=primary_intent,
+            intent_domain=domain,
+            resolved_query=message,
+            risk_level="low",
+            confidence=0.95,
+        ),
+    )
+
+    assert normalized.intent_domain == domain
+    assert normalized.risk_level == "low"
+
+
+def test_model_owned_personal_non_acute_health_risk_is_preserved():
+    normalized = normalize_resolution(
+        "我的膝盖最近疼",
+        IntentResolution(
+            primary_intent="health_query",
+            intent_domain="health",
+            resolved_query="我的膝盖最近疼",
+            risk_level="medium",
+            confidence=0.95,
+        ),
+    )
+
+    assert normalized.risk_level == "medium"
+
+
 def test_composite_intent_expands_and_routes_a_union_of_read_tools():
     resolution = resolve_intent("我的膝盖疼，最近训练进度怎么样？")
 

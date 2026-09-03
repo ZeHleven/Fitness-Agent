@@ -88,6 +88,14 @@ def test_live_gate_checks_out_an_owner_selected_immutable_revision():
     assert "evaluate_agent_routing_real.py" in workflow
     assert "--repeat 2" in workflow
     assert "timeout-minutes: 60" in workflow
+    assert "id: route_preflight" in workflow
+    assert "id: daily_meal_gate" in workflow
+    assert workflow.count("continue-on-error: true") == 2
+    assert "ROUTE_OUTCOME: ${{ steps.route_preflight.outcome }}" in workflow
+    assert "DAILY_MEAL_OUTCOME: ${{ steps.daily_meal_gate.outcome }}" in workflow
+    assert workflow.index("Upload sanitized evaluation report") < workflow.index(
+        "Enforce combined live release verdict"
+    )
 
 
 async def test_live_eval_seed_persists_user_before_dependent_records(db_session):
