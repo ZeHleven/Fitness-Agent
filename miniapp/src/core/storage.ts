@@ -2,6 +2,7 @@ import Taro from '@tarojs/taro'
 
 import { isPendingProposalDecision } from './proposal-interaction'
 import type { PendingPlanAdjustmentProposalDecision } from '../types/plan-adjustment-proposal'
+import type { AgentArtifactAction } from '../types/api'
 
 const ACCESS_TOKEN_KEY = 'fitness_access_token'
 const REFRESH_TOKEN_KEY = 'fitness_refresh_token'
@@ -19,8 +20,19 @@ export interface PendingAgentRequest {
   client_request_id: string
   message: string
   conversation_id?: string
+  artifact_action?: AgentArtifactAction
   run_id?: string
   created_at: number
+}
+
+function isAgentArtifactAction (value: unknown): value is AgentArtifactAction {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const action = value as Partial<AgentArtifactAction>
+  return action.action === 'save_as_proposal' &&
+    typeof action.artifact_id === 'string' && action.artifact_id.length > 0 &&
+    typeof action.expected_version === 'number' && action.expected_version >= 1 &&
+    typeof action.payload_fingerprint === 'string' &&
+    /^[0-9a-f]{64}$/.test(action.payload_fingerprint)
 }
 
 export function getAccessToken(): string {
@@ -63,6 +75,9 @@ export function clearAgentConversationId(): void {
 export function getPendingAgentRequest(): PendingAgentRequest | null {
   const value = Taro.getStorageSync<PendingAgentRequest>(AGENT_PENDING_REQUEST_KEY)
   if (!value || typeof value !== 'object' || !value.client_request_id || !value.message) {
+    return null
+  }
+  if (value.artifact_action && !isAgentArtifactAction(value.artifact_action)) {
     return null
   }
   return value

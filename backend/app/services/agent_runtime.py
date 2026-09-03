@@ -10,20 +10,25 @@ from typing import Any
 
 from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.config import settings
 from app.database import AsyncSessionLocal
 from app.models.agent import (
+    AgentArtifact,
     AgentConversation,
     AgentMessage,
     AgentProposal,
     AgentRun,
     AgentToolCall,
 )
-from app.schemas.agent import AgentArtifactReference, AgentProposalReference
+from app.schemas.agent import (
+    AgentArtifactActionRequest,
+    AgentArtifactReference,
+    AgentProposalReference,
+)
 from app.schemas.agent_plan_adjustment_proposal_api import (
     PlanAdjustmentProposalDecisionRequest,
 )
@@ -34,7 +39,9 @@ from app.services.agent_controller import (
     execute_planned_agent,
 )
 from app.services.agent_intent import (
+    ChangeRequest,
     IntentResolution,
+    IntentResolverOutcome,
     parse_explicit_plan_adjustment_command,
     route_tools,
 )
@@ -726,6 +733,72 @@ HIGH_RISK_REPLY = (
 )
 
 
+async def _conversation_action_state(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    conversation_id: str,
+) -> dict[str, int]:
+    """Return non-sensitive state needed to disambiguate state-machine verbs."""
+    moment = datetime.now(timezone.utc)
+    active_artifact_count = await db.scalar(
+        select(func.count(AgentArtifact.id)).where(
+            AgentArtifact.user_id == user_id,
+            AgentArtifact.conversation_id == conversation_id,
+            AgentArtifact.artifact_type == "daily_meal_plan_v1",
+            AgentArtifact.status == "active",
+            AgentArtifact.expires_at > moment,
+        )
+    )
+    pending_proposal_count = await db.scalar(
+        select(func.count(AgentProposal.id)).where(
+            AgentProposal.user_id == user_id,
+            AgentProposal.conversation_id == conversation_id,
+            AgentProposal.status == "pending_confirmation",
+            or_(
+                AgentProposal.expires_at.is_(None),
+                AgentProposal.expires_at > moment,
+            ),
+        )
+    )
+    return {
+        "active_daily_meal_artifact_count": int(active_artifact_count or 0),
+        "pending_proposal_count": int(pending_proposal_count or 0),
+    }
+
+
+def _structured_artifact_action_outcome(
+    action: AgentArtifactActionRequest,
+) -> IntentResolverOutcome:
+    """Translate a trusted card action into the existing mutation contract."""
+    resolution = IntentResolution(
+        primary_intent="nutrition_today_query",
+        intent_domain="nutrition",
+        request_kind="mutation",
+        requested_effect="create",
+        change_requests=[ChangeRequest(
+            resource="nutrition",
+            operation="create",
+            field_path="daily_meal_plan.save",
+            target_reference=action.artifact_id,
+            value={
+                "expected_version": action.expected_version,
+                "payload_fingerprint": action.payload_fingerprint,
+            },
+        )],
+        requested_output="answer",
+        resolved_query="将指定的全天饮食方案保存为待确认提案",
+        subtasks=["校验指定全天饮食方案", "生成待确认提案"],
+        risk_level="low",
+        confidence=1.0,
+    )
+    return IntentResolverOutcome(
+        resolution=resolution,
+        source="rules",
+        fallback_reason="structured_artifact_action",
+    )
+
+
 async def _create_structured_mutation_proposal(
     db: AsyncSession,
     *,
@@ -791,12 +864,37 @@ async def _create_structured_mutation_proposal(
                 for change in changes
             )
             if saves_daily_artifact:
+                save_change = next(
+                    change
+                    for change in changes
+                    if change.resource == "nutrition"
+                    and change.operation == "create"
+                    and change.field_path == "daily_meal_plan.save"
+                )
+                action_data = (
+                    save_change.value
+                    if isinstance(save_change.value, dict)
+                    else {}
+                )
+                artifact_id = (
+                    save_change.target_reference
+                    if save_change.target_reference
+                    != "latest_active_artifact_in_conversation"
+                    else None
+                )
                 reference = await create_agent_daily_meal_proposal(
                     db=db,
                     enabled=settings.AGENT_NUTRITION_PROPOSALS_ENABLED,
                     user_id=run.user_id,
                     conversation_id=conversation.id,
                     run_id=run.id,
+                    artifact_id=artifact_id,
+                    expected_artifact_version=action_data.get(
+                        "expected_version"
+                    ),
+                    expected_payload_fingerprint=action_data.get(
+                        "payload_fingerprint"
+                    ),
                 )
             else:
                 reference = await create_agent_meal_create_proposal(
@@ -909,6 +1007,7 @@ async def execute_agent_run(
     run: AgentRun,
     conversation: AgentConversation,
     user_message: str,
+    artifact_action: dict[str, Any] | None = None,
     expected_attempt_count: int | None = None,
 ) -> AgentRuntimeResult:
     started = time.perf_counter()
@@ -966,11 +1065,22 @@ async def execute_agent_run(
             if conversation.pending_clarification
             else None
         )
-        intent_outcome = await resolve_intent_with_fallback(
-            user_message,
-            context_messages=history,
-            pending_clarification=pending_clarification_state,
+        conversation_action_state = await _conversation_action_state(
+            db,
+            user_id=run.user_id,
+            conversation_id=conversation.id,
         )
+        if artifact_action is not None:
+            intent_outcome = _structured_artifact_action_outcome(
+                AgentArtifactActionRequest.model_validate(artifact_action)
+            )
+        else:
+            intent_outcome = await resolve_intent_with_fallback(
+                user_message,
+                context_messages=history,
+                pending_clarification=pending_clarification_state,
+                conversation_action_state=conversation_action_state,
+            )
         resolution = intent_outcome.resolution
         legacy_explicit_command = parse_explicit_plan_adjustment_command(
             user_message
@@ -1382,7 +1492,15 @@ async def execute_agent_run(
             )).scalars().all())
             if len(pending) != 1:
                 reply = (
-                    "当前会话没有可确认的待处理提案。只有消息下方出现“待你确认”"
+                    (
+                        "当前会话只有尚未保存的全天饮食方案，还没有待确认提案。"
+                        "请先点击方案卡片上的“保存为待确认提案”，再核对并确认。"
+                    )
+                    if not pending
+                    and conversation_action_state[
+                        "active_daily_meal_artifact_count"
+                    ] == 1
+                    else "当前会话没有可确认的待处理提案。只有消息下方出现“待你确认”"
                     "提案卡片后，才能在对话中确认。"
                     if not pending
                     else "当前会话有多个待确认提案，请打开提案详情选择要处理的那一个。"
@@ -1927,6 +2045,7 @@ async def run_agent_chat(
     user_id: str,
     conversation: AgentConversation,
     user_message: str,
+    artifact_action: dict[str, Any] | None = None,
 ) -> AgentRuntimeResult:
     """Compatibility path for existing HTTP clients and focused tests.
 
@@ -1949,6 +2068,11 @@ async def run_agent_chat(
         run_id=run.id,
         role="user",
         content=user_message,
+        content_data=(
+            {"artifact_action": artifact_action}
+            if artifact_action is not None
+            else {}
+        ),
     ))
     await db.commit()
     return await execute_agent_run(
@@ -1956,4 +2080,5 @@ async def run_agent_chat(
         run=run,
         conversation=conversation,
         user_message=user_message,
+        artifact_action=artifact_action,
     )

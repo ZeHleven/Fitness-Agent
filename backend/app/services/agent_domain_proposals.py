@@ -512,6 +512,9 @@ async def create_agent_daily_meal_proposal(
     user_id: str,
     conversation_id: str,
     run_id: str,
+    artifact_id: str | None = None,
+    expected_artifact_version: int | None = None,
+    expected_payload_fingerprint: str | None = None,
     now: datetime | None = None,
 ) -> PlanProposalReference:
     """Convert one owned immutable daily-meal Artifact into one Proposal."""
@@ -522,17 +525,20 @@ async def create_agent_daily_meal_proposal(
             status_code=403,
         )
     moment = now or datetime.now(timezone.utc)
+    artifact_filters = [
+        AgentArtifact.user_id == user_id,
+        AgentArtifact.conversation_id == conversation_id,
+        AgentArtifact.artifact_type == "daily_meal_plan_v1",
+        AgentArtifact.status.in_(("active", "proposed")),
+        AgentArtifact.expires_at > moment,
+    ]
+    if artifact_id is not None:
+        artifact_filters.append(AgentArtifact.id == artifact_id)
     candidates = list((await db.execute(
         select(AgentArtifact)
-        .where(
-            AgentArtifact.user_id == user_id,
-            AgentArtifact.conversation_id == conversation_id,
-            AgentArtifact.artifact_type == "daily_meal_plan_v1",
-            AgentArtifact.status.in_(("active", "proposed")),
-            AgentArtifact.expires_at > moment,
-        )
+        .where(*artifact_filters)
         .order_by(AgentArtifact.created_at.desc())
-        .limit(2)
+        .limit(1 if artifact_id is not None else 2)
         .with_for_update()
     )).scalars().all())
     if not candidates:
@@ -562,6 +568,24 @@ async def create_agent_daily_meal_proposal(
         raise PlanProposalError(
             "artifact_already_proposed",
             "这份方案已经生成并处理过提案，请重新生成方案",
+            status_code=409,
+        )
+    if (
+        expected_artifact_version is not None
+        and artifact.version != expected_artifact_version
+    ):
+        raise PlanProposalError(
+            "artifact_version_conflict",
+            "全天饮食方案版本已变化，请重新查看后再保存",
+            status_code=409,
+        )
+    if (
+        expected_payload_fingerprint is not None
+        and artifact.payload_fingerprint != expected_payload_fingerprint
+    ):
+        raise PlanProposalError(
+            "artifact_fingerprint_mismatch",
+            "方案内容校验失败，请重新生成",
             status_code=409,
         )
     if artifact.status != "active":

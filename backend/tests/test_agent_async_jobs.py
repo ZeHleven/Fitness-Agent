@@ -135,6 +135,57 @@ async def test_async_agent_submission_is_idempotent_and_pollable(
 
 
 @pytest.mark.asyncio
+async def test_async_submission_persists_artifact_card_action_for_worker(
+    client,
+    db_session,
+):
+    token = await _token(client, "agent-artifact-action@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    payload = {
+        "message": "保存这份方案",
+        "client_request_id": "artifact-action-request-0001",
+        "artifact_action": {
+            "action": "save_as_proposal",
+            "artifact_id": "artifact-123",
+            "expected_version": 1,
+            "payload_fingerprint": "a" * 64,
+        },
+    }
+
+    response = await client.post("/api/v1/agent/runs", json=payload, headers=headers)
+    assert response.status_code == 202
+    run_id = response.json()["run_id"]
+    stored = await db_session.scalar(select(AgentMessage).where(
+        AgentMessage.run_id == run_id,
+        AgentMessage.role == "user",
+    ))
+    assert stored is not None
+    assert stored.content_data["artifact_action"] == payload["artifact_action"]
+
+    replay = await client.post("/api/v1/agent/runs", json=payload, headers=headers)
+    assert replay.status_code == 202
+    assert replay.json()["run_id"] == run_id
+
+    conflict = await client.post(
+        "/api/v1/agent/runs",
+        json={
+            **payload,
+            "artifact_action": {
+                **payload["artifact_action"],
+                "artifact_id": "artifact-456",
+            },
+        },
+        headers=headers,
+    )
+    assert conflict.status_code == 409
+    run = await db_session.get(AgentRun, run_id)
+    assert run is not None
+    run.status = "completed"
+    run.completed_at = datetime.now(timezone.utc)
+    await db_session.commit()
+
+
+@pytest.mark.asyncio
 async def test_concurrent_idempotent_submissions_share_one_run_and_conversation(
     client,
     db_session,

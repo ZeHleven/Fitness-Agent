@@ -71,6 +71,7 @@ async def test_semantic_route_v2_uses_strict_adapter_without_legacy_fields():
             "requested_output": "daily_meal_plan",
             "read_targets": [],
             "decision_action": "none",
+            "artifact_action": "none",
             "normalized_request": "结合当前情况生成今日饮食",
             "risk_level": "low",
             "confidence": 0.97,
@@ -92,6 +93,7 @@ async def test_semantic_route_v2_uses_strict_adapter_without_legacy_fields():
     assert route.request_kind == "generation"
     assert route.requested_output == "daily_meal_plan"
     assert route.decision_action is None
+    assert route.artifact_action is None
     assert observed.mode == "deepseek_strict_tool"
     kwargs = invoke.await_args.kwargs
     assert kwargs["function_name"] == "submit_semantic_route"
@@ -105,6 +107,9 @@ async def test_semantic_route_v2_uses_strict_adapter_without_legacy_fields():
     assert properties["decision_action"]["enum"] == [
         "none", "confirm", "reject"
     ]
+    assert properties["artifact_action"]["enum"] == [
+        "none", "save_as_proposal"
+    ]
     assert "anyOf" not in properties["decision_action"]
 
 
@@ -116,6 +121,7 @@ def test_semantic_route_provider_sentinel_restores_optional_decision():
         requested_output="answer",
         read_targets=[],
         decision_action="none",
+        artifact_action="none",
         normalized_request="解释力量训练后的酸痛",
         risk_level="low",
         confidence=0.95,
@@ -127,6 +133,7 @@ def test_semantic_route_provider_sentinel_restores_optional_decision():
         requested_output="answer",
         read_targets=[],
         decision_action="confirm",
+        artifact_action="none",
         normalized_request="确认当前提案",
         risk_level="low",
         confidence=0.95,
@@ -206,6 +213,7 @@ async def test_compact_generation_route_does_not_call_change_extractor():
         requested_output="daily_meal_plan",
         read_targets=[],
         decision_action=None,
+        artifact_action=None,
         normalized_request="结合当前用户情况生成今天全天饮食方案",
         risk_level="low",
         confidence=0.97,
@@ -233,6 +241,47 @@ async def test_compact_generation_route_does_not_call_change_extractor():
 
 
 @pytest.mark.asyncio
+async def test_artifact_save_route_has_distinct_action_and_skips_change_extractor():
+    route = IntentRouteDecision(
+        intent_domain="nutrition",
+        request_kind="mutation",
+        requested_effect="create",
+        requested_output="answer",
+        read_targets=[],
+        decision_action="none",
+        artifact_action="save_as_proposal",
+        normalized_request="将刚才的全天饮食方案保存为待确认提案",
+        risk_level="low",
+        confidence=0.99,
+    )
+    with (
+        patch(
+            "app.services.agent_intent_model._invoke_model_route",
+            new=AsyncMock(return_value=route),
+        ),
+        patch(
+            "app.services.agent_intent_model._invoke_model_change_extraction",
+            new=AsyncMock(),
+        ) as extract,
+    ):
+        invocation = await _invoke_model_intent(
+            "保存这份方案",
+            conversation_action_state={
+                "active_daily_meal_artifact_count": 1,
+                "pending_proposal_count": 0,
+            },
+            timeout_seconds=10,
+        )
+
+    resolution = invocation.resolution
+    assert resolution.request_kind == "mutation"
+    assert resolution.requested_effect == "create"
+    assert len(resolution.change_requests) == 1
+    assert resolution.change_requests[0].field_path == "daily_meal_plan.save"
+    extract.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_compact_mutation_route_calls_detailed_change_extractor():
     route = IntentRouteDecision(
         intent_domain="nutrition",
@@ -241,6 +290,7 @@ async def test_compact_mutation_route_calls_detailed_change_extractor():
         requested_output="answer",
         read_targets=[],
         decision_action=None,
+        artifact_action=None,
         normalized_request="记录今天午餐",
         risk_level="low",
         confidence=0.98,
@@ -355,6 +405,68 @@ async def test_structured_model_gets_one_repair_attempt():
     ]
     assert outcome.attempt_timings[0].error_category == "ValueError"
     assert invoked.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_artifact_save_cannot_be_accepted_as_proposal_confirmation():
+    wrong_decision = IntentResolution(
+        primary_intent="nutrition_today_query",
+        intent_domain="nutrition",
+        request_kind="proposal_decision",
+        requested_effect="decide",
+        change_requests=[ChangeRequest(
+            resource="nutrition",
+            operation="update",
+            field_path="proposal.status",
+            value="confirm",
+        )],
+        confidence=0.91,
+    )
+    repaired_save = IntentResolution(
+        primary_intent="nutrition_today_query",
+        intent_domain="nutrition",
+        request_kind="mutation",
+        requested_effect="create",
+        change_requests=[ChangeRequest(
+            resource="nutrition",
+            operation="create",
+            field_path="daily_meal_plan.save",
+            target_reference="latest_active_artifact_in_conversation",
+        )],
+        confidence=0.98,
+    )
+    with (
+        patch.object(settings, "DEEPSEEK_API_KEY", "test-key"),
+        patch(
+            "app.services.agent_intent_model._invoke_model_intent",
+            new=AsyncMock(side_effect=[wrong_decision, repaired_save]),
+        ) as invoked,
+    ):
+        outcome = await resolve_intent_with_fallback(
+            "保存这份方案",
+            conversation_action_state={
+                "active_daily_meal_artifact_count": 1,
+                "pending_proposal_count": 0,
+            },
+            use_model=True,
+        )
+
+    assert outcome.source == "model"
+    assert outcome.attempt_count == 2
+    assert outcome.error_category == "semantic_artifact_save_requires_mutation"
+    assert outcome.resolution.request_kind == "mutation"
+    assert outcome.resolution.change_requests[0].field_path == (
+        "daily_meal_plan.save"
+    )
+    assert invoked.await_count == 2
+    second_kwargs = invoked.await_args_list[1].kwargs
+    assert second_kwargs["repair_error"] == (
+        "semantic_artifact_save_requires_mutation"
+    )
+    assert second_kwargs["conversation_action_state"] == {
+        "active_daily_meal_artifact_count": 1,
+        "pending_proposal_count": 0,
+    }
 
 
 @pytest.mark.asyncio

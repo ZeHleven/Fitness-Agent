@@ -1,6 +1,7 @@
 import { apiRequest } from '../core/request'
 import type {
   AgentMessage,
+  AgentArtifactAction,
   AgentRunStatus,
   AgentRunSubmission
 } from '../types/api'
@@ -10,7 +11,8 @@ export const agentApi = {
   submit: (
     message: string,
     clientRequestId: string,
-    conversationId?: string
+    conversationId?: string,
+    artifactAction?: AgentArtifactAction
   ) => apiRequest<AgentRunSubmission>(
     '/agent/runs',
     {
@@ -18,7 +20,8 @@ export const agentApi = {
       data: {
         message,
         client_request_id: clientRequestId,
-        ...(conversationId ? { conversation_id: conversationId } : {})
+        ...(conversationId ? { conversation_id: conversationId } : {}),
+        ...(artifactAction ? { artifact_action: artifactAction } : {})
       }
     }
   ),
