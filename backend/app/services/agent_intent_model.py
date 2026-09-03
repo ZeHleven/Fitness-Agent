@@ -7,7 +7,14 @@ import time
 from dataclasses import dataclass, replace
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from app.config import settings
 from app.services.agent_intent import (
@@ -93,6 +100,14 @@ class IntentRouteDecision(BaseModel):
     normalized_request: str = Field(max_length=4000)
     risk_level: Literal["low", "medium", "high"]
     confidence: float = Field(ge=0, le=1)
+
+    @field_validator("decision_action", mode="before")
+    @classmethod
+    def normalize_no_decision_sentinel(cls, value: Any) -> Any:
+        # DeepSeek strict tools are substantially more reliable with a plain
+        # string enum than a required nullable anyOf. Keep the provider schema
+        # simple, then restore the domain model's None at the trust boundary.
+        return None if value == "none" else value
 
     @model_validator(mode="after")
     def validate_action_contract(self) -> "IntentRouteDecision":
@@ -213,7 +228,7 @@ INTENT_ROUTE_SYSTEM_PROMPT = f"""你只负责 Fitness Agent 的业务语义路�
 
 先判断领域，再判断动作：query=查事实，assessment=依据事实评估，generation=生成尚不写入的内容，mutation=明确要求创建/记录/保存/修改/删除数据，proposal_decision=确认或拒绝已有提案。读取类 effect=read，写入为 create/update/delete，决策为 decide。
 
-“制定、安排、规划、推荐、搭配、给出食谱或方案”默认是 generation，不是写入；只有明确要求记录、保存或写入才是 mutation。全天饮食方案必须是 nutrition/generation/read/daily_meal_plan。确认或拒绝必须给出 decision_action，领域不明时用 general。
+“制定、安排、规划、推荐、搭配、给出食谱或方案”默认是 generation，不是写入；只有明确要求记录、保存或写入才是 mutation。全天饮食方案必须是 nutrition/generation/read/daily_meal_plan。确认或拒绝必须给出 decision_action=confirm/reject，其他请求必须给出 decision_action=none；领域不明时用 general。
 
 read_targets 只描述回答任务必须读取的事实类型，不得输出工具名；领域和读取目标是正交字段，例如 profile 领域的体重趋势使用 weight_history。全天饮食方案的固定六类证据由服务端补齐，因此这里返回空数组。normalized_request 可补全指代，但不得猜测事实。胸痛、呼吸困难、晕厥、失去意识或严重急性疼痛为 high。上下文仅用于承接，不得覆盖最后一条消息。
 
@@ -283,10 +298,11 @@ _SEMANTIC_ROUTE_SCHEMA: dict[str, Any] = {
             ]},
         },
         "decision_action": {
-            "anyOf": [
-                {"type": "string", "enum": ["confirm", "reject"]},
-                {"type": "null"},
-            ]
+            "type": "string",
+            "description": (
+                "确认提案为 confirm，拒绝提案为 reject；其他请求固定为 none"
+            ),
+            "enum": ["none", "confirm", "reject"],
         },
         "normalized_request": {"type": "string", "maxLength": 4000},
         "risk_level": {
@@ -313,7 +329,7 @@ _SEMANTIC_ROUTE_EXAMPLE = {
     "requested_effect": "read",
     "requested_output": "daily_meal_plan",
     "read_targets": [],
-    "decision_action": None,
+    "decision_action": "none",
     "normalized_request": "结合当前用户情况生成今天全天饮食方案",
     "risk_level": "low",
     "confidence": 0.98,
