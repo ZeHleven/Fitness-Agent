@@ -65,7 +65,7 @@ SEMANTIC_ROUTE_BOUNDARY_GUIDANCE = (
     "体重记录和趋势的业务领域是 profile；需要读取历史时另选 read_targets=weight_history",
     "下一练属于 workout_session；只有查询或改变整份计划时才属于 workout_plan",
     "不涉及当前用户个体症状或私有数据的知识解释属于 general；个人筛查、症状和伤病才属于 health",
-    "风险依据用户是否报告个人状况判断：无症状筛查和一般知识解释为 low，个人非急性疼痛或伤病为 medium，高危红旗为 high",
+    "风险依据用户是否报告个人状况判断：仅查看无症状筛查和一般知识解释为 low；用户报告本人存在或要求记录非急性疼痛、旧伤、伤病史或慢性病为 medium；高危红旗为 high",
 )
 
 _SEMANTIC_ROUTE_DOMAIN_TEXT = "\n".join(
@@ -237,6 +237,7 @@ read_targets 只描述回答任务必须读取的事实类型，不得输出工�
 - “今天轮到哪个训练日”是 workout_session/query/read/answer，read_targets=[next_workout]，risk_level=low。
 - “解释延迟性肌肉酸痛的机制”是 general/query/read/answer，read_targets=[]，risk_level=low。
 - “我的膝盖最近疼”是 health/query/read/answer，read_targets=[health_screening]，risk_level=medium。
+- “把伤病史更新为左膝旧伤”是 health/mutation/update/answer，read_targets=[]，decision_action=none，risk_level=medium。
 - 全天饮食方案是 nutrition/generation/read/daily_meal_plan，read_targets=[]。
 """
 
@@ -308,8 +309,9 @@ _SEMANTIC_ROUTE_SCHEMA: dict[str, Any] = {
         "risk_level": {
             "type": "string",
             "description": (
-                "无症状筛查和一般知识解释为 low；用户报告个人非急性疼痛或伤病为 medium；"
-                "胸痛、呼吸困难、晕厥、失去意识或严重急性疼痛为 high"
+                "仅查看无症状筛查和一般知识解释为 low；用户报告本人存在或要求记录"
+                "非急性疼痛、旧伤、伤病史或慢性病必须为 medium；胸痛、呼吸困难、"
+                "晕厥、失去意识或严重急性疼痛为 high"
             ),
             "enum": ["low", "medium", "high"],
         },
