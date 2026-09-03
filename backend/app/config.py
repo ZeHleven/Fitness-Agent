@@ -32,11 +32,23 @@ class Settings(BaseSettings):
     AGENT_TIMEOUT_SECONDS: float = 60.0
     AGENT_INTENT_MODEL_ENABLED: bool = True
     AGENT_INTENT_MODEL: str = "deepseek-v4-flash"
-    AGENT_RULES_FIRST_ENABLED: bool = True
-    AGENT_INTENT_TIMEOUT_SECONDS: float = 6.0
-    AGENT_INTENT_TOTAL_TIMEOUT_SECONDS: float = 10.0
+    # Deprecated compatibility setting. Ordinary semantic routing never uses
+    # deterministic rules as an execution authority.
+    AGENT_RULES_FIRST_ENABLED: bool = False
+    AGENT_INTENT_TIMEOUT_SECONDS: float = 10.0
+    AGENT_INTENT_TOTAL_TIMEOUT_SECONDS: float = 24.0
     AGENT_INTENT_RETRY_MIN_REMAINING_SECONDS: float = 2.0
     AGENT_INTENT_MAX_TOKENS: int = 1100
+    # The compact domain/action router has its own budget. Keeping this
+    # separate means existing deployments with older extraction timeouts gain
+    # the reliability fix without needing an immediate environment change.
+    AGENT_INTENT_ROUTE_TIMEOUT_SECONDS: float = Field(
+        default=14.0, ge=1.0, le=30.0
+    )
+    AGENT_INTENT_ROUTE_MAX_TOKENS: int = Field(default=500, ge=128, le=1200)
+    DAILY_MEAL_OPTIMIZER_TIMEOUT_SECONDS: float = Field(
+        default=3.0, ge=0.1, le=10.0
+    )
     AGENT_MAX_HISTORY_MESSAGES: int = 20
     AGENT_RECURSION_LIMIT: int = 8
     AGENT_PLANNED_EXECUTION_ENABLED: bool = True

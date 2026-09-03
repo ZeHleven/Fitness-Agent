@@ -25,10 +25,12 @@ class StructuredAIServiceError(AIServiceError):
         category: str,
         duration_ms: int = 0,
         mode: str = "deepseek_structured",
+        retry_after_seconds: float | None = None,
     ) -> None:
         self.category = category
         self.duration_ms = duration_ms
         self.mode = mode
+        self.retry_after_seconds = retry_after_seconds
         super().__init__(message)
 
 
@@ -94,11 +96,20 @@ def _structured_http_error(
     mode: str,
 ) -> StructuredAIServiceError:
     status_code = exc.response.status_code
+    retry_after_seconds: float | None = None
+    if status_code == 429:
+        try:
+            parsed_retry_after = float(exc.response.headers.get("Retry-After", ""))
+        except (TypeError, ValueError):
+            parsed_retry_after = -1
+        if 0 <= parsed_retry_after <= 60:
+            retry_after_seconds = parsed_retry_after
     return StructuredAIServiceError(
         f"AI 服务请求失败（HTTP {status_code}）",
         category=f"http_{status_code}",
         duration_ms=duration_ms,
         mode=mode,
+        retry_after_seconds=retry_after_seconds,
     )
 
 
@@ -112,6 +123,7 @@ async def structured_chat_completion(
     function_description: str,
     json_schema: dict[str, Any],
     json_example: dict[str, Any],
+    timeout_seconds: float | None = None,
 ) -> StructuredCompletionResult:
     """Invoke DeepSeek with a strict tool schema and a safe JSON fallback.
 
@@ -150,7 +162,11 @@ async def structured_chat_completion(
                 url,
                 headers=headers,
                 json=payload,
-                timeout=settings.AGENT_TIMEOUT_SECONDS,
+                timeout=(
+                    timeout_seconds
+                    if timeout_seconds is not None
+                    else settings.AGENT_TIMEOUT_SECONDS
+                ),
             )
             response.raise_for_status()
         except httpx.TimeoutException as exc:

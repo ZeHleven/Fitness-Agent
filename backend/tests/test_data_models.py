@@ -60,7 +60,7 @@ def test_agent_run_persists_v5_intent_semantics():
     assert "change_requests" in columns
     assert "evidence_requirements" in columns
     assert "requested_output" in columns
-    assert columns["understanding_version"].server_default.arg == "v5"
+    assert columns["understanding_version"].server_default.arg == "v6"
 
 
 def test_daily_meal_artifact_has_owned_versioned_payload_fields():

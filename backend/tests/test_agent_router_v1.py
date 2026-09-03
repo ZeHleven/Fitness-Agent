@@ -16,12 +16,27 @@ from app.schemas.agent_planning import (
     MicroPlanStep,
     PlannedToolAction,
 )
-from app.services.agent_intent import IntentResolution, IntentResolverOutcome
+from app.services.agent_intent import (
+    IntentResolution,
+    IntentResolverOutcome,
+    normalize_resolution,
+    resolve_intent,
+)
 
 
 @pytest.fixture(autouse=True)
 def disable_intent_model_for_router_tests():
-    with patch.object(settings, "AGENT_INTENT_MODEL_ENABLED", False):
+    async def deterministic_model_outcome(message, **_kwargs):
+        return IntentResolverOutcome(
+            resolution=normalize_resolution(message, resolve_intent(message)),
+            source="model",
+            attempt_count=1,
+        )
+
+    with patch(
+        "app.services.agent_runtime.resolve_intent_with_fallback",
+        new=deterministic_model_outcome,
+    ):
         yield
 
 
@@ -94,7 +109,7 @@ async def test_agent_chat_persists_conversation_run_messages_and_tool_audit(
     )
     assert run_response.status_code == 200
     assert run_response.json()["tool_allowlist"] == ["profile.get_summary"]
-    assert run_response.json()["intent_source"] == "rules"
+    assert run_response.json()["intent_source"] == "model"
     assert run_response.json()["intent_confidence"] == 0.9
     assert run_response.json()["duration_ms"] is not None
     assert run_response.json()["execution_mode"] == "direct"
@@ -414,6 +429,55 @@ async def test_agent_run_exposes_privacy_safe_intent_error_category(client):
 
 
 @pytest.mark.asyncio
+async def test_untrusted_intent_fallback_stops_before_tools_or_private_reads(
+    client,
+):
+    token = await _token(client, "agent-intent-unavailable@example.com")
+    outcome = IntentResolverOutcome(
+        resolution=IntentResolution(
+            primary_intent="workout_progress_query",
+            intent_domain="workout_progress",
+            request_kind="assessment",
+            requested_effect="read",
+            resolved_query="评估近期执行情况",
+            confidence=0.45,
+        ),
+        source="rules",
+        attempt_count=2,
+        fallback_reason="model_timeout",
+        error_category="TimeoutError",
+        understanding_failed=True,
+    )
+    with (
+        patch(
+            "app.services.agent_runtime.resolve_intent_with_fallback",
+            new=AsyncMock(return_value=outcome),
+        ),
+        patch(
+            "app.services.agent_runtime.invoke_langchain_agent",
+            new=AsyncMock(),
+        ) as invoke_agent,
+    ):
+        response = await client.post(
+            "/api/v1/agent/chat",
+            json={"message": "综合我的资料给我配今天三顿饭"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert "没有读取你的业务数据" in response.json()["reply"]
+    run = await client.get(
+        f"/api/v1/agent/runs/{response.json()['run_id']}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert run.json()["error_code"] == "intent_understanding_unavailable"
+    assert run.json()["execution_trace"]["termination_reason"] == (
+        "intent_understanding_unavailable"
+    )
+    invoke_agent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_agent_health_red_flag_is_intercepted_before_model(client):
     token = await _token(client, "agent-red-flag@example.com")
     with patch(
@@ -483,13 +547,57 @@ async def test_agent_required_clarification_does_not_call_tools_or_main_model(cl
 async def test_agent_affirmative_followup_routes_from_conversation_context(client):
     token = await _token(client, "agent-followup@example.com")
     headers = {"Authorization": f"Bearer {token}"}
+    async def contextual_model_outcome(message, *, context_messages=None, **_kwargs):
+        if message == "需要":
+            assert context_messages
+            assert any(
+                "需要我帮你查下次该练什么吗" in item["content"]
+                for item in context_messages
+            )
+            return IntentResolverOutcome(
+                resolution=normalize_resolution(
+                    message,
+                    IntentResolution(
+                        primary_intent="next_workout_query",
+                        intent_domain="workout_session",
+                        request_kind="query",
+                        requested_effect="read",
+                        evidence_requirements=["next_workout"],
+                        resolved_query="查询下一次训练安排",
+                        confidence=0.96,
+                    ),
+                ),
+                source="model",
+                attempt_count=1,
+            )
+        return IntentResolverOutcome(
+            resolution=normalize_resolution(
+                message,
+                IntentResolution(
+                    primary_intent="general_qa",
+                    intent_domain="general",
+                    request_kind="query",
+                    requested_effect="read",
+                    resolved_query=message,
+                    confidence=0.9,
+                ),
+            ),
+            source="model",
+            attempt_count=1,
+        )
     invoke_agent = AsyncMock(side_effect=[
         {"messages": [AIMessage(content="需要我帮你查下次该练什么吗？")]},
         {"messages": [AIMessage(content="你的下一练已经查到了。")]},
     ])
-    with patch(
-        "app.services.agent_runtime.invoke_langchain_agent",
-        new=invoke_agent,
+    with (
+        patch(
+            "app.services.agent_runtime.resolve_intent_with_fallback",
+            new=contextual_model_outcome,
+        ),
+        patch(
+            "app.services.agent_runtime.invoke_langchain_agent",
+            new=invoke_agent,
+        ),
     ):
         first = await client.post(
             "/api/v1/agent/chat",
@@ -513,7 +621,8 @@ async def test_agent_affirmative_followup_routes_from_conversation_context(clien
     )
     assert second_run.json()["primary_intent"] == "next_workout_query"
     assert second_run.json()["tool_allowlist"] == ["workout.get_next"]
-    assert second_run.json()["intent_fallback_reason"] == "contextual_followup"
+    assert second_run.json()["intent_source"] == "model"
+    assert second_run.json()["intent_fallback_reason"] is None
 
 
 @pytest.mark.asyncio
@@ -564,12 +673,34 @@ async def test_agent_persists_clarification_and_resumes_after_slot_fill(
         "要比较的时间范围"
     ]
 
-    with patch(
-        "app.services.agent_runtime.invoke_langchain_agent",
-        new=AsyncMock(return_value={
-            "messages": [AIMessage(content="这是你最近四周的训练比较。")],
-        }),
-    ) as second_invoke:
+    filled_resolution = IntentResolverOutcome(
+        resolution=normalize_resolution(
+            "最近四周",
+            IntentResolution(
+                primary_intent="workout_history_query",
+                intent_domain="workout_session",
+                request_kind="query",
+                requested_effect="read",
+                evidence_requirements=["workout_history"],
+                resolved_query="比较我的训练历史；补充信息：最近四周",
+                confidence=0.96,
+            ),
+        ),
+        source="rules",
+        fallback_reason="clarification_filled",
+    )
+    with (
+        patch(
+            "app.services.agent_runtime.resolve_intent_with_fallback",
+            new=AsyncMock(return_value=filled_resolution),
+        ),
+        patch(
+            "app.services.agent_runtime.invoke_langchain_agent",
+            new=AsyncMock(return_value={
+                "messages": [AIMessage(content="这是你最近四周的训练比较。")],
+            }),
+        ) as second_invoke,
+    ):
         second = await client.post(
             "/api/v1/agent/chat",
             json={

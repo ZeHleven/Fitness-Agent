@@ -17,7 +17,7 @@ from app.schemas.agent_tool_registry import (
     ToolRegistryReadEnforcementContract,
     ToolRegistryV2,
 )
-from app.services.agent_intent import IntentResolution
+from app.services.agent_intent import IntentResolution, route_tools
 
 
 _SUMMARY_AND_FINGERPRINT_AUDIT = ToolAuditContract()
@@ -646,13 +646,8 @@ def route_registry_read_tool_ids(
     ):
         return ()
 
-    routed: list[str] = []
-    for intent in [resolution.primary_intent, *resolution.expanded_intents]:
-        for entry in TOOL_REGISTRY_V2.tools:
-            if intent not in entry.supported_intents:
-                continue
-            if entry.tool_id not in routed:
-                routed.append(entry.tool_id)
-                if len(routed) >= TOOL_REGISTRY_V2.max_routed_tools:
-                    return tuple(routed)
-    return tuple(routed)
+    registered = set(TOOL_REGISTRY_V2_INITIAL_READ_TOOL_IDS)
+    return tuple(
+        tool_id for tool_id in route_tools(resolution)
+        if tool_id in registered
+    )[:TOOL_REGISTRY_V2.max_routed_tools]

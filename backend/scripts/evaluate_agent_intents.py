@@ -12,7 +12,12 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import settings  # noqa: E402
-from app.services.agent_intent import route_tools  # noqa: E402
+from app.services.agent_intent import (  # noqa: E402
+    normalize_resolution,
+    resolve_intent,
+    resolve_pending_clarification,
+    route_tools,
+)
 from app.services.agent_intent_model import resolve_intent_with_fallback  # noqa: E402
 
 
@@ -48,13 +53,40 @@ async def evaluate(case_file: Path, *, use_model: bool) -> dict[str, Any]:
     incorrect_clarifications = 0
 
     for case in cases:
-        outcome = await resolve_intent_with_fallback(
-            case["message"],
-            context_messages=case.get("context_messages"),
-            pending_clarification=case.get("pending_clarification"),
-            use_model=use_model,
-        )
-        resolution = outcome.resolution
+        if use_model:
+            outcome = await resolve_intent_with_fallback(
+                case["message"],
+                context_messages=case.get("context_messages"),
+                pending_clarification=case.get("pending_clarification"),
+                use_model=True,
+            )
+            resolution = outcome.resolution
+            source = outcome.source
+            fallback_reason = outcome.fallback_reason
+        else:
+            pending = resolve_pending_clarification(
+                case["message"], case.get("pending_clarification")
+            )
+            if pending is not None:
+                pending_resolution, fallback_reason = pending
+                resolution = normalize_resolution(
+                    case["message"], pending_resolution
+                )
+            else:
+                resolution = resolve_intent(case["message"])
+                fallback_reason = "deterministic_evaluation"
+            if resolution.request_kind == "mutation":
+                # Rules are evaluated for their read/write safety signal only.
+                # Production never promotes regex-extracted write fields or
+                # persists rule-authored clarification slots.
+                resolution = resolution.model_copy(update={
+                    "change_requests": [],
+                    "evidence_requirements": [],
+                    "missing_slots": [],
+                    "clarification_required": False,
+                    "clarification_question": None,
+                })
+            source = "rules"
         routed = route_tools(resolution)
         routed_set = set(routed)
         rules_mutation = (
@@ -142,7 +174,7 @@ async def evaluate(case_file: Path, *, use_model: bool) -> dict[str, Any]:
             slot_correct += int(slot_ok)
         semantic_expected += int(bool(semantic_checks))
         semantic_correct += int(bool(semantic_checks) and semantic_ok)
-        source_counts[outcome.source] += 1
+        source_counts[source] += 1
         results.append({
             "id": case["id"],
             "primary": resolution.primary_intent,
@@ -169,8 +201,8 @@ async def evaluate(case_file: Path, *, use_model: bool) -> dict[str, Any]:
             "tools": routed,
             "missing_allowed_tools": sorted(allowed - routed_set),
             "forbidden_tool_leaks": leaks,
-            "source": outcome.source,
-            "fallback_reason": outcome.fallback_reason,
+            "source": source,
+            "fallback_reason": fallback_reason,
         })
 
     total = len(cases)

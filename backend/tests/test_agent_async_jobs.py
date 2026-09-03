@@ -16,6 +16,27 @@ from app.models.agent import (
 )
 from app.services.agent_jobs import claim_next_agent_run, process_agent_run
 from app.services.agent_runtime import AgentRunOwnershipLost, execute_agent_run
+from app.services.agent_intent import (
+    IntentResolverOutcome,
+    normalize_resolution,
+    resolve_intent,
+)
+
+
+@pytest.fixture(autouse=True)
+def deterministic_intent_for_job_lifecycle_tests():
+    async def resolve(message, **_kwargs):
+        return IntentResolverOutcome(
+            resolution=normalize_resolution(message, resolve_intent(message)),
+            source="model",
+            attempt_count=1,
+        )
+
+    with patch(
+        "app.services.agent_runtime.resolve_intent_with_fallback",
+        new=resolve,
+    ):
+        yield
 
 
 async def _token(client, email: str) -> str:

@@ -129,6 +129,7 @@
   },
   {
     "id": "contextual_affirmative_next_workout",
+    "model_only": true,
     "message": "需要",
     "context_messages": [
       {
@@ -148,6 +149,7 @@
     "pending_clarification": {
       "resolved_query": "比较我的训练历史",
       "primary_intent": "workout_history_query",
+      "evidence_requirements": ["workout_history"],
       "expanded_intents": [],
       "subtasks": ["读取训练历史", "比较训练表现"],
       "missing_slots": ["要比较的时间范围"],

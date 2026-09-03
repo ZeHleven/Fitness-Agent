@@ -9,7 +9,7 @@ import numpy as np
 from scipy.optimize import Bounds, LinearConstraint, milp
 
 
-SOLVER_VERSION = "highs_milp_v1"
+SOLVER_VERSION = "highs_milp_v2"
 IDEAL_FAT_RANGE = (20.0, 35.0)
 IDEAL_CARB_RANGE = (45.0, 65.0)
 ACCEPTABLE_FAT_RANGE = (15.0, 40.0)
@@ -40,6 +40,7 @@ class OptimizedMealDraft:
     objective_value: float
     nutrition_score: float
     portion_score: float
+    solver_status: Literal["optimal", "feasible_incumbent"] = "optimal"
 
 
 @dataclass(frozen=True)
@@ -446,20 +447,47 @@ def _solve(
             duration_ms=duration_ms,
         ) from exc
     duration_ms = max(0, round((time.perf_counter() - started) * 1000))
-    if not result.success or result.x is None:
-        code = (
-            "daily_meal_optimizer_unavailable"
-            if int(result.status) not in {2}
-            else "daily_meal_optimization_infeasible"
+    solver_status = int(result.status)
+    if solver_status == 2:
+        raise DailyMealOptimizationError(
+            "daily_meal_optimization_infeasible",
+            "当前食品组合无法满足营养目标",
+            duration_ms=duration_ms,
         )
-        message = (
-            "营养配平服务暂时不可用"
-            if code == "daily_meal_optimizer_unavailable"
-            else "当前食品组合无法满足营养目标"
+    if result.x is None:
+        code = (
+            "daily_meal_optimizer_timeout_no_solution"
+            if solver_status == 1
+            else "daily_meal_optimizer_unavailable"
         )
         raise DailyMealOptimizationError(
             code,
-            message,
+            (
+                "当前食品组合未在时限内找到可行解"
+                if code == "daily_meal_optimizer_timeout_no_solution"
+                else "营养配平服务暂时不可用"
+            ),
+            duration_ms=duration_ms,
+        )
+    if solver_status not in {0, 1}:
+        raise DailyMealOptimizationError(
+            "daily_meal_optimizer_unavailable",
+            "营养配平服务返回了无法采用的状态",
+            duration_ms=duration_ms,
+        )
+
+    solution = np.asarray(result.x, dtype=float)
+    if (
+        solution.shape != (variable_count,)
+        or not np.all(np.isfinite(solution))
+        or np.any(solution < lower_bounds - 1e-6)
+        or np.any(solution > upper_bounds + 1e-6)
+        or np.any(np.abs(solution[:count] - np.rint(solution[:count])) > 1e-6)
+        or np.any(np.asarray(rows, dtype=float) @ solution > np.asarray(limits) + 1e-5)
+    ):
+        raise DailyMealOptimizationError(
+            "daily_meal_optimizer_unavailable",
+            "营养配平服务返回了未通过约束复验的结果",
             duration_ms=duration_ms,
         )
 
@@ -475,7 +503,7 @@ def _solve(
     ]
     portion_score = 0.0
     for index, occurrence in enumerate(occurrences):
-        units = int(round(float(result.x[index])))
+        units = int(round(float(solution[index])))
         per_location_minimum = occurrence.minimum_units // len(occurrence.locations)
         per_location_maximum = occurrence.maximum_units // len(occurrence.locations)
         allocations = [per_location_minimum] * len(occurrence.locations)
@@ -524,13 +552,20 @@ def _solve(
         meals=optimized,
         status="within_target" if mode == "ideal" else "acceptable_deviation",
         duration_ms=duration_ms,
-        objective_value=float(result.fun),
+        objective_value=float(
+            result.fun
+            if getattr(result, "fun", None) is not None
+            else objective @ solution
+        ),
         nutrition_score=(
-            float(sum(result.x[metric_offset:]))
+            float(sum(solution[metric_offset:]))
             if mode == "acceptable"
             else 0.0
         ),
         portion_score=portion_score,
+        solver_status=(
+            "feasible_incumbent" if solver_status == 1 else "optimal"
+        ),
     )
 
 

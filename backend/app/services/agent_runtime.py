@@ -1018,7 +1018,7 @@ async def execute_agent_run(
         run.risk_level = resolution.risk_level
         run.clarification_required = resolution.clarification_required
         run.clarification_question = resolution.clarification_question
-        run.understanding_version = "v5"
+        run.understanding_version = "v6"
         run.intent_source = intent_outcome.source
         run.intent_confidence = resolution.confidence
         run.intent_attempt_count = intent_outcome.attempt_count
@@ -1052,7 +1052,7 @@ async def execute_agent_run(
                 "clarification_question": resolution.clarification_question,
                 "risk_level": resolution.risk_level,
                 "confidence": resolution.confidence,
-                "understanding_version": "v5",
+                "understanding_version": "v6",
             }
         else:
             conversation.pending_clarification = {}
@@ -1127,7 +1127,7 @@ async def execute_agent_run(
                     "clarification_question": reply,
                     "risk_level": resolution.risk_level,
                     "confidence": resolution.confidence,
-                    "understanding_version": "v5",
+                    "understanding_version": "v6",
                 }
             else:
                 conversation.pending_clarification = {}
@@ -1149,6 +1149,18 @@ async def execute_agent_run(
                 artifact=short_artifact,
             )
 
+        if intent_outcome.understanding_failed:
+            reply = (
+                "意图理解服务暂时未能可靠完成，请稍后重试。"
+                "本次没有读取你的业务数据，也没有修改任何数据。"
+            )
+            run.error_code = "intent_understanding_unavailable"
+            run.error_message = reply
+            return await complete_semantic_short_circuit(
+                reply,
+                termination_reason="intent_understanding_unavailable",
+            )
+
         write_structure_unavailable = (
             resolution.request_kind == "mutation"
             and intent_outcome.source == "rules"
@@ -1156,7 +1168,7 @@ async def execute_agent_run(
         )
         persisted_partial_mutation = (
             bool(pending_clarification_state)
-            and pending_clarification_state.get("understanding_version") in {"v4", "v5"}
+            and pending_clarification_state.get("understanding_version") in {"v4", "v5", "v6"}
             and pending_clarification_state.get("request_kind") == "mutation"
             and bool(pending_clarification_state.get("change_requests"))
             and bool(resolution.change_requests)
@@ -1619,7 +1631,7 @@ async def execute_agent_run(
                     "clarification_question": reply,
                     "risk_level": resolution.risk_level,
                     "confidence": resolution.confidence,
-                    "understanding_version": "v5",
+                    "understanding_version": "v6",
                 }
             elif execution_trace.terminal_action == "safe_stop":
                 run.risk_level = "high"

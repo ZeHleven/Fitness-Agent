@@ -69,6 +69,27 @@ def test_live_gate_seeds_food_catalog_before_model_evaluation():
     assert seed_index < evaluation_index
 
 
+def test_live_gate_checks_out_an_owner_selected_immutable_revision():
+    workflow = (
+        Path(__file__).resolve().parents[2]
+        / ".github"
+        / "workflows"
+        / "daily-meal-live-eval.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "candidate_sha:" in workflow
+    assert "if: github.actor == github.repository_owner" in workflow
+    assert "^[0-9a-fA-F]{40}$" in workflow
+    assert "ref: ${{ inputs.candidate_sha }}" in workflow
+    assert "if: github.ref == 'refs/heads/main'" not in workflow
+    assert "evaluated_sha=\"$(git rev-parse HEAD)\"" in workflow
+    assert '"${evaluated_sha}" != "${REQUESTED_SHA,,}"' in workflow
+    assert "daily-meal-live-eval-${{ steps.revision.outputs.sha }}" in workflow
+    assert "evaluate_agent_routing_real.py" in workflow
+    assert "--repeat 2" in workflow
+    assert "timeout-minutes: 60" in workflow
+
+
 async def test_live_eval_seed_persists_user_before_dependent_records(db_session):
     suffix = f"test-{uuid.uuid4().hex[:12]}"
 
@@ -100,7 +121,9 @@ def test_live_eval_writes_sanitized_report_for_fatal_evaluation_error(
     monkeypatch.setattr(
         live_eval,
         "parse_args",
-        lambda: Namespace(strict=True, output=output),
+        lambda: Namespace(
+            strict=True, output=output, repeat=1, candidate_sha="a" * 40
+        ),
     )
 
     assert live_eval.main() == 1
@@ -111,6 +134,10 @@ def test_live_eval_writes_sanitized_report_for_fatal_evaluation_error(
         "stage": "evaluation",
         "type": "RuntimeError",
     }
+    assert report["intent_timeout_runs"] == 0
+    assert report["rules_fallback_runs"] == 0
+    assert report["semantic_misroute_runs"] == 0
+    assert report["optimizer_unavailable_runs"] == 0
     assert "sensitive database and user details" not in report_text
 
 
@@ -140,7 +167,9 @@ def test_live_eval_reports_food_catalog_prerequisite_failure(
     monkeypatch.setattr(
         live_eval,
         "parse_args",
-        lambda: Namespace(strict=True, output=output),
+        lambda: Namespace(
+            strict=True, output=output, repeat=1, candidate_sha="a" * 40
+        ),
     )
 
     assert live_eval.main() == 1
@@ -161,7 +190,9 @@ def test_live_eval_missing_key_still_writes_diagnostic_artifact(
     monkeypatch.setattr(
         live_eval,
         "parse_args",
-        lambda: Namespace(strict=True, output=output),
+        lambda: Namespace(
+            strict=True, output=output, repeat=1, candidate_sha="a" * 40
+        ),
     )
 
     assert live_eval.main() == 2
@@ -170,3 +201,44 @@ def test_live_eval_missing_key_still_writes_diagnostic_artifact(
         "stage": "configuration",
         "type": "missing_deepseek_api_key",
     }
+    assert report["candidate_sha"] == "a" * 40
+
+
+async def test_repeated_gate_requires_every_pass_to_succeed(monkeypatch):
+    reports = [
+        {"passed": True, "original_successes": 10, "original_runs": 10,
+         "synonym_successes": 20, "synonym_runs": 20,
+         "generation_as_mutation_count": 0, "unconfirmed_meal_writes": 0,
+         "proposal_count": 0, "rules_fallback_runs": 0,
+         "optimizer_unavailable_runs": 0},
+        {"passed": False, "original_successes": 10, "original_runs": 10,
+         "synonym_successes": 18, "synonym_runs": 20,
+         "generation_as_mutation_count": 0, "unconfirmed_meal_writes": 0,
+         "proposal_count": 0, "rules_fallback_runs": 0,
+         "optimizer_unavailable_runs": 0},
+    ]
+
+    async def fake_evaluate(*, pass_index):
+        return reports[pass_index - 1]
+
+    monkeypatch.setattr(live_eval, "evaluate", fake_evaluate)
+    report = await live_eval.evaluate_repeated(2)
+
+    assert report["passed"] is False
+    assert len(report["passes"]) == 2
+
+
+def test_report_decorator_records_candidate_and_router_for_each_pass():
+    report = {"passed": True, "passes": [{"pass_index": 1}, {"pass_index": 2}]}
+
+    decorated = live_eval._decorate_report(
+        report,
+        candidate_sha="a" * 40,
+    )
+
+    assert decorated["candidate_sha"] == "a" * 40
+    assert all(
+        item["candidate_sha"] == "a" * 40
+        and item["router_version"] == "semantic_route_v2"
+        for item in decorated["passes"]
+    )

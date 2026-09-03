@@ -217,6 +217,7 @@ class OptimizationAttemptAudit:
     objective_value: float | None = None
     nutrition_score: float | None = None
     portion_score: float | None = None
+    solver_status: Literal["optimal", "feasible_incumbent"] | None = None
 
     def result_data(self) -> dict[str, Any]:
         return {
@@ -228,6 +229,7 @@ class OptimizationAttemptAudit:
             "objective_value": self.objective_value,
             "nutrition_score": self.nutrition_score,
             "portion_score": self.portion_score,
+            "solver_status": self.solver_status,
         }
 
 
@@ -1411,7 +1413,28 @@ async def generate_daily_meal_artifact(
             evidence, canonical_draft_meals
         )
         candidate_for_repair: _OptimizedCandidate | None = None
+        optimization_deadline = (
+            time.monotonic() + settings.DAILY_MEAL_OPTIMIZER_TIMEOUT_SECONDS
+        )
         for optimization_mode in ("ideal", "acceptable"):
+            remaining_optimizer_seconds = optimization_deadline - time.monotonic()
+            if remaining_optimizer_seconds <= 0:
+                optimization_audit = OptimizationAttemptAudit(
+                    attempt=attempt_number,
+                    mode=optimization_mode,
+                    status="failed",
+                    duration_ms=0,
+                    error_code="daily_meal_optimizer_timeout_no_solution",
+                    violated_metrics=tuple(
+                        item["metric"]
+                        for item in target_gaps(initial_totals, targets)
+                    ),
+                    target_deviations=tuple(
+                        target_gaps(initial_totals, targets)
+                    ),
+                )
+                optimization_attempts.append(optimization_audit)
+                break
             try:
                 optimized = await asyncio.to_thread(
                     optimize_daily_meal_amounts,
@@ -1423,6 +1446,7 @@ async def generate_daily_meal_artifact(
                     existing_totals=existing_totals,
                     targets=targets,
                     mode=optimization_mode,
+                    time_limit_seconds=remaining_optimizer_seconds,
                 )
                 optimized_draft = DailyMealDraft.model_validate({
                     "meals": optimized.meals,
@@ -1508,15 +1532,17 @@ async def generate_daily_meal_artifact(
                 objective_value=round(optimized.objective_value, 6),
                 nutrition_score=round(optimized.nutrition_score, 6),
                 portion_score=round(optimized.portion_score, 6),
+                solver_status=optimized.solver_status,
             )
             optimization_attempts.append(optimization_audit)
             logger.info(
                 "daily_meal_optimization_attempt run_id=%s attempt=%s "
-                "mode=%s status=completed fit_status=%s duration_ms=%s "
-                "solver_version=%s",
+                "mode=%s status=completed solver_status=%s fit_status=%s "
+                "duration_ms=%s solver_version=%s",
                 run_id,
                 attempt_number,
                 optimization_mode,
+                optimized.solver_status,
                 fit["status"],
                 optimized.duration_ms,
                 SOLVER_VERSION,

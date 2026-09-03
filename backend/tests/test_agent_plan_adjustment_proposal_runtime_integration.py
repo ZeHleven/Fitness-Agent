@@ -29,7 +29,13 @@ from app.schemas.agent_trace import (
     AgentPlanTrace,
 )
 from app.services.agent_controller import PlannedExecutionResult
-from app.services.agent_intent import ChangeRequest, IntentResolution
+from app.services.agent_intent import (
+    ChangeRequest,
+    IntentResolution,
+    IntentResolverOutcome,
+    normalize_resolution,
+    resolve_intent,
+)
 from app.services.agent_plan_adjustment_proposal_persistence import (
     persist_optional_plan_adjustment_proposal,
 )
@@ -125,7 +131,18 @@ async def _cleanup_executable_proposal_fixtures(session_factory):
 
 @pytest.fixture(autouse=True)
 def disable_intent_model_for_proposal_runtime_tests():
-    with patch.object(settings, "AGENT_INTENT_MODEL_ENABLED", False):
+    async def deterministic_model_outcome(message, **_kwargs):
+        resolution = normalize_resolution(message, resolve_intent(message))
+        return IntentResolverOutcome(
+            resolution=resolution,
+            source="model",
+            attempt_count=1,
+        )
+
+    with patch(
+        "app.services.agent_runtime.resolve_intent_with_fallback",
+        new=deterministic_model_outcome,
+    ):
         yield
 
 
@@ -850,7 +867,7 @@ async def test_natural_language_frequency_mutation_persists_four_to_three_propos
         headers={"Authorization": f"Bearer {token}"},
     )
     run_body = run_response.json()
-    assert run_body["understanding_version"] == "v5"
+    assert run_body["understanding_version"] == "v6"
     assert run_body["intent_domain"] == "workout_plan"
     assert run_body["request_kind"] == "mutation"
     assert run_body["requested_effect"] == "update"

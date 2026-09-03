@@ -85,6 +85,8 @@ def test_startup_projection_distinguishes_flags_from_effective_runtime():
         "weight_proposals_enabled": False,
         "nutrition_proposals_enabled": True,
         "proposal_runtime_enabled": False,
+        "intent_router_version": "semantic_route_v2",
+        "rules_first_deprecated": True,
     }
 
 
@@ -146,4 +148,26 @@ def test_startup_log_contains_only_allowlisted_non_secret_fields(
         "weight_proposals_enabled",
         "nutrition_proposals_enabled",
         "proposal_runtime_enabled",
+        "intent_router_version",
+        "rules_first_deprecated",
     }
+
+
+def test_startup_warns_when_deprecated_rules_first_setting_is_enabled(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    manifest = tmp_path / "build_metadata.json"
+    manifest.write_text(json.dumps({
+        "schema_version": "1.0",
+        "build_version": "0.5.30",
+        "build_commit": "d" * 40,
+        "source_dirty": False,
+    }), encoding="utf-8")
+    monkeypatch.setattr(settings, "AGENT_RULES_FIRST_ENABLED", True)
+    caplog.set_level(logging.WARNING, logger="uvicorn.error")
+
+    log_agent_startup_diagnostic(metadata_path=manifest)
+
+    assert "AGENT_RULES_FIRST_ENABLED is deprecated and ignored" in caplog.text

@@ -26,6 +26,8 @@ from app.schemas.agent_planning import (
 from app.services.agent_controller import ToolAuditEvent, execute_planned_agent
 from app.services.agent_intent import (
     IntentResolution,
+    IntentResolverOutcome,
+    normalize_resolution,
     resolve_intent,
     route_tools,
 )
@@ -158,6 +160,20 @@ async def _run_chat(
     headers = {"Authorization": f"Bearer {token}"}
 
     with ExitStack() as stack:
+        async def deterministic_model_outcome(current_message, **_kwargs):
+            return IntentResolverOutcome(
+                resolution=normalize_resolution(
+                    current_message,
+                    resolve_intent(current_message),
+                ),
+                source="model",
+                attempt_count=1,
+            )
+
+        stack.enter_context(patch(
+            "app.services.agent_runtime.resolve_intent_with_fallback",
+            new=deterministic_model_outcome,
+        ))
         stack.enter_context(patch.object(
             settings,
             "AGENT_TOOL_REGISTRY_SHADOW_ENABLED",
@@ -614,6 +630,11 @@ async def test_conditional_fallback_behavior_is_unchanged_by_shadow():
 
     resolution = IntentResolution(
         primary_intent="active_workout_query",
+        evidence_requirements=[
+            "active_workout_session",
+            "next_workout",
+            "profile_summary",
+        ],
         resolved_query="结合训练资料判断继续当前训练还是开始下一练",
         expanded_intents=["next_workout_query", "profile_query"],
         subtasks=["检查活动训练", "读取训练资料", "必要时查询下一练"],
@@ -783,6 +804,12 @@ async def test_tool_error_fallback_behavior_is_unchanged_by_shadow():
 
     resolution = IntentResolution(
         primary_intent="plan_query",
+        evidence_requirements=[
+            "active_plan",
+            "workout_progress",
+            "workout_history",
+            "profile_summary",
+        ],
         resolved_query="结合资料、计划和训练证据判断当前计划",
         expanded_intents=[
             "workout_progress_query",

@@ -155,8 +155,8 @@ async def _seed_evaluation_subject(db: AsyncSession, *, suffix: str) -> str:
     return user_id
 
 
-async def evaluate() -> dict[str, Any]:
-    suffix = uuid.uuid4().hex[:12]
+async def evaluate(*, pass_index: int = 1) -> dict[str, Any]:
+    suffix = f"p{pass_index}-{uuid.uuid4().hex[:9]}"
     prompts = [ORIGINAL] * 10 + list(SYNONYMS)
     results: list[dict[str, Any]] = []
     async with AsyncSessionLocal() as db:
@@ -208,6 +208,16 @@ async def evaluate() -> dict[str, Any]:
                 "group": "original" if index <= 10 else "synonym",
                 "success": success,
                 "request_kind": run.request_kind if run is not None else None,
+                "intent_source": run.intent_source if run is not None else None,
+                "intent_attempt_count": (
+                    run.intent_attempt_count if run is not None else 0
+                ),
+                "intent_fallback_reason": (
+                    run.intent_fallback_reason if run is not None else None
+                ),
+                "intent_error_category": (
+                    run.intent_error_category if run is not None else None
+                ),
                 "termination_reason": (
                     (run.execution_trace or {}).get("termination_reason")
                     if run is not None
@@ -234,7 +244,25 @@ async def evaluate() -> dict[str, Any]:
         status: sum(item["fit_status"] == status for item in results)
         for status in ("within_target", "acceptable_deviation")
     }
+    intent_timeout_runs = sum(
+        item["intent_fallback_reason"] == "model_timeout"
+        or "timeout" in str(item["intent_error_category"] or "").lower()
+        for item in results
+    )
+    rules_fallback_runs = sum(
+        item["intent_source"] == "rules" for item in results
+    )
+    semantic_misroute_runs = sum(
+        item["intent_source"] == "model"
+        and item["request_kind"] != "generation"
+        for item in results
+    )
+    optimizer_unavailable_runs = sum(
+        item["termination_reason"] == "daily_meal_optimizer_unavailable"
+        for item in results
+    )
     return {
+        "pass_index": pass_index,
         "model": settings.AGENT_MODEL,
         "prerequisites": prerequisite_diagnostics,
         "original_runs": len(original),
@@ -246,12 +274,18 @@ async def evaluate() -> dict[str, Any]:
         "unconfirmed_meal_writes": int(meal_count or 0),
         "proposal_count": int(proposal_count or 0),
         "fit_counts": fit_counts,
+        "intent_timeout_runs": intent_timeout_runs,
+        "rules_fallback_runs": rules_fallback_runs,
+        "semantic_misroute_runs": semantic_misroute_runs,
+        "optimizer_unavailable_runs": optimizer_unavailable_runs,
         "passed": (
             original_successes == 10
             and synonym_successes / len(synonyms) >= 0.95
             and mutation_misroutes == 0
             and int(meal_count or 0) == 0
             and int(proposal_count or 0) == 0
+            and rules_fallback_runs == 0
+            and optimizer_unavailable_runs == 0
         ),
         "results": results,
     }
@@ -263,7 +297,46 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--strict", action="store_true")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--repeat", type=int, default=1, choices=range(1, 4))
+    parser.add_argument("--candidate-sha")
     return parser.parse_args()
+
+
+async def evaluate_repeated(repeat: int) -> dict[str, Any]:
+    passes = [
+        await evaluate(pass_index=pass_index)
+        for pass_index in range(1, repeat + 1)
+    ]
+    if repeat == 1:
+        return passes[0]
+    return {
+        "schema_version": "2.0",
+        "model": settings.AGENT_MODEL,
+        "repeat": repeat,
+        "passed": all(item["passed"] for item in passes),
+        "original_successes": sum(
+            item["original_successes"] for item in passes
+        ),
+        "original_runs": sum(item["original_runs"] for item in passes),
+        "synonym_successes": sum(
+            item["synonym_successes"] for item in passes
+        ),
+        "synonym_runs": sum(item["synonym_runs"] for item in passes),
+        "generation_as_mutation_count": sum(
+            item["generation_as_mutation_count"] for item in passes
+        ),
+        "unconfirmed_meal_writes": sum(
+            item["unconfirmed_meal_writes"] for item in passes
+        ),
+        "proposal_count": sum(item["proposal_count"] for item in passes),
+        "rules_fallback_runs": sum(
+            item["rules_fallback_runs"] for item in passes
+        ),
+        "optimizer_unavailable_runs": sum(
+            item["optimizer_unavailable_runs"] for item in passes
+        ),
+        "passes": passes,
+    }
 
 
 def _fatal_report(*, stage: str, error_type: str) -> dict[str, Any]:
@@ -282,6 +355,10 @@ def _fatal_report(*, stage: str, error_type: str) -> dict[str, Any]:
             "within_target": 0,
             "acceptable_deviation": 0,
         },
+        "intent_timeout_runs": 0,
+        "rules_fallback_runs": 0,
+        "semantic_misroute_runs": 0,
+        "optimizer_unavailable_runs": 0,
         "passed": False,
         "fatal_error": {
             "stage": stage,
@@ -298,36 +375,59 @@ def _write_report(report: dict[str, Any], output: Path | None) -> None:
         output.write_text(encoded + "\n", encoding="utf-8")
 
 
+def _decorate_report(
+    report: dict[str, Any], *, candidate_sha: str | None
+) -> dict[str, Any]:
+    report["candidate_sha"] = candidate_sha
+    report["router_version"] = "semantic_route_v2"
+    for pass_report in report.get("passes", []):
+        if isinstance(pass_report, dict):
+            pass_report["candidate_sha"] = candidate_sha
+            pass_report["router_version"] = "semantic_route_v2"
+    return report
+
+
 def main() -> int:
     args = parse_args()
     if not settings.DEEPSEEK_API_KEY:
         _write_report(
-            _fatal_report(
+            _decorate_report(_fatal_report(
                 stage="configuration",
                 error_type="missing_deepseek_api_key",
-            ),
+            ), candidate_sha=args.candidate_sha),
             args.output,
         )
         print("DEEPSEEK_API_KEY is required", file=sys.stderr)
         return 2
     try:
-        report = asyncio.run(evaluate())
+        report = asyncio.run(
+            evaluate() if args.repeat == 1 else evaluate_repeated(args.repeat)
+        )
     except LiveEvaluationPrerequisiteError as exc:
         report = _fatal_report(
             stage="prerequisites",
             error_type=exc.code,
         )
         report["prerequisites"] = exc.diagnostics
-        _write_report(report, args.output)
+        _write_report(
+            _decorate_report(report, candidate_sha=args.candidate_sha),
+            args.output,
+        )
         return 1
     except Exception as exc:  # keep the Actions artifact safe and actionable
         report = _fatal_report(
             stage="evaluation",
             error_type=type(exc).__name__,
         )
-        _write_report(report, args.output)
+        _write_report(
+            _decorate_report(report, candidate_sha=args.candidate_sha),
+            args.output,
+        )
         return 1
-    _write_report(report, args.output)
+    _write_report(
+        _decorate_report(report, candidate_sha=args.candidate_sha),
+        args.output,
+    )
     return 1 if args.strict and not report["passed"] else 0
 
 

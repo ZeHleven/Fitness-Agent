@@ -10,6 +10,7 @@ from app.services.daily_meal_optimizer import (
     nutrition_fit,
     optimize_daily_meal_amounts,
 )
+from app.services import daily_meal_optimizer as optimizer_module
 
 
 STANDARD_FOODS = [
@@ -242,6 +243,55 @@ def test_optimizer_timeout_does_not_fall_back_to_unverified_amounts():
     with patch(
         "app.services.daily_meal_optimizer.milp",
         return_value=timed_out,
+    ):
+        with pytest.raises(DailyMealOptimizationError) as error:
+            optimize_daily_meal_amounts(
+                meals=_standard_meals(),
+                food_candidates=STANDARD_FOODS,
+                existing_totals=EMPTY_TOTALS,
+                targets=STANDARD_TARGETS,
+                mode="ideal",
+            )
+    assert error.value.code == "daily_meal_optimizer_timeout_no_solution"
+
+
+def test_optimizer_accepts_time_limited_feasible_incumbent_after_validation():
+    real_milp = optimizer_module.milp
+
+    def time_limited_with_incumbent(*args, **kwargs):
+        result = real_milp(*args, **kwargs)
+        result.success = False
+        result.status = 1
+        return result
+
+    with patch(
+        "app.services.daily_meal_optimizer.milp",
+        side_effect=time_limited_with_incumbent,
+    ):
+        optimized = optimize_daily_meal_amounts(
+            meals=_standard_meals(),
+            food_candidates=STANDARD_FOODS,
+            existing_totals=EMPTY_TOTALS,
+            targets=STANDARD_TARGETS,
+            mode="ideal",
+        )
+
+    assert optimized.solver_status == "feasible_incumbent"
+    assert nutrition_fit(
+        _totals(optimized.meals, STANDARD_FOODS), STANDARD_TARGETS
+    )["status"] == "within_target"
+
+
+def test_optimizer_rejects_invalid_time_limited_incumbent():
+    invalid = SimpleNamespace(
+        success=False,
+        status=1,
+        x=[0.5],
+        fun=0.0,
+    )
+    with patch(
+        "app.services.daily_meal_optimizer.milp",
+        return_value=invalid,
     ):
         with pytest.raises(DailyMealOptimizationError) as error:
             optimize_daily_meal_amounts(
