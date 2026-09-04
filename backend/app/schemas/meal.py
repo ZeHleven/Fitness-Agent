@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from typing import Literal, Optional
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class MealItemCreate(BaseModel):
@@ -11,6 +11,14 @@ class MealItemCreate(BaseModel):
     protein_g: float = Field(default=0.0, ge=0, le=5000)
     carbs_g: float = Field(default=0.0, ge=0, le=5000)
     fat_g: float = Field(default=0.0, ge=0, le=5000)
+
+    @field_validator("food_name")
+    @classmethod
+    def normalize_food_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("食物名称不能为空")
+        return normalized
 
 
 class MealItemResponse(BaseModel):
@@ -37,6 +45,10 @@ class MealLogCreate(BaseModel):
         if self.logged_at > date.today():
             raise ValueError("不能记录未来的饮食")
         return self
+
+
+class MealLogUpdate(MealLogCreate):
+    """A complete replacement candidate for an existing meal."""
 
 
 class MealLogResponse(BaseModel):

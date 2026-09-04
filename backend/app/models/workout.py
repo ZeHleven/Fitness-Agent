@@ -61,6 +61,12 @@ class WorkoutSession(Base):
     adjustments_data: Mapped[list] = mapped_column(
         JSONB, default=list, server_default=text("'[]'::jsonb")
     )
+    adaptive_proposal_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("agent_proposals.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

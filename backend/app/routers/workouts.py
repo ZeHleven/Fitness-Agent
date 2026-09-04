@@ -607,7 +607,7 @@ async def complete_session(
         select(WorkoutSession).where(
             WorkoutSession.id == session_id,
             WorkoutSession.user_id == current_user.id,
-        )
+        ).with_for_update()
     )
     if not session:
         raise HTTPException(status_code=404, detail="训练记录不存在")
@@ -628,14 +628,32 @@ async def complete_session(
         pain_areas=body.pain_areas,
         feedback_notes=body.feedback_notes,
     )
-    from app.services.adaptive_planner import apply_adaptive_adjustments
+    from app.services.adaptive_planner import build_adaptive_adjustment_proposals
+    from app.services.plan_management_proposals import (
+        PlanProposalError,
+        create_workout_completion_adjustment_proposal,
+    )
 
-    adjustments = await apply_adaptive_adjustments(
+    adaptive_proposals = await build_adaptive_adjustment_proposals(
         db,
         session=session,
         session_exercises=list(exercises),
         feedback=feedback,
     )
+    try:
+        proposal, adaptive_status, adjustments = (
+            await create_workout_completion_adjustment_proposal(
+                db,
+                session=session,
+                proposals=adaptive_proposals,
+            )
+        )
+    except PlanProposalError:
+        # A stale or otherwise unsuitable plan must never prevent the completed
+        # workout itself from being saved.
+        proposal = None
+        adaptive_status = "failed"
+        adjustments = []
     feedback_fields = {
         "difficulty_feedback",
         "perceived_exertion",
@@ -650,6 +668,7 @@ async def complete_session(
         else {}
     )
     session.adjustments_data = adjustments
+    session.adaptive_proposal_id = proposal.id if proposal is not None else None
 
     now = datetime.now(timezone.utc)
     started_at = session.started_at
@@ -662,7 +681,10 @@ async def complete_session(
     if body.notes is not None:
         session.notes = body.notes
     await db.commit()
-    return await build_session_detail(db, session)
+    result = await build_session_detail(db, session)
+    if adaptive_status in {"blocked_by_existing", "failed"}:
+        result.adaptive_adjustment_status = adaptive_status
+    return result
 
 
 @router.delete("/sessions/{session_id}", status_code=204)

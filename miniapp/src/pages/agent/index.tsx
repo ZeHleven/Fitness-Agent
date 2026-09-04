@@ -28,6 +28,7 @@ import { planManagementApi } from '../../services/plan-management'
 import type {
   AgentArtifactAction,
   AgentCard,
+  AgentClarificationAction,
   AgentMessage
 } from '../../types/api'
 import type { PlanAdjustmentProposalReference } from '../../types/plan-adjustment-proposal'
@@ -41,6 +42,8 @@ interface DisplayMessage {
   cards: AgentCard[]
   proposal: PlanAdjustmentProposalReference | null
 }
+
+type AgentCardAction = AgentArtifactAction | AgentClarificationAction
 
 
 const quickPrompts = [
@@ -87,6 +90,24 @@ export default function AgentPage () {
   const messagesRef = useRef(messages)
   messagesRef.current = messages
 
+  async function restoreConversation (savedId: string) {
+    setLoading(true)
+    setError('')
+    try {
+      const history = await agentApi.messages(savedId)
+      const restored = history
+        .filter(item => item.role === 'user' || item.role === 'assistant')
+        .map(toDisplayMessage)
+      setConversationId(savedId)
+      setMessages(restored.length ? restored : [welcomeMessage])
+      if (restored.length) void synchronizeProposalReferences(restored)
+    } catch (requestError) {
+      setError(errorMessage(requestError, '历史对话加载失败，你仍可开始新对话'))
+    } finally {
+      setLoading(false)
+    }
+  }
+
   useLoad(() => {
     const loadConversation = async () => {
       const savedId = getAgentConversationId()
@@ -96,25 +117,18 @@ export default function AgentPage () {
         if (pending) void resumePendingRequest(pending)
         return
       }
-      try {
-        const history = await agentApi.messages(savedId)
-        const restored = history
-          .filter(item => item.role === 'user' || item.role === 'assistant')
-          .map(toDisplayMessage)
-        setConversationId(savedId)
-        setMessages(restored.length ? restored : [welcomeMessage])
-        if (restored.length) void synchronizeProposalReferences(restored)
-      } catch (requestError) {
-        setError(errorMessage(requestError, '历史对话加载失败，你仍可开始新对话'))
-      } finally {
-        setLoading(false)
-        if (pending) void resumePendingRequest(pending)
-      }
+      await restoreConversation(savedId)
+      if (pending) void resumePendingRequest(pending)
     }
     void loadConversation()
   })
 
   useDidShow(() => {
+    const selectedId = getAgentConversationId()
+    if (selectedId && selectedId !== conversationId && !getPendingAgentRequest()) {
+      void restoreConversation(selectedId)
+      return
+    }
     void synchronizeProposalReferences(messagesRef.current)
   })
 
@@ -203,7 +217,8 @@ export default function AgentPage () {
           pending.message,
           pending.client_request_id,
           pending.conversation_id,
-          pending.artifact_action
+          pending.artifact_action,
+          pending.clarification_action
         )
         pending = {
           ...pending,
@@ -262,7 +277,7 @@ export default function AgentPage () {
 
   const send = async (
     prompt?: string,
-    artifactAction?: AgentArtifactAction
+    action?: AgentCardAction
   ) => {
     const content = (prompt || input).trim()
     if (!content || sending || sendLock.current) return
@@ -279,7 +294,8 @@ export default function AgentPage () {
         client_request_id: createClientRequestId(),
         message: content,
         ...(conversationId ? { conversation_id: conversationId } : {}),
-        ...(artifactAction ? { artifact_action: artifactAction } : {}),
+        ...(action?.action === 'save_as_proposal' ? { artifact_action: action } : {}),
+        ...(action?.action === 'select_plan_occurrences' ? { clarification_action: action } : {}),
         created_at: Date.now()
       }
       savePendingAgentRequest(pending)
@@ -325,7 +341,10 @@ export default function AgentPage () {
           <Text className='agent-title'>和训练搭子聊聊</Text>
           <Text className='agent-build'>{miniappBuildLabel()}</Text>
         </View>
-        <View className='new-chat' onClick={startNewConversation}>新对话</View>
+        <View className='agent-header-actions'>
+          <View className='chat-history' onClick={() => Taro.navigateTo({ url: '/pages/agent-conversations/index' })}>历史</View>
+          <View className='new-chat' onClick={startNewConversation}>新对话</View>
+        </View>
       </View>
 
       {error && <View className='error-banner agent-error'>{error}</View>}
@@ -517,6 +536,27 @@ function textValue (value: unknown, fallback = '—'): string {
   return fallback
 }
 
+function clarificationActionFromUnknown (
+  value: unknown
+): AgentClarificationAction | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const action = value as Partial<AgentClarificationAction>
+  if (
+    action.action !== 'select_plan_occurrences' ||
+    typeof action.origin_run_id !== 'string' ||
+    !action.origin_run_id ||
+    !Array.isArray(action.choice_ids) ||
+    action.choice_ids.length < 1 ||
+    action.choice_ids.length > 7 ||
+    action.choice_ids.some(item => typeof item !== 'string' || !item.startsWith('planned:'))
+  ) return null
+  return {
+    action: action.action,
+    origin_run_id: action.origin_run_id,
+    choice_ids: action.choice_ids
+  }
+}
+
 function evidenceLabel (value: string): string {
   return ({
     profile_summary: '个人档案',
@@ -533,7 +573,7 @@ function AgentDataCard ({
   onAction
 }: {
   card: AgentCard
-  onAction: (prompt: string, action?: AgentArtifactAction) => void
+  onAction: (prompt: string, action?: AgentCardAction) => void
 }) {
   const data = card.data
   const titleMap: Record<string, string> = {
@@ -547,6 +587,31 @@ function AgentDataCard ({
     daily_meal_plan: '今日全天饮食方案'
   }
   const title = titleMap[card.type] || '查询结果'
+
+  if (card.type === 'clarification_choices') {
+    const options = asList(data.options).map(asRecord)
+    return (
+      <View className='agent-data-card clarification-card'>
+        <Text className='data-card-title'>{textValue(data.title, '请选择')}</Text>
+        <View className='clarification-options'>
+          {options.map((option, index) => {
+            const action = clarificationActionFromUnknown(option.action)
+            const message = textValue(option.message, textValue(option.label, '选择'))
+            return (
+              <Button
+                className='clarification-option'
+                disabled={!action}
+                key={`${textValue(option.label)}-${index}`}
+                onClick={() => { if (action) onAction(message, action) }}
+              >
+                {textValue(option.label, '选择')}
+              </Button>
+            )
+          })}
+        </View>
+      </View>
+    )
+  }
 
   if (card.type === 'daily_meal_plan') {
     const targets = asRecord(data.nutrition_targets)

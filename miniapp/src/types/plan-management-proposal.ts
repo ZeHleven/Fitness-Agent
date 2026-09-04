@@ -121,7 +121,7 @@ export interface PlanProposalReference {
 export interface ManualPlanProposalReadResponse {
   id: string
   proposal_type: 'plan_adjustment_v2' | 'plan_deletion_v1'
-  origin: 'manual_editor' | 'agent_chat'
+  origin: 'manual_editor' | 'agent_chat' | 'workout_completion'
   status: PlanAdjustmentProposalStatus
   version: number
   payload_fingerprint: string
@@ -149,7 +149,7 @@ export interface GenericProposalDecisionResponse {
 export interface GenericProposalReadResponse {
   id: string
   proposal_type: string
-  origin: 'manual_editor' | 'agent_chat'
+  origin: 'manual_editor' | 'agent_chat' | 'workout_completion'
   status: PlanAdjustmentProposalStatus
   version: number
   payload_fingerprint: string

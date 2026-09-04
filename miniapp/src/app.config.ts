@@ -11,6 +11,7 @@ export default defineAppConfig({
     'pages/workouts/index',
     'pages/nutrition/index',
     'pages/agent/index',
+    'pages/agent-conversations/index',
     'pages/me/index',
     'pages/profile-edit/index',
     'pages/health-edit/index',

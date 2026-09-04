@@ -168,6 +168,20 @@ export default function WorkoutsPage () {
                 {plan.safety_reasons.map(reason => (
                   <Text className='plan-safety-reason' key={reason}>· {reason}</Text>
                 ))}
+                {plan.manual_proposals_enabled
+                  ? (
+                    <Button
+                      className='repair-plan-button'
+                      onClick={() => Taro.navigateTo({
+                        url: `/pages/plan-editor/index?id=${encodeURIComponent(plan.id)}`
+                      })}
+                    >
+                      修复计划
+                    </Button>
+                    )
+                  : (
+                    <Text className='plan-safety-disabled'>当前环境未开启手动计划提案，暂时不能在小程序内修复。请联系管理员开启后再编辑。</Text>
+                    )}
               </View>
             )}
             {plan.is_active && plan.manual_proposals_enabled && (

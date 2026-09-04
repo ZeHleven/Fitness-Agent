@@ -1,5 +1,5 @@
 import pytest
-from datetime import date
+from datetime import date, timedelta
 
 
 async def get_token(client, email):
@@ -134,3 +134,167 @@ async def test_history_returns_dates(client):
     data = resp.json()
     assert len(data) == 1  # same date → one DailySummary
     assert len(data[0]["meals"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_update_meal_replaces_all_items_and_recalculates_standard_food(
+    client, db_session
+):
+    from app.models.food import Food
+
+    food = Food(
+        id="meal-update-standard-food",
+        name_zh="标准燕麦",
+        category="主食",
+        calories_per_100g=380,
+        protein_g=13,
+        carbs_g=68,
+        fat_g=7,
+        is_active=True,
+    )
+    db_session.add(food)
+    await db_session.commit()
+    token = await get_token(client, "meal-update@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    created = await client.post(
+        "/api/v1/meals",
+        json={
+            "logged_at": str(date.today()),
+            "meal_type": "早餐",
+            "items": [{
+                "food_name": "客户端伪造名称",
+                "food_id": food.id,
+                "amount_g": 50,
+                "calories": 9999,
+                "protein_g": 999,
+                "carbs_g": 999,
+                "fat_g": 999,
+            }],
+        },
+        headers=headers,
+    )
+    meal_id = created.json()["id"]
+
+    updated = await client.put(
+        f"/api/v1/meals/{meal_id}",
+        json={
+            "logged_at": str(date.today() - timedelta(days=1)),
+            "meal_type": "加餐",
+            "items": [
+                {
+                    "food_name": "仍然伪造",
+                    "food_id": food.id,
+                    "amount_g": 150,
+                    "calories": 1,
+                    "protein_g": 1,
+                    "carbs_g": 1,
+                    "fat_g": 1,
+                },
+                {
+                    "food_name": "自定义酸奶",
+                    "amount_g": 120,
+                    "calories": 86,
+                    "protein_g": 5,
+                    "carbs_g": 10,
+                    "fat_g": 2,
+                },
+            ],
+        },
+        headers=headers,
+    )
+    assert updated.status_code == 200
+    payload = updated.json()
+    assert payload["meal_type"] == "加餐"
+    assert payload["items"][0]["food_name"] == "标准燕麦"
+    assert payload["items"][0]["calories"] == 570
+    assert payload["items"][0]["protein_g"] == 19.5
+    assert len(payload["items"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_update_meal_validation_failure_keeps_original_items(client):
+    token = await get_token(client, "meal-update-rollback@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    created = await client.post(
+        "/api/v1/meals",
+        json={
+            "logged_at": str(date.today()),
+            "meal_type": "午餐",
+            "items": [{
+                "food_name": "原餐",
+                "amount_g": 100,
+                "calories": 120,
+                "protein_g": 8,
+                "carbs_g": 15,
+                "fat_g": 3,
+            }],
+        },
+        headers=headers,
+    )
+    meal_id = created.json()["id"]
+    rejected = await client.put(
+        f"/api/v1/meals/{meal_id}",
+        json={
+            "logged_at": str(date.today()),
+            "meal_type": "晚餐",
+            "items": [{
+                "food_id": "missing-food",
+                "food_name": "不存在",
+                "amount_g": 100,
+                "calories": 0,
+                "protein_g": 0,
+                "carbs_g": 0,
+                "fat_g": 0,
+            }],
+        },
+        headers=headers,
+    )
+    assert rejected.status_code == 400
+    history = await client.get("/api/v1/meals/history", headers=headers)
+    saved = next(
+        meal
+        for day in history.json()
+        for meal in day["meals"]
+        if meal["id"] == meal_id
+    )
+    assert saved["meal_type"] == "午餐"
+    assert saved["items"][0]["food_name"] == "原餐"
+
+
+@pytest.mark.asyncio
+async def test_update_meal_rejects_records_outside_thirty_days(client):
+    token = await get_token(client, "meal-update-old@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    created = await client.post(
+        "/api/v1/meals",
+        json={
+            "logged_at": str(date.today() - timedelta(days=30)),
+            "meal_type": "午餐",
+            "items": [{
+                "food_name": "旧餐",
+                "amount_g": 100,
+                "calories": 120,
+                "protein_g": 8,
+                "carbs_g": 15,
+                "fat_g": 3,
+            }],
+        },
+        headers=headers,
+    )
+    rejected = await client.put(
+        f"/api/v1/meals/{created.json()['id']}",
+        json={
+            "logged_at": str(date.today()),
+            "meal_type": "晚餐",
+            "items": [{
+                "food_name": "新餐",
+                "amount_g": 100,
+                "calories": 120,
+                "protein_g": 8,
+                "carbs_g": 15,
+                "fat_g": 3,
+            }],
+        },
+        headers=headers,
+    )
+    assert rejected.status_code == 409

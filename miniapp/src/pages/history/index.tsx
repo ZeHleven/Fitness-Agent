@@ -86,7 +86,9 @@ export default function HistoryPage () {
               </View>
               <View className='history-tags'>
                 {records > 0 && <Text className='record-tag'>🏆 {records} 个纪录</Text>}
-                {session.adjustments.length > 0 && <Text className='adjusted-tag'>已调整 {session.adjustments.length} 项</Text>}
+                {session.adjustments.length > 0 && (
+                  <Text className='adjusted-tag'>{adaptiveStatusLabel(session)}</Text>
+                )}
               </View>
             </View>
             <View className='session-metrics'>
@@ -105,7 +107,7 @@ export default function HistoryPage () {
             </View>
             {session.adjustments.length > 0 && (
               <View className='history-adjustments'>
-                <Text className='history-adjustment-title'>下一练调整</Text>
+                <Text className='history-adjustment-title'>下一练建议 · {adaptiveStatusLabel(session)}</Text>
                 {session.adjustments.slice(0, 3).map((item, index) => (
                   <Text className='history-adjustment-line' key={`${item.exercise_id}-${index}`}>
                     {item.exercise_name}：{item.reason}
@@ -137,4 +139,17 @@ function shortDate (value: string): string {
 function formatDate (value: string): string {
   const [year, month, day] = value.split('-')
   return `${year}年${Number(month)}月${Number(day)}日`
+}
+
+function adaptiveStatusLabel (session: WorkoutSession): string {
+  return ({
+    pending_confirmation: `待确认 ${session.adjustments.length} 项`,
+    applied: `已应用 ${session.adjustments.length} 项`,
+    rejected: '已拒绝',
+    expired: '已过期',
+    stale: '已失效',
+    failed: '生成失败',
+    blocked_by_existing: '被现有提案阻止',
+    not_needed: '目标未变'
+  } as const)[session.adaptive_adjustment_status] || '状态未知'
 }

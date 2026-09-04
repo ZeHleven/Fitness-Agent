@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.exercise import Exercise
+from app.models.agent import AgentProposal
 from app.models.profile import UserProfile
 from app.models.workout import PlannedExercise, SessionExercise, WorkoutPlan, WorkoutSession
 from app.schemas.workout import (
@@ -13,6 +14,7 @@ from app.schemas.workout import (
     SessionExerciseResponse,
     WeeklyWorkoutProgress,
     WorkoutAdjustmentResponse,
+    AdaptiveAdjustmentProposalResponse,
     WorkoutFeedback,
     WorkoutPlanDetail,
     WorkoutProgressResponse,
@@ -331,6 +333,37 @@ async def build_session_detail(
         for item in adjustment_data
         if isinstance(item, dict)
     ]
+    if session.adaptive_proposal_id:
+        proposal = await db.scalar(select(AgentProposal).where(
+            AgentProposal.id == session.adaptive_proposal_id,
+            AgentProposal.user_id == session.user_id,
+            AgentProposal.proposal_type == "plan_adjustment_v2",
+        ))
+        if (
+            proposal is not None
+            and proposal.expires_at is not None
+            and proposal.payload_fingerprint is not None
+        ):
+            proposal_status = proposal.status
+            if (
+                proposal_status == "pending_confirmation"
+                and datetime.now(timezone.utc) >= proposal.expires_at
+            ):
+                proposal_status = "expired"
+            result.adaptive_adjustment_status = proposal_status
+            result.adaptive_adjustment_proposal = (
+                AdaptiveAdjustmentProposalResponse(
+                    id=proposal.id,
+                    proposal_type="plan_adjustment_v2",
+                    status=proposal_status,
+                    version=proposal.version,
+                    expires_at=proposal.expires_at,
+                    payload_fingerprint=proposal.payload_fingerprint,
+                )
+            )
+    elif result.adjustments:
+        # Sessions completed before 0.5.32 applied adjustments immediately.
+        result.adaptive_adjustment_status = "applied"
     return result
 
 

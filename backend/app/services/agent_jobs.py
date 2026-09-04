@@ -38,6 +38,7 @@ async def _validate_idempotent_replay(
     user_message: str,
     conversation: AgentConversation | None,
     artifact_action: dict | None,
+    clarification_action: dict | None,
 ) -> None:
     stored_message = await db.scalar(
         select(AgentMessage).where(
@@ -56,6 +57,13 @@ async def _validate_idempotent_replay(
         raise AgentIdempotencyConflict(
             "client_request_id 已被另一项卡片操作使用"
         )
+    if (
+        (stored_message.content_data or {}).get("clarification_action")
+        != clarification_action
+    ):
+        raise AgentIdempotencyConflict(
+            "client_request_id 已被另一项澄清选择使用"
+        )
     if conversation is not None and run.conversation_id != conversation.id:
         raise AgentIdempotencyConflict(
             "client_request_id 已被另一会话使用"
@@ -70,6 +78,7 @@ async def enqueue_agent_run(
     client_request_id: str,
     conversation: AgentConversation | None,
     artifact_action: dict | None = None,
+    clarification_action: dict | None = None,
 ) -> EnqueuedAgentRun:
     requested_conversation = conversation
     existing = await db.scalar(
@@ -85,6 +94,7 @@ async def enqueue_agent_run(
             user_message=user_message,
             conversation=requested_conversation,
             artifact_action=artifact_action,
+            clarification_action=clarification_action,
         )
         existing_conversation = await db.get(
             AgentConversation,
@@ -130,6 +140,11 @@ async def enqueue_agent_run(
                     if artifact_action is not None
                     else {}
                 ),
+                **(
+                    {"clarification_action": clarification_action}
+                    if clarification_action is not None
+                    else {}
+                ),
             },
         ))
         conversation.updated_at = datetime.now(timezone.utc)
@@ -150,6 +165,7 @@ async def enqueue_agent_run(
             user_message=user_message,
             conversation=requested_conversation,
             artifact_action=artifact_action,
+            clarification_action=clarification_action,
         )
         existing_conversation = await db.get(
             AgentConversation,
@@ -373,6 +389,9 @@ async def process_agent_run(
                 user_message=user_message.content,
                 artifact_action=(user_message.content_data or {}).get(
                     "artifact_action"
+                ),
+                clarification_action=(user_message.content_data or {}).get(
+                    "clarification_action"
                 ),
                 expected_attempt_count=expected_attempt_count,
             )

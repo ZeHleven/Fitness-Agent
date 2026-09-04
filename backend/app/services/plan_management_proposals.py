@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import ValidationError
 from sqlalchemy import delete, select, update
@@ -32,6 +32,9 @@ from app.schemas.plan_management_proposal import (
 )
 from app.services.personalized_planner import is_exercise_compatible
 from app.services.workout_queries import get_active_user_session
+
+if TYPE_CHECKING:
+    from app.services.adaptive_planner import AdaptiveAdjustmentProposal
 
 
 PLAN_MANAGEMENT_TYPES = ("plan_adjustment_v2", "plan_deletion_v1")
@@ -421,6 +424,18 @@ def compile_plan_changes(
     return changes
 
 
+def _change_effects(changes: list[PlanChangeV2]) -> list[dict[str, Any]]:
+    """Compare executable change semantics independently of display copy."""
+    return [
+        {
+            key: value
+            for key, value in change.model_dump(mode="json").items()
+            if key not in {"reason", "safety_priority"}
+        }
+        for change in changes
+    ]
+
+
 def _proposal_reference(proposal: AgentProposal) -> PlanProposalReference:
     if proposal.expires_at is None or proposal.payload_fingerprint is None:
         raise ValueError("proposal lifecycle metadata is incomplete")
@@ -513,6 +528,139 @@ async def _supersede_pending_plan_proposals(
         proposal.last_error_code = "proposal_superseded"
 
 
+async def create_workout_completion_adjustment_proposal(
+    db: AsyncSession,
+    *,
+    session: WorkoutSession,
+    proposals: list["AdaptiveAdjustmentProposal"],
+    now: datetime | None = None,
+) -> tuple[PlanProposalReference | None, str, list[dict[str, Any]]]:
+    """Persist safe adaptive suggestions without applying them to the plan."""
+    effective = [item for item in proposals if item.before != item.after]
+    if not effective or session.plan_id is None:
+        return None, "not_needed", []
+
+    pending = list((await db.execute(
+        select(AgentProposal)
+        .where(
+            AgentProposal.user_id == session.user_id,
+            AgentProposal.base_plan_id == session.plan_id,
+            AgentProposal.proposal_type.in_((
+                "plan_adjustment_v1", "plan_adjustment_v2", "plan_deletion_v1"
+            )),
+            AgentProposal.status == "pending_confirmation",
+        )
+        .with_for_update()
+    )).scalars().all())
+    explicit = [item for item in pending if item.origin != "workout_completion"]
+    if explicit:
+        return None, "blocked_by_existing", []
+
+    plan = await _owned_plan(
+        db,
+        user_id=session.user_id,
+        plan_id=session.plan_id,
+        lock=True,
+    )
+    profile = await _profile_for_update(db, user_id=session.user_id, lock=True)
+    before = await build_plan_snapshot_v2(db, plan=plan, lock=True)
+    before_by_key = {item.item_key: item for item in before.exercises}
+    proposal_by_key = {
+        f"planned:{item.planned_exercise_id}": item for item in effective
+    }
+    if not set(proposal_by_key).issubset(before_by_key):
+        raise PlanProposalError(
+            "proposal_base_plan_changed",
+            "训练完成后活动计划已变化，未生成调整提案",
+        )
+
+    after_items: list[PlanExerciseSnapshotV2] = []
+    for item in before.exercises:
+        adaptive = proposal_by_key.get(item.item_key)
+        if adaptive is None:
+            after_items.append(item)
+            continue
+        after_items.append(item.model_copy(update={
+            "exercise_id": adaptive.after["exercise_id"],
+            "exercise_name": adaptive.after["exercise_name"],
+            "sets": adaptive.after["sets"],
+            "reps": adaptive.after["reps"],
+            "rest_seconds": adaptive.after["rest_seconds"],
+            "recommended_weight_kg": adaptive.after["recommended_weight_kg"],
+        }))
+    candidate = PlanCandidate(
+        duration_weeks=before.duration_weeks,
+        training_days=before.training_days,
+        exercises=[{
+            key: value
+            for key, value in item.model_dump().items()
+            if key not in {"exercise_name", "category"}
+        } for item in after_items],
+    )
+    after, _ = await _hydrate_candidate(
+        db,
+        before=before,
+        candidate=candidate,
+        profile=profile,
+        lock=True,
+    )
+    changes = compile_plan_changes(before, after)
+    if not changes:
+        return None, "not_needed", []
+    for change in changes:
+        adaptive = proposal_by_key.get(change.stable_display_key)
+        if adaptive is not None:
+            change.reason = adaptive.reason
+            change.safety_priority = adaptive.safety_priority
+
+    for old in pending:
+        old.status = "stale"
+        old.version += 1
+        old.last_error_code = "proposal_superseded_by_workout"
+
+    target = PlanProposalTarget(
+        base_plan_id=plan.id,
+        base_plan_fingerprint=plan_snapshot_fingerprint(before),
+        health_context_fingerprint=health_context_fingerprint(profile),
+    )
+    payload = PlanAdjustmentPayloadV2(
+        target=target,
+        before=before,
+        after=after,
+        changes=changes,
+        rationale=["根据本次训练完成度和你提交的主观反馈生成。"],
+        safety_notes=[
+            "当前仅保存为待确认建议；确认前不会修改活动计划。",
+            "确认时会重新检查计划版本、动作可用性和最新健康资料。",
+        ],
+    )
+    moment = now or datetime.now(timezone.utc)
+    payload_data = payload.model_dump(mode="json")
+    proposal = AgentProposal(
+        user_id=session.user_id,
+        conversation_id=None,
+        run_id=None,
+        proposal_type="plan_adjustment_v2",
+        origin="workout_completion",
+        creation_client_request_id=f"workout-completion:{session.id}:adaptive-v1",
+        target_kind="workout_plan",
+        target_id=plan.id,
+        payload_data=payload_data,
+        payload_fingerprint=_fingerprint(payload_data),
+        base_plan_id=plan.id,
+        base_plan_fingerprint=target.base_plan_fingerprint,
+        status="pending_confirmation",
+        expires_at=moment + timedelta(hours=48),
+    )
+    db.add(proposal)
+    await db.flush()
+    return (
+        _proposal_reference(proposal),
+        "pending_confirmation",
+        [item.to_response() for item in effective],
+    )
+
+
 async def create_manual_plan_adjustment_proposal(
     db: AsyncSession,
     *,
@@ -521,7 +669,7 @@ async def create_manual_plan_adjustment_proposal(
     plan_id: str,
     request: CreatePlanAdjustmentProposalRequest,
     now: datetime | None = None,
-    origin: Literal["agent_chat", "manual_editor"] = "manual_editor",
+    origin: Literal["agent_chat", "manual_editor", "workout_completion"] = "manual_editor",
     conversation_id: str | None = None,
     run_id: str | None = None,
 ) -> PlanProposalReference:
@@ -825,7 +973,11 @@ async def _apply_adjustment_v2(
         profile=profile,
         lock=True,
     )
-    if hydrated != payload.after or compile_plan_changes(current, hydrated) != payload.changes:
+    if (
+        hydrated != payload.after
+        or _change_effects(compile_plan_changes(current, hydrated))
+        != _change_effects(payload.changes)
+    ):
         raise PlanProposalError("proposal_payload_invalid", "提案差异校验失败")
 
     new_plan = WorkoutPlan(

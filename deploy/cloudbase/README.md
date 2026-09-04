@@ -3,14 +3,14 @@
 Release ZIP 是可重复生成的部署产物，不提交到 Git。构建当前版本：
 
 ```powershell
-.\scripts\package_cloudbase_backend.ps1 -Version 0.5.30
+.\scripts\package_cloudbase_backend.ps1 -Version 0.5.32
 ```
 
-输出文件为 `deploy/cloudbase/fitness-agent-backend-0.5.30.zip`。
+输出文件为 `deploy/cloudbase/fitness-agent-backend-0.5.32.zip`。
 
-`0.5.30` 将 Agent 路由收敛为受约束的 `SemanticRouteV2`：模型只输出领域、动作和证据需求，兼容用的历史意图字段由服务端投影且不能授权工具。普通请求不再由规则抢跑，模型失败时安全停止；Proposal 决策和健康红旗仍保留确定性优先级。全天饮食优化器会复验并采用超时前已找到的整数可行解，不再把“未证明最优”等同于服务故障。
+`0.5.32` 补齐五项核心闭环：健康复核计划可直接进入安全编辑器；首次开练按今天或最近训练日推荐；训练完成后的自适应建议改为待确认 Proposal；近 30 日餐次可原子编辑；Agent 支持历史会话和结构化澄清选项。
 
-本版本新增 Alembic `0025`，仅把新 Agent Run 的理解版本默认值更新为 `v6`，不重写历史记录。首次部署 `0.5.30` 时临时启用启动迁移，确认数据库为 `0025` 且 `/ready` 正常后关闭。打包脚本会拒绝包含 `.env`、测试目录、缓存或 Python 字节码的产物，并校验迁移、Proposal schema/service、Planner、Trace 与营养优化器核心文件齐全。
+本版本新增 Alembic `0026`，为训练完成生成的自适应 Proposal 增加来源约束，并让训练记录保存对应 Proposal 引用。首次部署 `0.5.32` 时临时启用启动迁移，确认数据库为 `0026` 且 `/ready` 正常后关闭。打包脚本会拒绝包含 `.env`、测试目录、缓存或 Python 字节码的产物，并校验迁移、Proposal schema/service、Planner、Trace 与营养优化器核心文件齐全。
 
 正式打包前还必须在 GitHub `main` 分支手动运行 `Daily Meal Live Model Release Gate`。该工作流先验证全领域真实模型语义路由，再对同一个完整 candidate SHA 顺序执行两轮全天饮食端到端评测；每轮都要求原句 10/10、20 条同义表达至少 19/20、优化器不可用次数为零，并验证未确认写入和意外 Proposal 均为零。评测报告只包含脱敏状态和统计，不记录个人资料、食品候选或模型原文。
 

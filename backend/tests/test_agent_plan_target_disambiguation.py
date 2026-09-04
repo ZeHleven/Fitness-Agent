@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 import bcrypt
@@ -17,7 +18,12 @@ from app.services.agent_intent import (
     IntentResolution,
     IntentResolverOutcome,
 )
-from app.services.agent_runtime import _resolve_plan_target_selection
+from app.schemas.agent import AgentClarificationActionRequest
+from app.services.agent_runtime import (
+    _plan_target_choice_card,
+    _resolve_plan_target_selection,
+    _resolve_structured_plan_target_selection,
+)
 from app.services.auth import create_access_token
 from app.services.plan_management_proposals import PlanProposalError
 
@@ -71,6 +77,9 @@ def _pending_clarification() -> dict:
         "risk_level": "low",
         "confidence": 0.98,
         "understanding_version": "v6",
+        "expires_at": (
+            datetime.now(timezone.utc) + timedelta(hours=1)
+        ).isoformat(),
         "clarification_context": {
             "clarification_type": "plan_exercise_occurrence",
             "target_reference": "卧推",
@@ -133,6 +142,39 @@ def test_persisted_day_choice_reuses_every_original_change():
     assert [item.value for item in outcome.resolution.change_requests] == [
         4, "8", 120, 50,
     ]
+
+
+def test_structured_choice_card_and_action_are_bound_to_saved_candidates():
+    pending = _pending_clarification()
+    pending["origin_run_id"] = "origin-run"
+    card = _plan_target_choice_card(
+        pending["clarification_context"], origin_run_id="origin-run"
+    )
+    assert card is not None
+    assert [item["label"] for item in card["data"]["options"]] == [
+        "周二的卧推", "周四的卧推", "全部匹配动作",
+    ]
+    action = AgentClarificationActionRequest(
+        action="select_plan_occurrences",
+        origin_run_id="origin-run",
+        choice_ids=["planned:bench-thursday"],
+    )
+    outcome = _resolve_structured_plan_target_selection(action, pending)
+    assert outcome is not None
+    assert {
+        item.target_reference for item in outcome.resolution.change_requests
+    } == {"planned:bench-thursday"}
+
+    forged = action.model_copy(update={"choice_ids": ["planned:forged"]})
+    assert _resolve_structured_plan_target_selection(forged, pending) is None
+
+    expired = {
+        **pending,
+        "expires_at": (
+            datetime.now(timezone.utc) - timedelta(seconds=1)
+        ).isoformat(),
+    }
+    assert _resolve_structured_plan_target_selection(action, expired) is None
 
 
 @pytest.mark.parametrize("message", ["两个都调整", "周二和周四都改"])
@@ -267,13 +309,23 @@ async def test_chat_clarifies_duplicate_action_then_creates_scoped_proposal(
         second = await client.post(
             "/api/v1/agent/chat",
             headers=headers,
-            json={"message": "周二", "conversation_id": conversation.id},
+            json={
+                "message": "选择周二的卧推",
+                "conversation_id": conversation.id,
+                "clarification_action": {
+                    "action": "select_plan_occurrences",
+                    "origin_run_id": first.json()["run_id"],
+                    "choice_ids": ["planned:bench-tuesday"],
+                },
+            },
         )
 
     assert first.status_code == 200
     assert "周二的卧推" in first.json()["reply"]
     assert "周四的卧推" in first.json()["reply"]
     assert "proposal" not in first.json()
+    assert first.json()["cards"][0]["type"] == "clarification_choices"
+    assert len(first.json()["cards"][0]["data"]["options"]) == 3
     assert second.status_code == 200
     assert second.json()["proposal"]["proposal_type"] == "plan_adjustment_v2"
     assert resolver.await_count == 1

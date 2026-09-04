@@ -462,9 +462,10 @@ class AgentProposal(Base):
             name="ck_agent_proposals_plan_adjustment_fields",
         ),
         CheckConstraint(
-            "origin IN ('agent_chat', 'manual_editor') AND "
+            "origin IN ('agent_chat', 'manual_editor', 'workout_completion') AND "
             "((origin = 'agent_chat' AND conversation_id IS NOT NULL) OR "
-            "(origin = 'manual_editor' AND conversation_id IS NULL AND run_id IS NULL))",
+            "(origin IN ('manual_editor', 'workout_completion') AND "
+            "conversation_id IS NULL AND run_id IS NULL))",
             name="ck_agent_proposals_origin",
         ),
     )

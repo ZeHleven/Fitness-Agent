@@ -252,6 +252,24 @@
   line-height: 1.55;
 }
 
+.repair-plan-button {
+  min-height: 70px;
+  margin: 18px 0 0;
+  border-radius: 17px;
+  background: #1d6b49;
+  color: #ffffff;
+  font-size: 24px;
+  font-weight: 800;
+}
+
+.plan-safety-disabled {
+  display: block;
+  margin-top: 14px;
+  color: #876817;
+  font-size: 20px;
+  line-height: 1.5;
+}
+
 .plan-actions {
   display: flex;
   margin: 10px 0 18px;

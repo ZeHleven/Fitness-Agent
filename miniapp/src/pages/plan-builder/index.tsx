@@ -3,6 +3,7 @@ import { Button, Input, Picker, Slider, Text, View } from '@tarojs/components'
 import Taro, { useLoad } from '@tarojs/taro'
 
 import { errorMessage } from '../../core/request'
+import { nextTrainingDay } from '../../core/workout-schedule'
 import { profileApi } from '../../services/profile'
 import { workoutApi } from '../../services/workouts'
 import type {
@@ -132,9 +133,25 @@ export default function PlanBuilderPage () {
         return
       }
 
-      const firstDay = Math.min(...plan.exercises.map(item => item.day_of_week))
+      const recommendedDay = nextTrainingDay(
+        plan.exercises.map(item => item.day_of_week)
+      )
+      const exercises = plan.exercises
+        .filter(item => item.day_of_week === recommendedDay)
+        .map(item => item.exercise_name || '未命名动作')
+      const decision = await Taro.showModal({
+        title: `推荐周${weekday(recommendedDay)}开始`,
+        content: `本次动作：${exercises.join('、')}。现在开始，还是仅保存计划稍后训练？`,
+        confirmText: '开始训练',
+        cancelText: '仅保存'
+      })
+      if (!decision.confirm) {
+        await Taro.showToast({ title: '计划已保存', icon: 'success' })
+        await Taro.reLaunch({ url: '/pages/workouts/index' })
+        return
+      }
       try {
-        await workoutApi.start(plan.id, firstDay)
+        await workoutApi.start(plan.id, recommendedDay)
         await Taro.redirectTo({ url: '/pages/workout-active/index' })
       } catch (startError) {
         await Taro.showModal({
@@ -284,7 +301,7 @@ export default function PlanBuilderPage () {
               disabled={Boolean(savingMode)}
               onClick={() => confirm(true)}
             >
-              {savingMode === 'start' ? '正在启动…' : '确认并开始第一练'}
+              {savingMode === 'start' ? '正在保存…' : '保存并开始推荐训练'}
             </Button>
           </View>
         </>

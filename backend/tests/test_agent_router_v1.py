@@ -95,7 +95,11 @@ async def test_agent_chat_persists_conversation_run_messages_and_tool_audit(
         "/api/v1/agent/conversations",
         headers=headers,
     )
-    assert any(item["id"] == body["conversation_id"] for item in conversations.json())
+    saved_conversation = next(
+        item for item in conversations.json()
+        if item["id"] == body["conversation_id"]
+    )
+    assert saved_conversation["summary"] == "你当前保存的训练目标是增肌。"
 
     messages = await client.get(
         f"/api/v1/agent/conversations/{body['conversation_id']}/messages",

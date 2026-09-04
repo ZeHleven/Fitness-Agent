@@ -3,6 +3,8 @@ import json
 from datetime import date
 from unittest.mock import AsyncMock, patch
 
+from app.config import settings
+
 
 async def get_token(client, email):
     resp = await client.post("/api/v1/auth/register", json={"email": email, "password": "pass1234"})
@@ -396,6 +398,7 @@ async def test_workout_execution_lifecycle_and_progress(client, db_session):
     await db_session.commit()
 
     token = await get_token(client, "execution@example.com")
+    await complete_onboarding(client, token)
     headers = {"Authorization": f"Bearer {token}"}
     plan_resp = await client.post(
         "/api/v1/workouts/plans",
@@ -468,8 +471,32 @@ async def test_workout_execution_lifecycle_and_progress(client, db_session):
     assert completed["status"] == "completed"
     assert completed["duration_min"] >= 1
     assert completed["completed_at"] is not None
+    assert completed["adaptive_adjustment_status"] == "pending_confirmation"
+    assert completed["adaptive_adjustment_proposal"]["proposal_type"] == "plan_adjustment_v2"
     assert completed["adjustments"][0]["action"] == "decrease_weight_and_sets"
     assert completed["adjustments"][0]["after"]["recommended_weight_kg"] == 22.5
+
+    unchanged_plan = await client.get(
+        f"/api/v1/workouts/plans/{plan_id}", headers=headers
+    )
+    assert unchanged_plan.json()["exercises"][0]["sets"] == 3
+    assert unchanged_plan.json()["exercises"][0]["recommended_weight_kg"] is None
+
+    proposal = completed["adaptive_adjustment_proposal"]
+    from app.models.agent import AgentProposal
+    from app.schemas.plan_management_proposal import PlanAdjustmentPayloadV2
+    stored_proposal = await db_session.get(AgentProposal, proposal["id"])
+    PlanAdjustmentPayloadV2.model_validate(stored_proposal.payload_data)
+    confirmed = await client.post(
+        f"/api/v1/proposals/{proposal['id']}/confirm",
+        json={
+            "expected_version": proposal["version"],
+            "client_request_id": "complete-adjustment-confirm-1",
+        },
+        headers=headers,
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    next_plan_id = confirmed.json()["result_plan_id"]
 
     active_after = await client.get(
         "/api/v1/workouts/sessions/active", headers=headers
@@ -485,7 +512,7 @@ async def test_workout_execution_lifecycle_and_progress(client, db_session):
 
     next_start_resp = await client.post(
         "/api/v1/workouts/sessions/start",
-        json={"plan_id": plan_id, "day_of_week": 1},
+        json={"plan_id": next_plan_id, "day_of_week": 1},
         headers=headers,
     )
     assert next_start_resp.status_code == 201
@@ -533,7 +560,7 @@ async def test_workout_execution_lifecycle_and_progress(client, db_session):
     assert len(progress["weekly"]) == 4
 
     delete_plan_resp = await client.delete(
-        f"/api/v1/workouts/plans/{plan_id}", headers=headers
+        f"/api/v1/workouts/plans/{next_plan_id}", headers=headers
     )
     assert delete_plan_resp.status_code == 409
     history_after_delete = await client.get(
@@ -626,6 +653,7 @@ async def test_completion_feedback_replaces_pain_conflicting_exercise(client, db
     assert data["feedback"]["pain_level"] == 5
     assert data["adjustments"][0]["action"] == "replace_exercise"
     assert data["adjustments"][0]["safety_priority"] is True
+    assert data["adaptive_adjustment_status"] == "pending_confirmation"
     replacement_id = data["adjustments"][0]["after"]["exercise_id"]
     assert replacement_id != squat.id
 
@@ -633,7 +661,172 @@ async def test_completion_feedback_replaces_pain_conflicting_exercise(client, db
         f"/api/v1/workouts/plans/{plan['id']}", headers=headers
     )
     assert updated_plan.status_code == 200
-    assert updated_plan.json()["exercises"][0]["exercise_id"] == replacement_id
+    assert updated_plan.json()["exercises"][0]["exercise_id"] == squat.id
+
+    proposal = data["adaptive_adjustment_proposal"]
+    confirmed = await client.post(
+        f"/api/v1/proposals/{proposal['id']}/confirm",
+        json={
+            "expected_version": proposal["version"],
+            "client_request_id": "pain-adjustment-confirm-1",
+        },
+        headers=headers,
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    applied_plan = await client.get(
+        f"/api/v1/workouts/plans/{confirmed.json()['result_plan_id']}",
+        headers=headers,
+    )
+    assert applied_plan.json()["exercises"][0]["exercise_id"] == replacement_id
+
+
+@pytest.mark.asyncio
+async def test_new_completion_supersedes_only_older_adaptive_proposal(
+    client, db_session
+):
+    from app.models.exercise import Exercise
+
+    exercise = Exercise(
+        id="adaptive-supersede-exercise",
+        name_zh="自适应划船",
+        name_en="Adaptive Supersede Row",
+        category="力量",
+        difficulty="初级",
+        is_active=True,
+    )
+    db_session.add(exercise)
+    await db_session.commit()
+    token = await get_token(client, "adaptive-supersede@example.com")
+    await complete_onboarding(client, token)
+    headers = {"Authorization": f"Bearer {token}"}
+    plan = (await client.post(
+        "/api/v1/workouts/plans",
+        json={
+            "name": "自适应替代测试",
+            "exercises": [{
+                "exercise_id": exercise.id,
+                "day_of_week": 3,
+                "sets": 3,
+                "reps": "8-10",
+                "recommended_weight_kg": 30,
+            }],
+        },
+        headers=headers,
+    )).json()
+
+    proposal_ids = []
+    for _ in range(2):
+        session = (await client.post(
+            "/api/v1/workouts/sessions/start",
+            json={"plan_id": plan["id"], "day_of_week": 3},
+            headers=headers,
+        )).json()
+        recorded = await client.put(
+            f"/api/v1/workouts/sessions/{session['id']}/exercises/"
+            f"{session['exercises'][0]['id']}/sets/1",
+            json={"reps": 8, "weight_kg": 30},
+            headers=headers,
+        )
+        assert recorded.status_code == 200
+        completed = await client.post(
+            f"/api/v1/workouts/sessions/{session['id']}/complete",
+            json={},
+            headers=headers,
+        )
+        assert completed.json()["adaptive_adjustment_status"] == "pending_confirmation"
+        proposal_ids.append(completed.json()["adaptive_adjustment_proposal"]["id"])
+
+    assert proposal_ids[0] != proposal_ids[1]
+    old = await client.get(f"/api/v1/proposals/{proposal_ids[0]}", headers=headers)
+    latest = await client.get(f"/api/v1/proposals/{proposal_ids[1]}", headers=headers)
+    assert old.json()["status"] == "stale"
+    assert latest.json()["status"] == "pending_confirmation"
+
+
+@pytest.mark.asyncio
+async def test_explicit_plan_proposal_is_not_overwritten_by_workout_completion(
+    client, db_session
+):
+    from app.models.exercise import Exercise
+
+    exercise = Exercise(
+        id="adaptive-explicit-conflict-exercise",
+        name_zh="自适应推举",
+        name_en="Adaptive Explicit Press",
+        category="力量",
+        difficulty="初级",
+        is_active=True,
+    )
+    db_session.add(exercise)
+    await db_session.commit()
+    token = await get_token(client, "adaptive-explicit@example.com")
+    await complete_onboarding(client, token)
+    headers = {"Authorization": f"Bearer {token}"}
+    plan = (await client.post(
+        "/api/v1/workouts/plans",
+        json={
+            "name": "显式提案保护测试",
+            "exercises": [{
+                "exercise_id": exercise.id,
+                "day_of_week": 5,
+                "sets": 3,
+                "reps": "8-10",
+                "recommended_weight_kg": 20,
+            }],
+        },
+        headers=headers,
+    )).json()
+    with patch.object(settings, "MANUAL_PLAN_PROPOSALS_ENABLED", True):
+        context = (await client.get(
+            f"/api/v1/workouts/plans/{plan['id']}/edit-context",
+            headers=headers,
+        )).json()
+        candidate = {
+            "duration_weeks": context["base_plan"]["duration_weeks"] + 1,
+            "training_days": context["base_plan"]["training_days"],
+            "exercises": [
+                {
+                    key: value
+                    for key, value in item.items()
+                    if key not in {"exercise_name", "category"}
+                }
+                for item in context["base_plan"]["exercises"]
+            ],
+        }
+        manual = await client.post(
+            f"/api/v1/workouts/plans/{plan['id']}/adjustment-proposals",
+            json={
+                "client_request_id": "manual-before-completion-1",
+                "expected_base_fingerprint": context["base_plan_fingerprint"],
+                "candidate": candidate,
+            },
+            headers=headers,
+        )
+    assert manual.status_code == 201
+
+    session = (await client.post(
+        "/api/v1/workouts/sessions/start",
+        json={"plan_id": plan["id"], "day_of_week": 5},
+        headers=headers,
+    )).json()
+    await client.put(
+        f"/api/v1/workouts/sessions/{session['id']}/exercises/"
+        f"{session['exercises'][0]['id']}/sets/1",
+        json={"reps": 8, "weight_kg": 20},
+        headers=headers,
+    )
+    completed = await client.post(
+        f"/api/v1/workouts/sessions/{session['id']}/complete",
+        json={},
+        headers=headers,
+    )
+    assert completed.status_code == 200
+    assert completed.json()["adaptive_adjustment_status"] == "blocked_by_existing"
+    assert completed.json()["adaptive_adjustment_proposal"] is None
+    preserved = await client.get(
+        f"/api/v1/proposals/{manual.json()['id']}", headers=headers
+    )
+    assert preserved.json()["status"] == "pending_confirmation"
 
 
 @pytest.mark.asyncio

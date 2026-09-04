@@ -126,6 +126,11 @@ async def agent_chat(
             if body.artifact_action is not None
             else None
         ),
+        clarification_action=(
+            body.clarification_action.model_dump(mode="json")
+            if body.clarification_action is not None
+            else None
+        ),
     )
     return AgentChatResponse(
         reply=result.reply,
@@ -167,6 +172,11 @@ async def create_agent_run(
             artifact_action=(
                 body.artifact_action.model_dump(mode="json")
                 if body.artifact_action is not None
+                else None
+            ),
+            clarification_action=(
+                body.clarification_action.model_dump(mode="json")
+                if body.clarification_action is not None
                 else None
             ),
         )
