@@ -272,7 +272,7 @@ INTENT_CHANGE_SYSTEM_PROMPT = r"""你只负责把已判定的 mutation 路由提
 每项变更只包含 resource、operation、field_path、target_reference、value_json、preserve_unspecified。只提取用户明确给出的值，不猜测；缺失信息由服务端验证器追问。
 
 字段约定：
-- 计划：schedule.duration_weeks、schedule.days_per_week、exercise.sets、exercise.reps、exercise.rest_seconds、exercise.recommended_weight_kg、exercise.add、exercise.delete、exercise.exercise_id、exercise.day_of_week。动作目标写入 target_reference。组数、休息秒数和训练日使用 JSON 整数，建议重量使用 JSON 数值；exercise.reps 必须使用 JSON 字符串，即使单次目标也写成 value_json="\"8\""，范围写成 value_json="\"8-12\""。
+- 计划：schedule.duration_weeks、schedule.days_per_week、exercise.sets、exercise.reps、exercise.rest_seconds、exercise.recommended_weight_kg、exercise.add、exercise.delete、exercise.exercise_id、exercise.day_of_week。动作目标写入 target_reference；如果用户用训练日限定重复动作，必须保留限定，例如“周二的卧推”，不能缩写成“卧推”。组数、休息秒数和训练日使用 JSON 整数，建议重量使用 JSON 数值；exercise.reps 必须使用 JSON 字符串，即使单次目标也写成 value_json="\"8\""，范围写成 value_json="\"8-12\""。
 - 档案：profile.age、profile.gender、profile.height_cm、profile.weight_kg、profile.experience_level、profile.primary_goal、profile.training_days_per_week、profile.session_duration_min、profile.training_location、profile.diet_restriction。
 - 健康：health.injuries、health.chronic_conditions，value 是用户明确要求保存的完整列表。
 - 体重：create/weight_log.weight_kg。

@@ -939,10 +939,52 @@ def _normalized_name(value: str) -> str:
     return "".join(value.lower().split())
 
 
+_WEEKDAY_LABELS = {
+    1: "周一",
+    2: "周二",
+    3: "周三",
+    4: "周四",
+    5: "周五",
+    6: "周六",
+    7: "周日",
+}
+
+_WEEKDAY_ALIASES = {
+    day: tuple(dict.fromkeys((
+        label,
+        label.replace("周", "星期"),
+        label.replace("周", "礼拜"),
+        f"周{day}",
+        f"星期{day}",
+        f"礼拜{day}",
+        *(("周天", "星期天", "礼拜天") if day == 7 else ()),
+    )))
+    for day, label in _WEEKDAY_LABELS.items()
+}
+
+
+def _referenced_weekdays(reference: str) -> set[int]:
+    normalized = _normalized_name(reference)
+    return {
+        day
+        for day, aliases in _WEEKDAY_ALIASES.items()
+        if any(_normalized_name(alias) in normalized for alias in aliases)
+    }
+
+
 def _unique_planned_target(items: list[dict[str, Any]], reference: str | None) -> dict[str, Any]:
     if not reference:
         raise PlanProposalError(
             "proposal_target_incomplete", "请说明要修改的动作名称", status_code=422
+        )
+    stable_match = [item for item in items if item.get("item_key") == reference]
+    if len(stable_match) == 1:
+        return stable_match[0]
+    if reference.startswith("planned:"):
+        raise PlanProposalError(
+            "proposal_base_changed",
+            "当前训练计划已变化，请重新发起这次调整",
+            status_code=409,
         )
     normalized = _normalized_name(reference)
     exact = [item for item in items if _normalized_name(item["exercise_name"]) == normalized]
@@ -951,11 +993,42 @@ def _unique_planned_target(items: list[dict[str, Any]], reference: str | None) -
         if normalized in _normalized_name(item["exercise_name"])
         or _normalized_name(item["exercise_name"]) in normalized
     ]
-    if len(candidates) != 1:
+    referenced_days = _referenced_weekdays(reference)
+    if referenced_days:
+        candidates = [
+            item for item in candidates
+            if int(item["day_of_week"]) in referenced_days
+        ]
+    candidates.sort(key=lambda item: (
+        int(item["day_of_week"]),
+        int(item.get("order_index") or 0),
+        str(item.get("item_key") or ""),
+    ))
+    if not candidates:
+        raise PlanProposalError(
+            "proposal_target_not_found",
+            f"当前计划中没有找到“{reference}”对应的动作",
+            status_code=422,
+        )
+    if len(candidates) > 1:
+        labels = "、".join(
+            f"{_WEEKDAY_LABELS[int(item['day_of_week'])]}的{item['exercise_name']}"
+            for item in candidates
+        )
         raise PlanProposalError(
             "proposal_target_ambiguous",
-            f"当前计划中没有唯一匹配“{reference}”的动作，请使用完整动作名",
+            f"当前计划中有多个匹配项：{labels}，请说明要修改哪一天或全部",
             status_code=422,
+            details={
+                "clarification_type": "plan_exercise_occurrence",
+                "target_reference": reference,
+                "candidates": [{
+                    "item_key": str(item["item_key"]),
+                    "exercise_name": str(item["exercise_name"]),
+                    "day_of_week": int(item["day_of_week"]),
+                    "order_index": int(item.get("order_index") or 0),
+                } for item in candidates],
+            },
         )
     return candidates[0]
 
