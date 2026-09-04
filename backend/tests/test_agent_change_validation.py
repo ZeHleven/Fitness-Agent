@@ -173,6 +173,49 @@ def test_plan_out_of_range_values_are_rejected_before_compilation(
     assert result.missing_slots == ("计划调整的有效目标值",)
 
 
+@pytest.mark.parametrize(("raw_value", "normalized"), [(8, "8"), (8.0, "8")])
+def test_integral_numeric_reps_are_canonicalized_before_validation(
+    raw_value, normalized
+):
+    change = ChangeRequest(
+        resource="workout_plan",
+        operation="update",
+        field_path="exercise.reps",
+        target_reference="卧推",
+        value=raw_value,
+    )
+
+    result = _validate(
+        "workout_plan",
+        "mutation",
+        "update",
+        [change],
+    )
+
+    assert change.value == normalized
+    assert result.complete is True
+
+
+@pytest.mark.parametrize("raw_value", [0, -8, 8.5, True])
+def test_non_positive_or_non_integral_numeric_reps_remain_invalid(raw_value):
+    change = ChangeRequest(
+        resource="workout_plan",
+        operation="update",
+        field_path="exercise.reps",
+        target_reference="卧推",
+        value=raw_value,
+    )
+
+    result = _validate(
+        "workout_plan",
+        "mutation",
+        "update",
+        [change],
+    )
+
+    assert result.missing_slots == ("计划调整的有效目标值",)
+
+
 def test_plan_target_and_value_requirements_are_typed():
     missing_target = _validate(
         "workout_plan",

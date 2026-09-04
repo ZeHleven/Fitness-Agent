@@ -13,12 +13,14 @@ from app.services.agent_intent import (
     route_tools,
 )
 from app.services.agent_intent_model import (
+    INTENT_CHANGE_SYSTEM_PROMPT,
     INTENT_ROUTE_SYSTEM_PROMPT,
     SEMANTIC_ROUTE_BOUNDARY_GUIDANCE,
     SEMANTIC_ROUTE_DOMAIN_GUIDANCE,
     IntentRouteDecision,
     IntentStructuredOutputError,
     _SEMANTIC_ROUTE_SCHEMA,
+    _invoke_model_change_extraction,
     _invoke_model_intent,
     _invoke_model_route,
     _intent_attempt_timeout_seconds,
@@ -141,6 +143,61 @@ def test_semantic_route_provider_sentinel_restores_optional_decision():
 
     assert ordinary.decision_action is None
     assert proposal.decision_action == "confirm"
+
+
+@pytest.mark.asyncio
+async def test_single_meal_advice_is_a_read_only_answer_not_generation():
+    assert "单餐建议或一般推荐" in INTENT_ROUTE_SYSTEM_PROMPT
+    assert "nutrition/query/read/answer" in INTENT_ROUTE_SYSTEM_PROMPT
+    completion = StructuredCompletionResult(
+        payload={
+            "intent_domain": "nutrition",
+            "request_kind": "query",
+            "requested_effect": "read",
+            "requested_output": "answer",
+            "read_targets": [],
+            "decision_action": "none",
+            "artifact_action": "none",
+            "normalized_request": "给出一个适合减脂的晚餐建议，不保存数据",
+            "risk_level": "low",
+            "confidence": 0.98,
+        },
+        raw_output="{}",
+        mode="deepseek_strict_tool",
+        finish_reason="tool_calls",
+        duration_ms=12,
+        output_chars=2,
+    )
+    with patch(
+        "app.services.agent_intent_model.structured_chat_completion",
+        new=AsyncMock(return_value=completion),
+    ):
+        route, _ = await _invoke_model_route(
+            "给我一个适合减脂的晚餐建议，只提供建议，不要保存。",
+            timeout_seconds=14,
+        )
+
+    assert route.intent_domain == "nutrition"
+    assert route.request_kind == "query"
+    assert route.requested_effect == "read"
+    assert route.requested_output == "answer"
+    assert route.read_targets == []
+
+
+def test_generation_remains_reserved_for_daily_meal_artifacts():
+    with pytest.raises(ValueError, match="nutrition/daily_meal_plan"):
+        IntentRouteDecision(
+            intent_domain="nutrition",
+            request_kind="generation",
+            requested_effect="read",
+            requested_output="answer",
+            read_targets=[],
+            decision_action="none",
+            artifact_action="none",
+            normalized_request="给出一个晚餐建议",
+            risk_level="low",
+            confidence=0.95,
+        )
 
 
 @pytest.mark.asyncio
@@ -331,6 +388,90 @@ async def test_compact_mutation_route_calls_detailed_change_extractor():
     assert resolution.request_kind == "mutation"
     assert len(resolution.change_requests) == 1
     extract.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_workout_change_extractor_normalizes_numeric_repetitions():
+    assert 'value_json="\\"8\\""' in INTENT_CHANGE_SYSTEM_PROMPT
+    route = IntentRouteDecision(
+        intent_domain="workout_plan",
+        request_kind="mutation",
+        requested_effect="update",
+        requested_output="answer",
+        read_targets=[],
+        decision_action="none",
+        artifact_action="none",
+        normalized_request="调整卧推训练目标",
+        risk_level="low",
+        confidence=0.98,
+    )
+    completion = StructuredCompletionResult(
+        payload={
+            "change_requests": [
+                {
+                    "resource": "workout_plan",
+                    "operation": "update",
+                    "field_path": "exercise.sets",
+                    "target_reference": "卧推",
+                    "value_json": "4",
+                    "preserve_unspecified": True,
+                },
+                {
+                    "resource": "workout_plan",
+                    "operation": "update",
+                    "field_path": "exercise.reps",
+                    "target_reference": "卧推",
+                    "value_json": "8",
+                    "preserve_unspecified": True,
+                },
+                {
+                    "resource": "workout_plan",
+                    "operation": "update",
+                    "field_path": "exercise.rest_seconds",
+                    "target_reference": "卧推",
+                    "value_json": "120",
+                    "preserve_unspecified": True,
+                },
+                {
+                    "resource": "workout_plan",
+                    "operation": "update",
+                    "field_path": "exercise.recommended_weight_kg",
+                    "target_reference": "卧推",
+                    "value_json": "50",
+                    "preserve_unspecified": True,
+                },
+            ],
+            "normalized_request": (
+                "把计划里的卧推改为4组，每组8次，组间休息120秒，"
+                "建议重量50公斤"
+            ),
+            "confidence": 0.98,
+        },
+        raw_output="{}",
+        mode="deepseek_strict_tool",
+        finish_reason="tool_calls",
+        duration_ms=12,
+        output_chars=2,
+    )
+    with patch(
+        "app.services.agent_intent_model.structured_chat_completion",
+        new=AsyncMock(return_value=completion),
+    ):
+        resolution, _ = await _invoke_model_change_extraction(
+            "把计划里的卧推改为4组，每组8次，组间休息120秒，建议重量50公斤。",
+            route=route,
+            timeout_seconds=14,
+        )
+
+    values = {
+        item.field_path: item.value for item in resolution.change_requests
+    }
+    assert values == {
+        "exercise.sets": 4,
+        "exercise.reps": "8",
+        "exercise.rest_seconds": 120,
+        "exercise.recommended_weight_kg": 50,
+    }
 
 
 @pytest.fixture(autouse=True)

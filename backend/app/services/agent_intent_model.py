@@ -250,7 +250,7 @@ INTENT_ROUTE_SYSTEM_PROMPT = f"""你只负责 Fitness Agent 的业务语义路�
 
 先判断领域，再判断动作：query=查事实，assessment=依据事实评估，generation=生成尚不写入的内容，mutation=明确要求创建/记录/保存/修改/删除数据，proposal_decision=确认或拒绝已经出现“待你确认”卡片的 Proposal。读取类 effect=read，写入为 create/update/delete，决策为 decide。
 
-“制定、安排、规划、推荐、搭配、给出食谱或方案”默认是 generation，不是写入；只有明确要求记录、保存或写入才是 mutation。全天饮食方案必须是 nutrition/generation/read/daily_meal_plan。把已经展示的全天饮食方案保存成待确认提案，必须是 nutrition/mutation/create/answer、artifact_action=save_as_proposal、decision_action=none；它不是 Proposal 确认。只有确认或拒绝已经存在的待确认 Proposal 时，才使用 proposal_decision 和 decision_action=confirm/reject。其他请求 artifact_action 和 decision_action 都必须为 none；领域不明时用 general。
+“制定、安排、规划今天全天怎么吃”这类要求生成全天、多餐饮食方案的请求是 generation，不是写入；全天饮食方案必须是 nutrition/generation/read/daily_meal_plan。普通知识、单餐建议或一般推荐只需要文字回答，应使用 query/read/answer，包括“给我一个晚餐建议”“只提供建议，不要保存”这类明确不持久化的请求。只有明确要求记录、保存或写入数据才是 mutation。把已经展示的全天饮食方案保存成待确认提案，必须是 nutrition/mutation/create/answer、artifact_action=save_as_proposal、decision_action=none；它不是 Proposal 确认。只有确认或拒绝已经存在的待确认 Proposal 时，才使用 proposal_decision 和 decision_action=confirm/reject。其他请求 artifact_action 和 decision_action 都必须为 none；领域不明时用 general。
 
 read_targets 只描述回答任务必须读取的事实类型，不得输出工具名；领域和读取目标是正交字段，例如 profile 领域的体重趋势使用 weight_history。全天饮食方案的固定六类证据由服务端补齐，因此这里返回空数组。normalized_request 可补全指代，但不得猜测事实。胸痛、呼吸困难、晕厥、失去意识或严重急性疼痛为 high。上下文仅用于承接，不得覆盖最后一条消息。
 
@@ -261,17 +261,18 @@ read_targets 只描述回答任务必须读取的事实类型，不得输出工�
 - “我的膝盖最近疼”是 health/query/read/answer，read_targets=[health_screening]，risk_level=medium。
 - “请在健康档案补充多年前的踝关节韧带损伤”是 health/mutation/update/answer，read_targets=[]，decision_action=none，risk_level=medium。
 - 全天饮食方案是 nutrition/generation/read/daily_meal_plan，read_targets=[]。
+- “给我一个适合减脂的晚餐建议，只提供建议，不要保存”是 nutrition/query/read/answer，read_targets=[]。
 - “保存这份方案”是 nutrition/mutation/create/answer，artifact_action=save_as_proposal、decision_action=none；只生成 Proposal，不确认 Proposal。
 - “确认这份提案”才是 general/proposal_decision/decide/answer，artifact_action=none、decision_action=confirm。
 """
 
 
-INTENT_CHANGE_SYSTEM_PROMPT = """你只负责把已判定的 mutation 路由提取为结构化 change_requests，不重新分类、不回答问题。每项 value_json 必须是一个 JSON 值编码成的字符串，服务端会再次 JSON 解码和类型校验。
+INTENT_CHANGE_SYSTEM_PROMPT = r"""你只负责把已判定的 mutation 路由提取为结构化 change_requests，不重新分类、不回答问题。每项 value_json 必须是一个 JSON 值编码成的字符串，服务端会再次 JSON 解码和类型校验。
 
 每项变更只包含 resource、operation、field_path、target_reference、value_json、preserve_unspecified。只提取用户明确给出的值，不猜测；缺失信息由服务端验证器追问。
 
 字段约定：
-- 计划：schedule.duration_weeks、schedule.days_per_week、exercise.sets、exercise.reps、exercise.rest_seconds、exercise.recommended_weight_kg、exercise.add、exercise.delete、exercise.exercise_id、exercise.day_of_week。动作目标写入 target_reference。
+- 计划：schedule.duration_weeks、schedule.days_per_week、exercise.sets、exercise.reps、exercise.rest_seconds、exercise.recommended_weight_kg、exercise.add、exercise.delete、exercise.exercise_id、exercise.day_of_week。动作目标写入 target_reference。组数、休息秒数和训练日使用 JSON 整数，建议重量使用 JSON 数值；exercise.reps 必须使用 JSON 字符串，即使单次目标也写成 value_json="\"8\""，范围写成 value_json="\"8-12\""。
 - 档案：profile.age、profile.gender、profile.height_cm、profile.weight_kg、profile.experience_level、profile.primary_goal、profile.training_days_per_week、profile.session_duration_min、profile.training_location、profile.diet_restriction。
 - 健康：health.injuries、health.chronic_conditions，value 是用户明确要求保存的完整列表。
 - 体重：create/weight_log.weight_kg。
@@ -281,6 +282,9 @@ INTENT_CHANGE_SYSTEM_PROMPT = """你只负责把已判定的 mutation 路由提�
 
 最小示例：
 {"change_requests":[{"resource":"nutrition","operation":"create","field_path":"meal","target_reference":null,"value_json":"{\"logged_at\":\"today\",\"meal_type\":\"午餐\",\"items\":[{\"food_name\":\"鸡胸肉\",\"amount_g\":150}]}","preserve_unspecified":true}],"normalized_request":"记录今天午餐鸡胸肉150克","confidence":0.98}
+
+训练目标示例：
+{"change_requests":[{"resource":"workout_plan","operation":"update","field_path":"exercise.sets","target_reference":"卧推","value_json":"4","preserve_unspecified":true},{"resource":"workout_plan","operation":"update","field_path":"exercise.reps","target_reference":"卧推","value_json":"\"8\"","preserve_unspecified":true},{"resource":"workout_plan","operation":"update","field_path":"exercise.rest_seconds","target_reference":"卧推","value_json":"120","preserve_unspecified":true},{"resource":"workout_plan","operation":"update","field_path":"exercise.recommended_weight_kg","target_reference":"卧推","value_json":"50","preserve_unspecified":true}],"normalized_request":"把计划里的卧推改为4组，每组8次，组间休息120秒，建议重量50公斤","confidence":0.98}
 """
 
 
