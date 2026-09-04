@@ -222,7 +222,7 @@ async def _seed_duplicate_bench_plan(db_session):
         ),
     ])
     await db_session.commit()
-    return user, plan, conversation
+    return user, plan, conversation, exercise
 
 
 @pytest.mark.asyncio
@@ -230,7 +230,9 @@ async def test_chat_clarifies_duplicate_action_then_creates_scoped_proposal(
     client,
     db_session,
 ):
-    user, plan, conversation = await _seed_duplicate_bench_plan(db_session)
+    user, plan, conversation, exercise = await _seed_duplicate_bench_plan(
+        db_session
+    )
     resolution = IntentResolution(
         primary_intent="plan_query",
         intent_domain="workout_plan",
@@ -297,3 +299,8 @@ async def test_chat_clarifies_duplicate_action_then_creates_scoped_proposal(
     assert plan.is_active is True
     await db_session.refresh(conversation)
     assert conversation.pending_clarification == {}
+    # Exercises are global catalogue rows rather than user-owned data. This
+    # suite commits realistic Proposal transactions, so explicitly retire its
+    # fixture row before later router tests assert an empty active catalogue.
+    exercise.is_active = False
+    await db_session.commit()
