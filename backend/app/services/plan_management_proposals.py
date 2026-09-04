@@ -38,10 +38,18 @@ PLAN_MANAGEMENT_TYPES = ("plan_adjustment_v2", "plan_deletion_v1")
 
 
 class PlanProposalError(RuntimeError):
-    def __init__(self, code: str, message: str, *, status_code: int = 409):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        status_code: int = 409,
+        details: dict[str, Any] | None = None,
+    ):
         self.code = code
         self.message = message
         self.status_code = status_code
+        self.details = details or {}
         super().__init__(message)
 
 

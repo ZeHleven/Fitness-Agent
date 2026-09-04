@@ -43,6 +43,7 @@ from app.services.agent_intent import (
     IntentResolution,
     IntentResolverOutcome,
     parse_explicit_plan_adjustment_command,
+    pending_clarification_to_resolution,
     route_tools,
 )
 from app.services.agent_plan_adjustment_proposal_decisions import (
@@ -726,6 +727,188 @@ def _mutation_missing_slots(resolution: IntentResolution) -> list[str]:
     return ["写入目标的完整字段、对象和数值"]
 
 
+_WEEKDAY_SELECTION_ALIASES = {
+    1: ("周一", "星期一", "礼拜一", "周1", "星期1", "礼拜1"),
+    2: ("周二", "星期二", "礼拜二", "周2", "星期2", "礼拜2"),
+    3: ("周三", "星期三", "礼拜三", "周3", "星期3", "礼拜3"),
+    4: ("周四", "星期四", "礼拜四", "周4", "星期4", "礼拜4"),
+    5: ("周五", "星期五", "礼拜五", "周5", "星期5", "礼拜5"),
+    6: ("周六", "星期六", "礼拜六", "周6", "星期6", "礼拜6"),
+    7: (
+        "周日", "周天", "星期日", "星期天", "礼拜日", "礼拜天",
+        "周7", "星期7", "礼拜7",
+    ),
+}
+_WEEKDAY_SELECTION_LABELS = {
+    1: "周一", 2: "周二", 3: "周三", 4: "周四",
+    5: "周五", 6: "周六", 7: "周日",
+}
+_ALL_TARGET_SELECTION_MARKERS = (
+    "全部", "所有", "都改", "都调整", "都设置", "都应用", "每个都",
+)
+_EXACT_ALL_TARGET_SELECTIONS = {
+    "全部", "所有", "全都", "都改", "全部都改", "全部调整",
+    "两个都改", "两个都调整", "这些都改", "每个都改",
+}
+_ORDINAL_SELECTIONS = {
+    "第一个": 0,
+    "第一项": 0,
+    "第1个": 0,
+    "第1项": 0,
+    "第二个": 1,
+    "第二项": 1,
+    "第2个": 1,
+    "第2项": 1,
+    "第三个": 2,
+    "第三项": 2,
+    "第3个": 2,
+    "第3项": 2,
+}
+
+
+def _resolve_plan_target_selection(
+    message: str,
+    pending_clarification: dict[str, Any] | None,
+) -> IntentResolverOutcome | None:
+    """Resolve only a server-generated plan occurrence choice.
+
+    This is a constrained state-machine continuation, not general-language
+    intent routing. Candidate ids and the original changes must both come from
+    the previously persisted server clarification state.
+    """
+    if not pending_clarification:
+        return None
+    context = pending_clarification.get("clarification_context")
+    if not isinstance(context, dict) or context.get("clarification_type") != (
+        "plan_exercise_occurrence"
+    ):
+        return None
+    inherited = pending_clarification_to_resolution(pending_clarification)
+    if (
+        inherited is None
+        or inherited.intent_domain != "workout_plan"
+        or inherited.request_kind != "mutation"
+    ):
+        return None
+    raw_candidates = context.get("candidates")
+    if not isinstance(raw_candidates, list) or not raw_candidates:
+        return None
+    candidates: list[dict[str, Any]] = []
+    for raw in raw_candidates[:7]:
+        if not isinstance(raw, dict):
+            return None
+        item_key = raw.get("item_key")
+        day = raw.get("day_of_week")
+        name = raw.get("exercise_name")
+        if (
+            not isinstance(item_key, str)
+            or not item_key.startswith("planned:")
+            or isinstance(day, bool)
+            or not isinstance(day, int)
+            or day not in _WEEKDAY_SELECTION_LABELS
+            or not isinstance(name, str)
+            or not name.strip()
+        ):
+            return None
+        candidates.append({
+            "item_key": item_key,
+            "day_of_week": day,
+            "exercise_name": name.strip(),
+        })
+
+    ambiguous_reference = context.get("target_reference")
+    if not isinstance(ambiguous_reference, str) or not ambiguous_reference:
+        return None
+    normalized = re.sub(r"[\s。！？!?，,、；;：:]", "", message.lower())
+    if not normalized or len(normalized) > 120:
+        return None
+    selected: list[dict[str, Any]] = []
+    candidate_names = {
+        re.sub(r"\s", "", candidate["exercise_name"].lower())
+        for candidate in candidates
+    }
+    all_choice = (
+        normalized in _EXACT_ALL_TARGET_SELECTIONS
+        or any(marker in normalized for marker in _ALL_TARGET_SELECTION_MARKERS)
+        and (
+            any(name in normalized for name in candidate_names)
+            or any(pointer in normalized for pointer in ("这两个", "这些", "每个"))
+        )
+    )
+    if all_choice:
+        selected = candidates
+    else:
+        selected_days = {
+            day
+            for day, aliases in _WEEKDAY_SELECTION_ALIASES.items()
+            if any(alias in normalized for alias in aliases)
+        }
+        selection_remainder = normalized
+        for aliases in _WEEKDAY_SELECTION_ALIASES.values():
+            for alias in aliases:
+                selection_remainder = selection_remainder.replace(alias, "")
+        for name in candidate_names:
+            selection_remainder = selection_remainder.replace(name, "")
+        for filler in (
+            "的", "那个", "这个", "一个", "和", "与", "及", "都修改",
+            "都调整", "都设置", "都改", "修改", "调整", "设置", "选择",
+            "训练日", "动作", "改", "选", "要", "就", "吧",
+        ):
+            selection_remainder = selection_remainder.replace(filler, "")
+        if selected_days and not selection_remainder:
+            selected = [
+                candidate for candidate in candidates
+                if candidate["day_of_week"] in selected_days
+            ]
+        else:
+            ordinal = next(
+                (
+                    index
+                    for marker, index in _ORDINAL_SELECTIONS.items()
+                    if marker in normalized
+                ),
+                None,
+            )
+            if ordinal is not None and ordinal < len(candidates):
+                selected = [candidates[ordinal]]
+    if not selected:
+        return None
+
+    expanded_changes: list[ChangeRequest] = []
+    replaced = False
+    for change in inherited.change_requests:
+        if (
+            change.resource == "workout_plan"
+            and change.target_reference == ambiguous_reference
+        ):
+            replaced = True
+            expanded_changes.extend(
+                change.model_copy(update={"target_reference": candidate["item_key"]})
+                for candidate in selected
+            )
+        else:
+            expanded_changes.append(change)
+    if not replaced or len(expanded_changes) > 12:
+        return None
+    selection_text = "、".join(
+        f"{_WEEKDAY_SELECTION_LABELS[item['day_of_week']]}的{item['exercise_name']}"
+        for item in selected
+    )
+    resolution = inherited.model_copy(update={
+        "change_requests": expanded_changes,
+        "resolved_query": f"{inherited.resolved_query}；目标位置：{selection_text}"[:4000],
+        "missing_slots": [],
+        "clarification_required": False,
+        "clarification_question": None,
+        "confidence": min(max(inherited.confidence, 0.9), 0.99),
+    })
+    return IntentResolverOutcome(
+        resolution=resolution,
+        source="rules",
+        fallback_reason="persisted_plan_target_selection",
+    )
+
+
 HIGH_RISK_REPLY = (
     "你描述的情况可能属于需要优先处理的健康警示。请立即停止训练，不要继续加量或硬撑；"
     "如果正在出现胸痛、呼吸困难、晕厥或严重急性疼痛，请及时联系急救或尽快就医。"
@@ -1075,12 +1258,17 @@ async def execute_agent_run(
                 AgentArtifactActionRequest.model_validate(artifact_action)
             )
         else:
-            intent_outcome = await resolve_intent_with_fallback(
+            intent_outcome = _resolve_plan_target_selection(
                 user_message,
-                context_messages=history,
-                pending_clarification=pending_clarification_state,
-                conversation_action_state=conversation_action_state,
+                pending_clarification_state,
             )
+            if intent_outcome is None:
+                intent_outcome = await resolve_intent_with_fallback(
+                    user_message,
+                    context_messages=history,
+                    pending_clarification=pending_clarification_state,
+                    conversation_action_state=conversation_action_state,
+                )
         resolution = intent_outcome.resolution
         legacy_explicit_command = parse_explicit_plan_adjustment_command(
             user_message
@@ -1180,6 +1368,7 @@ async def execute_agent_run(
             termination_reason: str,
             content_data: dict[str, Any] | None = None,
             missing_slots: list[str] | None = None,
+            clarification_context: dict[str, Any] | None = None,
         ) -> AgentRuntimeResult:
             nonlocal execution_trace
             execution_trace = terminate_execution_trace(
@@ -1239,6 +1428,10 @@ async def execute_agent_run(
                     "confidence": resolution.confidence,
                     "understanding_version": "v6",
                 }
+                if clarification_context is not None:
+                    conversation.pending_clarification[
+                        "clarification_context"
+                    ] = clarification_context
             else:
                 conversation.pending_clarification = {}
             conversation.updated_at = now
@@ -1323,6 +1516,18 @@ async def execute_agent_run(
                 )
             except PlanProposalError as exc:
                 prefix = f"{HIGH_RISK_REPLY}\n\n" if high_risk_health_record else ""
+                clarification_context = (
+                    exc.details
+                    if exc.code == "proposal_target_ambiguous"
+                    and exc.details.get("clarification_type")
+                    == "plan_exercise_occurrence"
+                    else None
+                )
+                target_slot = (
+                    f"“{clarification_context['target_reference']}”的训练日"
+                    if clarification_context is not None
+                    else None
+                )
                 return await complete_semantic_short_circuit(
                     f"{prefix}{exc.message}。当前数据未作修改。",
                     terminal_action=(
@@ -1331,9 +1536,12 @@ async def execute_agent_run(
                     ),
                     termination_reason=exc.code,
                     missing_slots=(
-                        _mutation_missing_slots(resolution)
+                        [target_slot]
+                        if target_slot is not None
+                        else _mutation_missing_slots(resolution)
                         if exc.status_code == 422 else None
                     ),
+                    clarification_context=clarification_context,
                 )
             proposal_data = proposal_reference.model_dump(mode="json")
             reply = (
