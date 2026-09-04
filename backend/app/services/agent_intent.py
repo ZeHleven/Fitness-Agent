@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -74,6 +75,28 @@ class ChangeRequest(BaseModel):
     target_reference: str | None = Field(default=None, max_length=120)
     value: Any = None
     preserve_unspecified: bool = True
+
+    @model_validator(mode="after")
+    def normalize_compatible_value_types(self) -> "ChangeRequest":
+        """Canonicalize semantically equivalent model output at the boundary.
+
+        Planned exercise repetitions are stored as text because they can also
+        contain ranges such as ``8-12``. Structured models may nevertheless
+        emit a single repetition target as a JSON number. Accept only positive
+        integral numbers here and preserve every other value for the typed
+        domain validator to accept or reject.
+        """
+        value = self.value
+        if (
+            self.field_path == "exercise.reps"
+            and not isinstance(value, bool)
+            and isinstance(value, (int, float))
+            and math.isfinite(float(value))
+            and float(value).is_integer()
+            and value > 0
+        ):
+            self.value = str(int(value))
+        return self
 
 
 class ResolvedReference(BaseModel):

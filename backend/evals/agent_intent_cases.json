@@ -489,6 +489,34 @@
     "risk_level": "low"
   },
   {
+    "id": "workout_compound_target_update_numeric_reps",
+    "model_only": true,
+    "message": "把计划里的卧推改为4组，每组8次，组间休息120秒，建议重量50公斤。",
+    "expected_primary": "plan_query",
+    "expected_domain": "workout_plan",
+    "expected_request_kind": "mutation",
+    "expected_effect": "update",
+    "expected_requested_output": "answer",
+    "allowed_tools": [],
+    "forbidden_tools": ["plan.get_active", "workout.get_progress"],
+    "clarification_required": false,
+    "risk_level": "low"
+  },
+  {
+    "id": "single_meal_advice_explicitly_not_saved",
+    "model_only": true,
+    "message": "给我一个适合减脂的晚餐建议，只提供建议，不要保存。",
+    "expected_primary": "nutrition_today_query",
+    "expected_domain": "nutrition",
+    "expected_request_kind": "query",
+    "expected_effect": "read",
+    "expected_requested_output": "answer",
+    "allowed_tools": [],
+    "forbidden_tools": ["nutrition.get_today", "nutrition.list_history", "food.search"],
+    "clarification_required": false,
+    "risk_level": "low"
+  },
+  {
     "id": "meal_create_original_complete_v4",
     "model_only": true,
     "message": "把今天晚餐记录为鸡胸肉150克、杂粮饭100克",
