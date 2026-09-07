@@ -17,7 +17,8 @@ export default defineAppConfig({
     'pages/health-edit/index',
     'pages/weight/index',
     'pages/workout-active/index',
-    'pages/history/index'
+    'pages/history/index',
+    'pages/workout-detail/index'
   ],
   tabBar: {
     color: '#708077',

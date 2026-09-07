@@ -36,10 +36,16 @@ export const workoutApi = {
     })
   ),
   active: () => apiRequest<WorkoutSession | null>('/workouts/sessions/active'),
+  detail: (id: string) => apiRequest<WorkoutSession>(`/workouts/sessions/${encodeURIComponent(id)}`),
+  removeArchived: (id: string) => apiRequest<void>(`/workouts/plans/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  finishEarly: (id: string) => apiRequest<WorkoutSession>(`/workouts/sessions/${encodeURIComponent(id)}/finish-early`, { method: 'POST' }),
   history: () => apiRequest<WorkoutSession[]>('/workouts/sessions'),
-  progress: (weeks = 8) => apiRequest<WorkoutProgress>('/workouts/sessions/progress', {
-    query: { weeks }
+  progress: (weeks = 8, weekStart?: string) => apiRequest<WorkoutProgress>('/workouts/sessions/progress', {
+    query: { weeks, ...(weekStart ? { week_start: weekStart } : {}) }
   }),
+  recordRest: (sessionId: string, exerciseId: string, setNumber: number, data: { event_id: string, actual_rest_seconds: number, end_reason: 'next_set' | 'workout_ended' }) => apiRequest<WorkoutSession>(
+    `/workouts/sessions/${sessionId}/exercises/${exerciseId}/sets/${setNumber}/rest`, { method: 'PUT', data }
+  ),
   start: (planId: string, dayOfWeek: number) => apiRequest<WorkoutSession>(
     '/workouts/sessions/start',
     {
@@ -52,12 +58,13 @@ export const workoutApi = {
     sessionExerciseId: string,
     setNumber: number,
     reps: number,
-    weightKg?: number | null
+    weightKg?: number | null,
+    finishedAt?: string
   ) => apiRequest<WorkoutSession>(
     `/workouts/sessions/${sessionId}/exercises/${sessionExerciseId}/sets/${setNumber}`,
     {
       method: 'PUT',
-      data: { reps, weight_kg: weightKg != null ? weightKg : null }
+      data: { reps, weight_kg: weightKg != null ? weightKg : null, ...(finishedAt ? { finished_at: finishedAt } : {}) }
     }
   ),
   complete: (sessionId: string, data: WorkoutCompleteInput) => apiRequest<WorkoutSession>(

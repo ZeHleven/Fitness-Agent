@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, date
-from sqlalchemy import String, Text, Integer, Float, Boolean, ForeignKey, Date, DateTime, func, text
+from sqlalchemy import String, Text, Integer, Float, Boolean, ForeignKey, Date, DateTime, Index, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import JSONB
 from app.database import Base
@@ -11,6 +11,8 @@ class WorkoutPlan(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), index=True)
+    family_id: Mapped[str] = mapped_column(String, index=True)
+    hidden_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     name: Mapped[str] = mapped_column(String(100))
     goal: Mapped[str | None] = mapped_column(String(50), nullable=True)
     duration_weeks: Mapped[int] = mapped_column(Integer, default=4)
@@ -22,6 +24,7 @@ class WorkoutPlan(Base):
 
     def __init__(self, **kwargs):
         kwargs.setdefault("id", str(uuid.uuid4()))
+        kwargs.setdefault("family_id", kwargs["id"])
         super().__init__(**kwargs)
 
 
@@ -45,11 +48,14 @@ class PlannedExercise(Base):
 
 class WorkoutSession(Base):
     __tablename__ = "workout_sessions"
+    __table_args__ = (Index('ix_workout_sessions_week_context', 'user_id', 'plan_family_id', 'week_start', 'day_of_week'),)
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), index=True)
     plan_id: Mapped[str | None] = mapped_column(String, ForeignKey("workout_plans.id"), nullable=True)
     plan_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    plan_family_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    week_start: Mapped[date | None] = mapped_column(Date, nullable=True)
     day_of_week: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="completed", server_default="completed")
     trained_at: Mapped[date] = mapped_column(Date, index=True)
@@ -86,6 +92,7 @@ class SessionExercise(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     session_id: Mapped[str] = mapped_column(String, ForeignKey("workout_sessions.id"), index=True)
     exercise_id: Mapped[str] = mapped_column(String, ForeignKey("exercises.id"))
+    exercise_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     order_index: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     target_sets: Mapped[int | None] = mapped_column(Integer, nullable=True)
     target_reps: Mapped[str | None] = mapped_column(String(20), nullable=True)

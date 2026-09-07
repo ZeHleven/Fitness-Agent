@@ -1,0 +1,10 @@
+.custom-exercise-entry { margin-top: 20px; }
+.custom-exercise-form { display: flex; flex-direction: column; gap: 16px; padding: 22px; border: 1px solid #dce6dc; border-radius: 16px; background: #f5f7f2; }
+.custom-title { font-weight: 600; color: #163d2b; }
+.custom-help, .custom-safety-notice { display: block; font-size: 24px; line-height: 1.65; color: #637168; }
+.custom-safety-notice { margin-top: 12px; }
+.custom-exercise-form input, .custom-exercise-description, .custom-select { background: #fff; border: 1px solid #dce6dc; padding: 16px; border-radius: 10px; box-sizing: border-box; }
+.custom-exercise-description { width: 100%; min-height: 140px; }
+.custom-select { color: #1d6b49; }
+.custom-actions { display: flex; gap: 16px; }
+.custom-actions button { flex: 1; }

@@ -236,3 +236,28 @@ async def test_confirmed_plan_deletion_detaches_session_and_removes_plan(db_sess
     assert await db_session.get(WorkoutPlan, plan.id) is None
     assert session.plan_id is None
     assert session.plan_name == "完整训练计划"
+
+
+@pytest.mark.asyncio
+async def test_deletion_never_orphans_an_in_progress_session(db_session):
+    user, plan = await _seed(db_session, 'delete-active')
+    session = WorkoutSession(user_id=user.id, plan_id=plan.id, plan_name=plan.name,
+                             status='in_progress', trained_at=date.today())
+    db_session.add(session)
+    await db_session.commit()
+    before = await build_plan_snapshot_v2(db_session, plan=plan)
+    proposal = await create_manual_plan_deletion_proposal(
+        db_session, enabled=True, user_id=user.id, plan_id=plan.id,
+        request=CreatePlanDeletionProposalRequest(client_request_id='block-active-delete', expected_base_fingerprint=plan_snapshot_fingerprint(before)),
+    )
+    # Use stable values across the service rollback which expires ORM objects.
+    user_id, plan_id, session_id, proposal_id = user.id, plan.id, session.id, proposal.id
+    from app.services.plan_management_proposals import PlanProposalError
+    with pytest.raises(PlanProposalError) as caught:
+        await decide_manual_plan_proposal(db_session, user_id=user_id, proposal_id=proposal_id,
+                                          action='confirm', request=_decision(proposal_id))
+    assert caught.value.code == 'workout_in_progress'
+    preserved = await db_session.get(WorkoutSession, session_id)
+    assert preserved.plan_id == plan_id
+    assert preserved.status == 'in_progress'
+    assert (await db_session.get(WorkoutPlan, plan_id)).is_active

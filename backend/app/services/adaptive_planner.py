@@ -308,7 +308,7 @@ async def build_adaptive_adjustment_proposals(
     )
     candidates = (await db.execute(
         select(Exercise)
-        .where(Exercise.is_active.is_(True))
+        .where(Exercise.is_active.is_(True), Exercise.owner_id.is_(None))
         .order_by(Exercise.name_zh)
         .limit(200)
     )).scalars().all()

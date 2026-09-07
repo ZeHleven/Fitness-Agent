@@ -135,6 +135,7 @@ class PlanEditContext(_StrictModel):
     base_plan_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     health_context_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     exercise_options: list[dict[str, Any]] = Field(default_factory=list)
+    exercise_notices: dict[str, str] = Field(default_factory=dict)
     constraints: PlanEditConstraints = Field(default_factory=PlanEditConstraints)
     active_session: bool = False
     proposals_enabled: bool

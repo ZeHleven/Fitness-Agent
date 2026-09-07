@@ -19,7 +19,10 @@ from app.schemas.workout import (
     WorkoutPlanDetail,
     WorkoutProgressResponse,
     WorkoutSessionDetail,
+    DailyWorkoutProgress, WeeklySessionReference,
 )
+from app.services.training_lifecycle import training_today, training_week, display_plan_name
+from app.services.custom_exercises import safety_notice, visible_exercise
 
 
 def sets_metrics(sets_data: object) -> tuple[int, int, float]:
@@ -100,7 +103,7 @@ def is_personal_record(candidate: dict, baseline: list[dict]) -> bool:
 async def list_user_plans(db: AsyncSession, *, user_id: str) -> list[WorkoutPlan]:
     return list((await db.execute(
         select(WorkoutPlan)
-        .where(WorkoutPlan.user_id == user_id)
+        .where(WorkoutPlan.user_id == user_id, WorkoutPlan.hidden_at.is_(None))
         .order_by(WorkoutPlan.created_at.desc())
     )).scalars().all())
 
@@ -121,6 +124,7 @@ async def build_plan_detail(
     plan: WorkoutPlan,
     *,
     profile: UserProfile | None = None,
+    weekly_sessions: list[WorkoutSession] | None = None,
 ) -> WorkoutPlanDetail:
     exercises = (await db.execute(
         select(PlannedExercise)
@@ -130,19 +134,44 @@ async def build_plan_detail(
 
     exercise_ids = {item.exercise_id for item in exercises}
     names: dict[str, str] = {}
+    notices: dict[str, str | None] = {}
     if exercise_ids:
         rows = (await db.execute(
-            select(Exercise.id, Exercise.name_zh).where(Exercise.id.in_(exercise_ids))
-        )).all()
-        names = dict(rows)
+            select(Exercise).where(Exercise.id.in_(exercise_ids), visible_exercise(plan.user_id))
+        )).scalars().all()
+        names = {row.id: row.name_zh for row in rows}
+        notices = {row.id: safety_notice(row) for row in rows}
 
     result = WorkoutPlanDetail.model_validate(plan)
+    result.display_name = display_plan_name(plan.name, generated=plan.ai_generated)
+    result.week_start = training_week()
+    sessions = weekly_sessions
+    if sessions is None:
+        sessions = (await db.execute(select(WorkoutSession).where(
+            WorkoutSession.user_id == plan.user_id,
+            WorkoutSession.plan_family_id == plan.family_id,
+            WorkoutSession.week_start == result.week_start,
+            WorkoutSession.status.in_(['in_progress', 'completed']),
+        ).order_by(WorkoutSession.started_at, WorkoutSession.id))).scalars().all()
+    # Historic duplicate sessions are kept intact; one reference per scheduled day.
+    by_day = {}
+    for session in sessions:
+        if session.plan_family_id != plan.family_id or session.user_id != plan.user_id:
+            continue
+        day = session.day_of_week
+        if day not in {item.day_of_week for item in exercises}:
+            continue
+        if day not in by_day or by_day[day].status != 'completed':
+            by_day[day] = session
+    result.weekly_sessions = [WeeklySessionReference(day_of_week=day, session_id=row.id, status=row.status) for day, row in sorted(by_day.items())]
+    result.weekly_completed_days = sum(row.status == 'completed' for row in by_day.values())
     result.exercises = [
         PlannedExerciseResponse(
             id=item.id,
             plan_id=item.plan_id,
             exercise_id=item.exercise_id,
             exercise_name=names.get(item.exercise_id),
+            safety_notice=notices.get(item.exercise_id),
             day_of_week=item.day_of_week,
             sets=item.sets,
             reps=item.reps,
@@ -266,11 +295,13 @@ async def build_session_detail(
 
     exercise_ids = {item.exercise_id for item in exercises}
     names: dict[str, str] = {}
+    notices: dict[str, str | None] = {}
     if exercise_ids:
         rows = (await db.execute(
-            select(Exercise.id, Exercise.name_zh).where(Exercise.id.in_(exercise_ids))
-        )).all()
-        names = dict(rows)
+            select(Exercise).where(Exercise.id.in_(exercise_ids), visible_exercise(session.user_id))
+        )).scalars().all()
+        names = {row.id: row.name_zh for row in rows}
+        notices = {row.id: safety_notice(row) for row in rows}
 
     history_by_exercise = await get_completed_exercise_history(
         db,
@@ -307,7 +338,8 @@ async def build_session_detail(
             id=item.id,
             session_id=item.session_id,
             exercise_id=item.exercise_id,
-            exercise_name=names.get(item.exercise_id),
+            exercise_name=item.exercise_name or names.get(item.exercise_id),
+            safety_notice=notices.get(item.exercise_id),
             order_index=item.order_index,
             target_sets=item.target_sets,
             target_reps=item.target_reps,
@@ -320,6 +352,7 @@ async def build_session_detail(
         ))
 
     result = WorkoutSessionDetail.model_validate(session)
+    result.orphaned = session.plan_id is None and session.status == 'in_progress'
     result.plan_name = plan_name
     result.exercises = response_exercises
     result.total_sets = total_sets
@@ -373,33 +406,47 @@ async def get_workout_progress_summary(
     user_id: str,
     weeks: int,
     today: date | None = None,
+    selected_week: date | None = None,
 ) -> WorkoutProgressResponse:
-    today = today or date.today()
+    today = today or training_today()
     current_week = today - timedelta(days=today.weekday())
     first_week = current_week - timedelta(weeks=weeks - 1)
+    if selected_week is not None:
+        selected_week = training_week(selected_week)
+        if selected_week < first_week or selected_week > current_week:
+            from fastapi import HTTPException
+            raise HTTPException(422, '所选周不在查询范围内')
+    range_start = selected_week or first_week
+    range_end = (selected_week or current_week) + timedelta(days=7)
     sessions = (await db.execute(
         select(WorkoutSession).where(
             WorkoutSession.user_id == user_id,
-            WorkoutSession.status == "completed",
-            WorkoutSession.trained_at >= first_week,
+            WorkoutSession.status.in_(['completed', 'ended_early']),
+            WorkoutSession.trained_at >= range_start,
+            WorkoutSession.trained_at < range_end,
         )
     )).scalars().all()
 
     buckets = {
-        first_week + timedelta(weeks=index): {
+        range_start + timedelta(weeks=index): {
             "sessions": 0,
             "sets": 0,
             "reps": 0,
             "volume": 0.0,
         }
-        for index in range(weeks)
+        for index in range(1 if selected_week else weeks)
     }
+    daily = {selected_week + timedelta(days=i): DailyWorkoutProgress(date=selected_week + timedelta(days=i)) for i in range(7)} if selected_week else {}
+    session_dates = {}
     session_weeks: dict[str, date] = {}
     for session in sessions:
         week_start = session.trained_at - timedelta(days=session.trained_at.weekday())
         if week_start in buckets:
             buckets[week_start]["sessions"] += 1
             session_weeks[session.id] = week_start
+            session_dates[session.id] = session.trained_at
+            if session.trained_at in daily:
+                daily[session.trained_at].sessions += 1
 
     if session_weeks:
         exercises = (await db.execute(
@@ -411,6 +458,11 @@ async def get_workout_progress_summary(
             buckets[week_start]["sets"] += sets_count
             buckets[week_start]["reps"] += reps
             buckets[week_start]["volume"] += volume
+            day = daily.get(session_dates[exercise.session_id])
+            if day is not None:
+                day.sets += sets_count
+                day.reps += reps
+                day.volume_kg = round(day.volume_kg + volume, 1)
 
     weekly = [
         WeeklyWorkoutProgress(
@@ -429,4 +481,6 @@ async def get_workout_progress_summary(
         total_reps=sum(item.reps for item in weekly),
         total_volume_kg=round(sum(item.volume_kg for item in weekly), 1),
         weekly=weekly,
+        selected_week=selected_week,
+        daily=list(daily.values()),
     )

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import ValidationError
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select, update, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,6 +31,8 @@ from app.schemas.plan_management_proposal import (
     PlanSnapshotV2,
 )
 from app.services.personalized_planner import is_exercise_compatible
+from app.services.custom_exercises import visible_exercise, safety_notice
+from app.services.training_lifecycle import lock_training_user
 from app.services.workout_queries import get_active_user_session
 
 if TYPE_CHECKING:
@@ -232,11 +234,15 @@ async def build_plan_edit_context(
     snapshot = await build_plan_snapshot_v2(db, plan=plan)
     options = list((await db.execute(
         select(Exercise)
-        .where(Exercise.is_active.is_(True))
+        .where(Exercise.is_active.is_(True), visible_exercise(user_id))
         .order_by(Exercise.name_zh)
         .limit(300)
     )).scalars().all())
     compatible = [item for item in options if is_exercise_compatible(profile, item)]
+    private_used = (await db.execute(select(Exercise).where(
+        Exercise.id.in_({item.exercise_id for item in snapshot.exercises}),
+        Exercise.owner_id == user_id,
+    ))).scalars().all()
     active_session = await get_active_user_session(db, user_id=user_id)
     return PlanEditContext(
         base_plan=snapshot,
@@ -248,7 +254,9 @@ async def build_plan_edit_context(
             "category": item.category,
             "difficulty": item.difficulty,
             "equipment": list(item.equipment or []),
+            "safety_notice": safety_notice(item),
         } for item in compatible],
+        exercise_notices={item.id: safety_notice(item) for item in private_used},
         active_session=active_session is not None,
         proposals_enabled=proposals_enabled,
     )
@@ -302,7 +310,7 @@ async def _hydrate_candidate(
 ) -> tuple[PlanSnapshotV2, list[Exercise]]:
     _validate_candidate_structure(before=before, candidate=candidate)
     exercise_ids = {item.exercise_id for item in candidate.exercises}
-    query = select(Exercise).where(Exercise.id.in_(exercise_ids))
+    query = select(Exercise).where(Exercise.id.in_(exercise_ids), visible_exercise(profile.user_id))
     if lock:
         query = query.with_for_update()
     exercises = list((await db.execute(query)).scalars().all())
@@ -677,6 +685,7 @@ async def create_manual_plan_adjustment_proposal(
         raise PlanProposalError(
             "proposal_feature_disabled", "手动计划编辑功能尚未启用", status_code=403
         )
+    await lock_training_user(db, user_id)
     replay = await _idempotent_creation(
         db,
         user_id=user_id,
@@ -767,6 +776,7 @@ async def create_manual_plan_deletion_proposal(
         raise PlanProposalError(
             "proposal_feature_disabled", "计划删除功能尚未启用", status_code=403
         )
+    await lock_training_user(db, user_id)
     replay = await _idempotent_creation(
         db,
         user_id=user_id,
@@ -794,10 +804,10 @@ async def create_manual_plan_deletion_proposal(
         before=before,
         consequences=[
             "永久删除当前活动计划及其中的动作编排。",
-            "保留已完成和进行中的训练记录、逐组数据与计划名称。",
+            "保留所有历史训练记录、逐组数据与计划名称。",
             "删除后需要重新生成计划才能开始下一次计划训练。",
         ],
-        safety_notes=["删除不会中断已经开始的训练。"],
+        safety_notes=["如有进行中的训练，请先完成或保留记录并结束；系统不会替你删除已记录组数。"],
     )
     moment = now or datetime.now(timezone.utc)
     await _supersede_pending_plan_proposals(db, user_id=user_id, plan_id=plan.id)
@@ -982,6 +992,7 @@ async def _apply_adjustment_v2(
 
     new_plan = WorkoutPlan(
         user_id=user_id,
+        family_id=plan.family_id,
         name=hydrated.name,
         goal=hydrated.goal,
         duration_weeks=hydrated.duration_weeks,
@@ -1036,6 +1047,12 @@ async def _apply_plan_deletion(
         raise PlanProposalError(
             "proposal_health_context_changed", "健康资料已变化，请重新检查删除操作"
         )
+    active = await db.scalar(select(WorkoutSession.id).where(
+        WorkoutSession.user_id == user_id, WorkoutSession.status == 'in_progress',
+        or_(WorkoutSession.plan_family_id == plan.family_id, WorkoutSession.plan_id == plan.id),
+    ).limit(1))
+    if active is not None:
+        raise PlanProposalError('workout_in_progress', '请先完成训练，或选择“保留记录并结束”，再删除计划')
     await db.execute(
         update(WorkoutSession)
         .where(WorkoutSession.plan_id == plan.id)
@@ -1061,6 +1078,7 @@ async def decide_manual_plan_proposal(
     request: GenericProposalDecisionRequest,
     now: datetime | None = None,
 ) -> GenericProposalDecisionResponse:
+    await lock_training_user(db, user_id)
     moment = now or datetime.now(timezone.utc)
     proposal = await db.scalar(
         select(AgentProposal)

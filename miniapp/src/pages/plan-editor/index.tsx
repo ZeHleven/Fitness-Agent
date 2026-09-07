@@ -4,6 +4,8 @@ import Taro, { useLoad } from '@tarojs/taro'
 
 import { errorMessage } from '../../core/request'
 import { planManagementApi } from '../../services/plan-management'
+import CustomExerciseEntry from '../../components/CustomExerciseEntry'
+import type { PersonalizedExerciseOption } from '../../types/api'
 import type {
   PlanCandidateV2,
   PlanEditContext,
@@ -76,9 +78,14 @@ export default function PlanEditorPage () {
     setError('')
   }
 
-  const addExercise = (day: number, optionIndex: number) => {
+  const addExercise = (day: number, optionIndex: number, customOption?: PersonalizedExerciseOption) => {
     if (!context) return
-    const option = context.exercise_options[optionIndex]
+    const option = customOption || context.exercise_options[optionIndex]
+    if (!option) return
+    if (exercises.length >= 50) { setError('计划最多包含 50 项动作'); return }
+    if (customOption && !context.exercise_options.some(item => item.exercise_id === customOption.exercise_id)) {
+      setContext({ ...context, exercise_options: [...context.exercise_options, customOption] })
+    }
     if (exercises.some(item => item.day_of_week === day && item.exercise_id === option.exercise_id)) {
       setError(`周${weekday(day)}已经包含${option.exercise_name}`)
       return
@@ -205,6 +212,7 @@ export default function PlanEditorPage () {
                       </View>
                       <Text className='remove-exercise' onClick={() => setExercises(current => normalizeOrder(current.filter(value => value.item_key !== item.item_key)))}>删除</Text>
                     </View>
+                    {(context.exercise_notices?.[item.exercise_id] || context.exercise_options.find(option => option.exercise_id === item.exercise_id)?.safety_notice) && <Text className='custom-safety-notice'>{context.exercise_notices?.[item.exercise_id] || context.exercise_options.find(option => option.exercise_id === item.exercise_id)?.safety_notice}</Text>}
 
                     <View className='exercise-actions'>
                       <Button size='mini' disabled={index === 0} onClick={() => moveOrder(item, -1)}>上移</Button>
@@ -226,8 +234,9 @@ export default function PlanEditorPage () {
                   </View>
                 ))}
                 <Picker mode='selector' range={context.exercise_options.map(option => `${option.exercise_name} · ${option.category}`)} onChange={event => addExercise(day, Number(event.detail.value))}>
-                  <View className='add-exercise'>＋ 添加安全兼容动作</View>
+                  <View className='add-exercise'>＋ 添加已筛选动作</View>
                 </Picker>
+                <CustomExerciseEntry disabled={saving || !context.proposals_enabled} onAdd={option => addExercise(day, -1, option)} />
               </View>
             )
           })}

@@ -1,6 +1,6 @@
 import pytest
 import json
-from datetime import date
+from datetime import date, timedelta
 from unittest.mock import AsyncMock, patch
 
 from app.config import settings
@@ -497,6 +497,8 @@ async def test_workout_execution_lifecycle_and_progress(client, db_session):
     )
     assert confirmed.status_code == 200, confirmed.text
     next_plan_id = confirmed.json()["result_plan_id"]
+    revised = (await client.get(f'/api/v1/workouts/plans/{next_plan_id}', headers=headers)).json()
+    assert revised['weekly_completed_days'] == 1
 
     active_after = await client.get(
         "/api/v1/workouts/sessions/active", headers=headers
@@ -510,11 +512,14 @@ async def test_workout_execution_lifecycle_and_progress(client, db_session):
     )
     assert history_entry["exercises"][0]["sets_data"][0]["set_number"] == 1
 
-    next_start_resp = await client.post(
-        "/api/v1/workouts/sessions/start",
-        json={"plan_id": next_plan_id, "day_of_week": 1},
-        headers=headers,
-    )
+    from app.services.training_lifecycle import training_week
+    # A plan revision preserves this week's completion; the next occurrence is next week.
+    with patch('app.routers.workouts.training_week', return_value=training_week() + timedelta(days=7)):
+        next_start_resp = await client.post(
+            "/api/v1/workouts/sessions/start",
+            json={"plan_id": next_plan_id, "day_of_week": 1},
+            headers=headers,
+        )
     assert next_start_resp.status_code == 201
     next_session = next_start_resp.json()
     next_exercise = next_session["exercises"][0]
@@ -715,12 +720,14 @@ async def test_new_completion_supersedes_only_older_adaptive_proposal(
     )).json()
 
     proposal_ids = []
-    for _ in range(2):
-        session = (await client.post(
-            "/api/v1/workouts/sessions/start",
-            json={"plan_id": plan["id"], "day_of_week": 3},
-            headers=headers,
-        )).json()
+    from app.services.training_lifecycle import training_week
+    for occurrence in range(2):
+        with patch('app.routers.workouts.training_week', return_value=training_week() + timedelta(weeks=occurrence)):
+            session = (await client.post(
+                "/api/v1/workouts/sessions/start",
+                json={"plan_id": plan["id"], "day_of_week": 3},
+                headers=headers,
+            )).json()
         recorded = await client.put(
             f"/api/v1/workouts/sessions/{session['id']}/exercises/"
             f"{session['exercises'][0]['id']}/sets/1",

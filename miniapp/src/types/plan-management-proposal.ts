@@ -40,6 +40,7 @@ export interface PlanExerciseOptionV2 {
   category: string
   difficulty: string
   equipment: string[]
+  safety_notice?: string | null
 }
 
 export interface PlanEditContext {
@@ -47,6 +48,7 @@ export interface PlanEditContext {
   base_plan_fingerprint: string
   health_context_fingerprint: string
   exercise_options: PlanExerciseOptionV2[]
+  exercise_notices?: Record<string, string>
   constraints: {
     duration_weeks_min: number
     duration_weeks_max: number
