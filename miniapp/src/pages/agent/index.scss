@@ -39,6 +39,44 @@
   margin-bottom: 14px;
 }
 
+.new-conversation-prompt {
+  margin-bottom: 18px;
+  padding: 22px;
+  border: 1px solid #d5e5d7;
+  border-radius: 20px;
+  background: #fff;
+}
+
+.new-conversation-prompt-title,
+.new-conversation-prompt-copy {
+  display: block;
+}
+
+.new-conversation-prompt-title {
+  color: #173226;
+  font-size: 28px;
+  font-weight: 700;
+}
+
+.new-conversation-prompt-copy {
+  margin-top: 10px;
+  color: #61756a;
+  font-size: 24px;
+  line-height: 1.6;
+}
+
+.new-conversation-prompt-actions {
+  display: flex;
+  gap: 16px;
+  margin-top: 20px;
+
+  button {
+    flex: 1;
+    margin: 0;
+    font-size: 25px;
+  }
+}
+
 .message-scroll {
   height: calc(100vh - 310px);
 }

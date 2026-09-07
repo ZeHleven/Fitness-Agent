@@ -83,6 +83,8 @@ export default function AgentPage () {
   const [error, setError] = useState('')
   const [scrollTarget, setScrollTarget] = useState('welcome')
   const [sendingLabel, setSendingLabel] = useState('正在提交…')
+  const [newConversationPrompt, setNewConversationPrompt] = useState(false)
+  const conversationGeneration = useRef(0)
   const pollGeneration = useRef(0)
   const sendLock = useRef(false)
   const proposalSyncInFlight = useRef(false)
@@ -91,10 +93,13 @@ export default function AgentPage () {
   messagesRef.current = messages
 
   async function restoreConversation (savedId: string) {
+    const generation = ++conversationGeneration.current
     setLoading(true)
     setError('')
+    setNewConversationPrompt(false)
     try {
       const history = await agentApi.messages(savedId)
+      if (conversationGeneration.current !== generation) return false
       const restored = history
         .filter(item => item.role === 'user' || item.role === 'assistant')
         .map(toDisplayMessage)
@@ -102,10 +107,13 @@ export default function AgentPage () {
       setMessages(restored.length ? restored : [welcomeMessage])
       if (restored.length) void synchronizeProposalReferences(restored)
     } catch (requestError) {
-      setError(errorMessage(requestError, '历史对话加载失败，你仍可开始新对话'))
+      if (conversationGeneration.current === generation) {
+        setError(errorMessage(requestError, '历史对话加载失败，你仍可开始新对话'))
+      }
     } finally {
-      setLoading(false)
+      if (conversationGeneration.current === generation) setLoading(false)
     }
+    return conversationGeneration.current === generation
   }
 
   useLoad(() => {
@@ -117,8 +125,8 @@ export default function AgentPage () {
         if (pending) void resumePendingRequest(pending)
         return
       }
-      await restoreConversation(savedId)
-      if (pending) void resumePendingRequest(pending)
+      const stillCurrent = await restoreConversation(savedId)
+      if (pending && stillCurrent) void resumePendingRequest(pending)
     }
     void loadConversation()
   })
@@ -138,6 +146,7 @@ export default function AgentPage () {
   }, [messages])
 
   useEffect(() => () => {
+    conversationGeneration.current += 1
     pollGeneration.current += 1
   }, [])
 
@@ -220,6 +229,7 @@ export default function AgentPage () {
           pending.artifact_action,
           pending.clarification_action
         )
+        if (pollGeneration.current !== generation) return
         pending = {
           ...pending,
           run_id: submission.run_id,
@@ -266,7 +276,9 @@ export default function AgentPage () {
         await wait(Math.max(500, Math.min(run.poll_after_ms || 800, 2000)))
       }
     } catch (requestError) {
-      setError(errorMessage(requestError, '训练搭子暂时无法回答，稍后返回会自动恢复'))
+      if (pollGeneration.current === generation) {
+        setError(errorMessage(requestError, '训练搭子暂时无法回答，稍后返回会自动恢复'))
+      }
     } finally {
       if (pollGeneration.current === generation) {
         setSending(false)
@@ -281,6 +293,7 @@ export default function AgentPage () {
   ) => {
     const content = (prompt || input).trim()
     if (!content || sending || sendLock.current) return
+    const generation = conversationGeneration.current
     sendLock.current = true
 
     try {
@@ -302,35 +315,32 @@ export default function AgentPage () {
       setInput('')
       await resumePendingRequest(pending)
     } finally {
-      sendLock.current = false
+      if (conversationGeneration.current === generation) sendLock.current = false
     }
   }
 
-  const startNewConversation = async () => {
-    let confirmed = false
-    if (sending || getPendingAgentRequest()) {
-      const pendingResult = await Taro.showModal({
-        title: '后台回答仍在处理',
-        content: '开始新对话会停止本页等待，但不会重复提交或修改训练数据。'
-      })
-      if (!pendingResult.confirm) return
-      confirmed = true
-      pollGeneration.current += 1
-      clearPendingAgentRequest()
-      setSending(false)
-    }
-    if (messages.length > 1 && !confirmed) {
-      const result = await Taro.showModal({
-        title: '开始新对话？',
-        content: '当前对话仍保留在服务端，但本页会切换到一个新会话。'
-      })
-      if (!result.confirm) return
-    }
+  const switchToNewConversation = () => {
+    conversationGeneration.current += 1
+    pollGeneration.current += 1
+    sendLock.current = false
+    clearPendingAgentRequest()
     clearAgentConversationId()
+    setNewConversationPrompt(false)
+    setSending(false)
+    setSendingLabel('正在提交…')
+    setLoading(false)
     setConversationId('')
     setMessages([welcomeMessage])
     setInput('')
     setError('')
+  }
+
+  const startNewConversation = () => {
+    if (sending || getPendingAgentRequest()) {
+      setNewConversationPrompt(true)
+      return
+    }
+    switchToNewConversation()
   }
 
   return (
@@ -346,6 +356,17 @@ export default function AgentPage () {
           <View className='new-chat' onClick={startNewConversation}>新对话</View>
         </View>
       </View>
+
+      {newConversationPrompt && (
+        <View className='new-conversation-prompt'>
+          <Text className='new-conversation-prompt-title'>后台回答仍在处理</Text>
+          <Text className='new-conversation-prompt-copy'>切换不会取消已提交的后台任务。已有对话会保留，你可以从“历史”返回查看。</Text>
+          <View className='new-conversation-prompt-actions'>
+            <Button className='secondary-button keep-conversation' onClick={() => setNewConversationPrompt(false)}>继续等待</Button>
+            <Button className='primary-button confirm-new-conversation' onClick={switchToNewConversation}>开始新对话</Button>
+          </View>
+        </View>
+      )}
 
       {error && <View className='error-banner agent-error'>{error}</View>}
 
