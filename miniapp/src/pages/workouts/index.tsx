@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { Button, Text, View } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
 
@@ -6,6 +6,7 @@ import { errorMessage } from '../../core/request'
 import { workoutApi } from '../../services/workouts'
 import { profileApi } from '../../services/profile'
 import { planManagementApi } from '../../services/plan-management'
+import { trainingDayState, trainingProgressLabel } from '../../core/training'
 import type { WorkoutPlan, WorkoutProgress, WorkoutSession } from '../../types/api'
 import './index.scss'
 
@@ -19,8 +20,13 @@ export default function WorkoutsPage () {
   const [startingKey, setStartingKey] = useState('')
   const [deletingPlanId, setDeletingPlanId] = useState('')
   const [error, setError] = useState('')
+  const [removeTarget, setRemoveTarget] = useState<string | null>(null)
+  const [endActive, setEndActive] = useState(false)
+  const busy = useRef(false)
+  const generation = useRef(0)
 
   const load = async () => {
+    const ticket = ++generation.current
     setLoading(true)
     setError('')
     try {
@@ -34,13 +40,14 @@ export default function WorkoutsPage () {
         workoutApi.active(),
         workoutApi.progress()
       ])
+      if (ticket !== generation.current) return
       setPlans(planData)
       setActive(activeData)
       setProgress(progressData)
     } catch (requestError) {
-      setError(errorMessage(requestError, '训练数据加载失败'))
+      if (ticket === generation.current) setError(errorMessage(requestError, '训练数据加载失败'))
     } finally {
-      setLoading(false)
+      if (ticket === generation.current) setLoading(false)
     }
   }
 
@@ -49,6 +56,14 @@ export default function WorkoutsPage () {
   })
 
   const start = async (planId: string, day: number) => {
+    if (busy.current) return
+    const plan = plans.find(item => item.id === planId)
+    const completed = plan && trainingDayState(plan, day)
+    if (completed?.status === 'completed') {
+      await Taro.navigateTo({ url: `/pages/workout-detail/index?id=${encodeURIComponent(completed.session_id)}` })
+      return
+    }
+    busy.current = true
     const key = `${planId}-${day}`
     setStartingKey(key)
     setError('')
@@ -59,10 +74,34 @@ export default function WorkoutsPage () {
       setError(errorMessage(requestError, '无法开始训练'))
     } finally {
       setStartingKey('')
+      busy.current = false
     }
   }
 
   const activePlan = plans.find(plan => plan.is_active)
+
+  const removeArchived = async () => {
+    if (!removeTarget || busy.current) return
+    busy.current = true
+    setDeletingPlanId(removeTarget)
+    try {
+      await workoutApi.removeArchived(removeTarget)
+      setRemoveTarget(null)
+      await load()
+    } catch (requestError) { setError(errorMessage(requestError, '删除失败，历史训练不会受影响')) }
+    finally { busy.current = false; setDeletingPlanId('') }
+  }
+
+  const finishActive = async () => {
+    if (!active || busy.current) return
+    busy.current = true
+    try {
+      await workoutApi.finishEarly(active.id)
+      setEndActive(false)
+      await load()
+    } catch (requestError) { setError(errorMessage(requestError, '暂时无法结束训练，已记录组数不会删除')) }
+    finally { busy.current = false }
+  }
 
   const proposeDeletion = async (planId: string) => {
     const answer = await Taro.showModal({
@@ -122,6 +161,12 @@ export default function WorkoutsPage () {
         </View>
       )}
 
+      {active && <View className='active-recovery card'>
+            {active.orphaned && <Text>原计划已删除，旧训练记录仍保留。结束旧训练后即可开始新计划。</Text>}
+            {endActive
+              ? <View><Text>保留所有已记录组数并提前结束，不标记本周训练日已完成。</Text><Button className='secondary-button keep-active' onClick={() => setEndActive(false)}>继续训练</Button><Button className='secondary-button finish-active' onClick={finishActive}>保留记录并结束</Button></View>
+              : <Button className='secondary-button show-end-active' onClick={() => setEndActive(true)}>保留记录并结束旧训练</Button>}
+      </View>}
       {progress && (
         <View className='progress-card card'>
           <View className='section-row'>
@@ -155,11 +200,11 @@ export default function WorkoutsPage () {
           <View className='plan-card card' key={plan.id}>
             <View className='plan-heading'>
               <View>
-                <Text className='plan-name'>{plan.name}</Text>
+                <Text className='plan-name'>{plan.display_name || plan.name}</Text>
                 <Text className='plan-meta'>{plan.duration_weeks} 周 · 每周 {plan.days_per_week} 天</Text>
               </View>
               {plan.is_active
-                ? plan.ai_generated && <Text className='ai-tag'>智能</Text>
+                ? <Text className='ai-tag'>{trainingProgressLabel(plan)}</Text>
                 : <Text className='archived-tag'>已归档</Text>}
             </View>
             {plan.is_active && plan.safety_status === 'needs_review' && (
@@ -205,9 +250,17 @@ export default function WorkoutsPage () {
                 </Button>
               </View>
             )}
+            {!plan.is_active && (
+              <View className='archive-actions'>
+                {removeTarget === plan.id
+                  ? <View className='archive-confirm'><Text>从列表删除此归档计划；训练历史与提案记录仍保留。</Text><Button className='secondary-button cancel-archive-delete' disabled={Boolean(deletingPlanId)} onClick={() => setRemoveTarget(null)}>保留</Button><Button className='secondary-button confirm-archive-delete' disabled={Boolean(deletingPlanId)} onClick={removeArchived}>确认删除归档</Button></View>
+                  : <Button className='secondary-button delete-archive' size='mini' onClick={() => setRemoveTarget(plan.id)}>删除归档计划</Button>}
+              </View>
+            )}
             {days.map(day => {
               const exercises = plan.exercises.filter(item => item.day_of_week === day)
               const key = `${plan.id}-${day}`
+              const completed = trainingDayState(plan, day)?.status === 'completed'
               return (
                 <View className='training-day' key={key}>
                   <View className='day-summary'>
@@ -218,14 +271,14 @@ export default function WorkoutsPage () {
                     className='start-button'
                     size='mini'
                     disabled={
-                      !plan.is_active ||
+                      !completed && (!plan.is_active ||
                       plan.safety_status === 'needs_review' ||
                       Boolean(active) ||
-                      Boolean(startingKey)
+                      Boolean(startingKey))
                     }
                     onClick={() => start(plan.id, day)}
                   >
-                    {!plan.is_active
+                    {completed ? '已完成 · 查看' : !plan.is_active
                       ? '已归档'
                       : plan.safety_status === 'needs_review'
                         ? '待复核'

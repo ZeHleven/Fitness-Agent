@@ -12,6 +12,10 @@ export default function HistoryPage () {
   const [progress, setProgress] = useState<WorkoutProgress | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [weekProgress, setWeekProgress] = useState<WorkoutProgress | null>(null)
+  const [weekLoading, setWeekLoading] = useState(false)
+  const weekGeneration = useRef(0)
+  const selectedWeekRef = useRef<string | null>(null)
   const loadGeneration = useRef(0)
 
   const load = async () => {
@@ -24,8 +28,9 @@ export default function HistoryPage () {
         workoutApi.progress()
       ])
       if (loadGeneration.current !== generation) return
-      setHistory(historyData.filter(item => item.status === 'completed'))
+      setHistory(historyData.filter(item => item.status === 'completed' || item.status === 'ended_early'))
       setProgress(progressData)
+      if (selectedWeekRef.current) void selectWeek(selectedWeekRef.current)
     } catch (requestError) {
       if (loadGeneration.current === generation) setError(errorMessage(requestError, '训练历史加载失败，已显示的记录会保留'))
     } finally {
@@ -37,7 +42,25 @@ export default function HistoryPage () {
     void load()
   })
 
-  const maxVolume = Math.max(1, ...(progress ? progress.weekly.map(item => item.volume_kg) : [1]))
+  const selectWeek = async (week: string) => {
+    selectedWeekRef.current = week
+    const ticket = ++weekGeneration.current
+    setWeekLoading(true); setError('')
+    try {
+      const data = await workoutApi.progress(progress?.weeks || 8, week)
+      if (ticket === weekGeneration.current) setWeekProgress(data)
+    } catch (e) { if (ticket === weekGeneration.current) setError(errorMessage(e, '当周数据加载失败，请重试')) }
+    finally { if (ticket === weekGeneration.current) setWeekLoading(false) }
+  }
+
+  const showAllWeeks = () => { selectedWeekRef.current = null; weekGeneration.current++; setWeekProgress(null); setWeekLoading(false) }
+  const metrics = weekProgress || progress
+  const daily = weekProgress?.daily || []
+  const shownHistory = weekProgress && daily.length > 0
+    ? history.filter(item => item.trained_at >= daily[0].date && item.trained_at <= daily[daily.length - 1].date)
+    : history
+
+  const maxVolume = Math.max(1, ...(weekProgress ? daily.map(item => item.volume_kg) : progress ? progress.weekly.map(item => item.volume_kg) : [1]))
 
   return (
     <View className='page history-page'>
@@ -49,10 +72,12 @@ export default function HistoryPage () {
 
       {progress && (
         <View className='card trend-card'>
-          <Text className='trend-title'>近 {progress.weeks} 周训练量</Text>
+          <Text className='trend-title'>{weekProgress ? `${shortDate(weekProgress.selected_week!)} 起的一周训练量` : `近 ${progress.weeks} 周训练量`}</Text>
+          {weekProgress ? <Button className='secondary-button show-all-weeks' onClick={showAllWeeks}>返回近 {progress.weeks} 周</Button> : <Text className='trend-hint'>点击柱子查看当周每天的训练</Text>}
+          {weekLoading && <Text className='trend-hint'>正在读取当周数据…</Text>}
           <View className='trend-chart'>
-            {progress.weekly.map(week => (
-              <View className='week-column' key={week.week_start}>
+            {!weekProgress && progress.weekly.map(week => (
+              <View className='week-column' key={week.week_start} onClick={() => selectWeek(week.week_start)}>
                 <View className='bar-slot'>
                   <View
                     className='volume-bar'
@@ -62,20 +87,26 @@ export default function HistoryPage () {
                 <Text className='week-label'>{shortDate(week.week_start)}</Text>
               </View>
             ))}
+            {weekProgress && daily.map((day, index) => <View className='week-column day-column' key={day.date}>
+              <Text className='day-volume'>{Math.round(day.volume_kg)}</Text>
+              <View className='bar-slot'><View className='volume-bar' style={{ height: `${Math.max(4, day.volume_kg / maxVolume * 100)}%` }} /></View>
+              <Text className='week-label'>周{['一', '二', '三', '四', '五', '六', '日'][index]}</Text>
+              <Text className='week-label'>{shortDate(day.date)}</Text>
+            </View>)}
           </View>
           <View className='history-summary'>
-            <Summary value={progress.total_sessions} label='次训练' />
-            <Summary value={progress.total_sets} label='组' />
-            <Summary value={Math.round(progress.total_volume_kg)} label='kg' />
+            <Summary value={metrics!.total_sessions} label='次训练' />
+            <Summary value={metrics!.total_sets} label='组' />
+            <Summary value={Math.round(metrics!.total_volume_kg)} label='kg' />
           </View>
         </View>
       )}
 
-      {!loading && !error && history.length === 0 && (
-        <View className='card empty-state'>完成第一场训练后，记录和趋势会出现在这里。</View>
+      {!loading && !error && shownHistory.length === 0 && (
+        <View className='card empty-state'>{weekProgress ? '本周还没有训练记录。' : '完成第一场训练后，记录和趋势会出现在这里。'}</View>
       )}
 
-      {history.map(session => {
+      {shownHistory.map(session => {
         const records = session.exercises.reduce(
           (total, exercise) => total + exercise.sets_data.filter(set => set.is_personal_record).length,
           0
@@ -86,6 +117,7 @@ export default function HistoryPage () {
               <View>
                 <Text className='history-plan'>{session.plan_name || '自由训练'}</Text>
                 <Text className='history-date'>{formatDate(session.trained_at)}</Text>
+                {session.status === 'ended_early' && <Text className='history-date'>提前结束 · 已保留实际训练</Text>}
               </View>
               <View className='history-tags'>
                 {records > 0 && <Text className='record-tag'>🏆 {records} 个纪录</Text>}
@@ -128,6 +160,7 @@ export default function HistoryPage () {
                 {session.adaptive_adjustment_status === 'pending_confirmation' ? '查看调整提案' : '查看提案结果'}
               </Button>
             )}
+            <Button className='secondary-button workout-detail-link' onClick={() => Taro.navigateTo({ url: `/pages/workout-detail/index?id=${encodeURIComponent(session.id)}` })}>查看本次训练</Button>
           </View>
         )
       })}

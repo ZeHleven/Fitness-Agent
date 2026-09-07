@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
@@ -18,7 +18,10 @@ from app.schemas.workout import (
     WorkoutProgressResponse, WorkoutSessionComplete, WorkoutSessionCreate,
     WorkoutFeedback, WorkoutSessionDetail,
     WorkoutSessionStart, WorkoutSetRecord,
+    WorkoutRestRecord,
 )
+from app.services.training_lifecycle import lock_training_user, training_today, training_week
+from app.services.custom_exercises import visible_exercise
 from app.schemas.plan_management_proposal import (
     CreatePlanAdjustmentProposalRequest,
     CreatePlanDeletionProposalRequest,
@@ -43,6 +46,22 @@ from app.services.workout_queries import (
 router = APIRouter(prefix="/workouts", tags=["workouts"])
 
 
+async def _validate_owned_exercises(db, user_id, exercise_ids):
+    if not exercise_ids:
+        return {}
+    rows = (await db.execute(select(Exercise).where(
+        Exercise.id.in_(exercise_ids), Exercise.is_active.is_(True), visible_exercise(user_id),
+    ))).scalars().all()
+    if len(rows) != len(exercise_ids):
+        raise HTTPException(422, '动作不存在、已停用或不属于当前用户')
+    profile = await db.scalar(select(UserProfile).where(UserProfile.user_id == user_id))
+    if profile is not None:
+        from app.services.personalized_planner import is_exercise_compatible
+        if any(not is_exercise_compatible(profile, row) for row in rows):
+            raise HTTPException(409, '动作与当前健康或训练条件存在冲突，请先复核')
+    return {row.id: row for row in rows}
+
+
 # ── Plans ─────────────────────────────────────────────────────────────────────
 
 @router.post("/plans", response_model=WorkoutPlanDetail, status_code=201)
@@ -51,6 +70,8 @@ async def create_plan(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    await lock_training_user(db, current_user.id)
+    await _validate_owned_exercises(db, current_user.id, {item.exercise_id for item in body.exercises})
     existing_active = await db.scalar(select(WorkoutPlan.id).where(
         WorkoutPlan.user_id == current_user.id,
         WorkoutPlan.is_active.is_(True),
@@ -87,8 +108,13 @@ async def list_plans(
     profile = await db.scalar(
         select(UserProfile).where(UserProfile.user_id == current_user.id)
     )
+    weekly_sessions = list((await db.execute(select(WorkoutSession).where(
+        WorkoutSession.user_id == current_user.id,
+        WorkoutSession.week_start == training_week(),
+        WorkoutSession.status.in_(['in_progress', 'completed']),
+    ).order_by(WorkoutSession.started_at, WorkoutSession.id))).scalars().all())
     return [
-        await build_plan_detail(db, plan, profile=profile)
+        await build_plan_detail(db, plan, profile=profile, weekly_sessions=weekly_sessions)
         for plan in rows
     ]
 
@@ -124,6 +150,7 @@ async def confirm_personalized_workout_plan(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    await lock_training_user(db, current_user.id)
     from app.services.personalized_planner import (
         PersonalizedPlanError,
         validate_personalized_selection,
@@ -159,6 +186,7 @@ async def confirm_personalized_workout_plan(
         select(Exercise).where(
             Exercise.id.in_(exercise_ids),
             Exercise.is_active.is_(True),
+            visible_exercise(current_user.id),
         )
     )).scalars().all()
     if len(exercise_rows) != len(exercise_ids):
@@ -312,6 +340,7 @@ async def delete_plan(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    await lock_training_user(db, current_user.id)
     plan = await db.scalar(
         select(WorkoutPlan).where(
             WorkoutPlan.id == plan_id,
@@ -325,7 +354,12 @@ async def delete_plan(
             status_code=409,
             detail="活动计划必须通过删除提案确认后删除",
         )
-    raise HTTPException(status_code=409, detail="历史计划为训练审计记录，不能删除")
+    if await db.scalar(select(WorkoutSession.id).where(
+        WorkoutSession.plan_id == plan.id, WorkoutSession.status == 'in_progress',
+    ).limit(1)):
+        raise HTTPException(409, '请先完成或保留记录并结束该计划中进行中的训练')
+    plan.hidden_at = plan.hidden_at or datetime.now(timezone.utc)
+    await db.commit()
 
 
 @router.post("/plans/generate", response_model=WorkoutPlanDetail, status_code=201)
@@ -334,6 +368,7 @@ async def generate_plan(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    await lock_training_user(db, current_user.id)
     existing_active = await db.scalar(select(WorkoutPlan.id).where(
         WorkoutPlan.user_id == current_user.id,
         WorkoutPlan.is_active.is_(True),
@@ -361,6 +396,7 @@ async def start_session(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    await lock_training_user(db, current_user.id)
     active = await db.scalar(
         select(WorkoutSession)
         .where(
@@ -371,7 +407,7 @@ async def start_session(
         .limit(1)
     )
     if active:
-        raise HTTPException(status_code=409, detail="已有进行中的训练，请先继续或放弃")
+        raise HTTPException(status_code=409, detail="已有进行中的训练，请先继续或保留记录并结束")
 
     plan = await db.scalar(
         select(WorkoutPlan).where(
@@ -383,6 +419,17 @@ async def start_session(
         raise HTTPException(status_code=404, detail="训练计划不存在")
     if not plan.is_active:
         raise HTTPException(status_code=400, detail="训练计划已归档，请选择当前计划")
+
+    week = training_week()
+    completed = await db.scalar(select(WorkoutSession.id).where(
+        WorkoutSession.user_id == current_user.id,
+        WorkoutSession.plan_family_id == plan.family_id,
+        WorkoutSession.week_start == week,
+        WorkoutSession.day_of_week == body.day_of_week,
+        WorkoutSession.status == 'completed',
+    ).limit(1))
+    if completed:
+        raise HTTPException(409, detail={'code': 'training_day_completed', 'message': '本周该训练日已完成，请查看本次训练', 'session_id': completed})
 
     from app.services.plan_safety import evaluate_plan_safety
 
@@ -409,13 +456,16 @@ async def start_session(
         raise HTTPException(status_code=400, detail="该训练日没有动作安排")
 
     now = datetime.now(timezone.utc)
+    catalog = await _validate_owned_exercises(db, current_user.id, {item.exercise_id for item in planned})
     session = WorkoutSession(
         user_id=current_user.id,
         plan_id=plan.id,
         plan_name=plan.name,
+        plan_family_id=plan.family_id,
+        week_start=week,
         day_of_week=body.day_of_week,
         status="in_progress",
-        trained_at=now.date(),
+        trained_at=training_today(),
         started_at=now,
     )
     db.add(session)
@@ -424,6 +474,7 @@ async def start_session(
         db.add(SessionExercise(
             session_id=session.id,
             exercise_id=item.exercise_id,
+            exercise_name=catalog[item.exercise_id].name_zh,
             order_index=item.order_index,
             target_sets=item.sets,
             target_reps=item.reps,
@@ -447,6 +498,7 @@ async def get_active_session(
 @router.get("/sessions/progress", response_model=WorkoutProgressResponse)
 async def get_workout_progress(
     weeks: int = Query(default=8, ge=1, le=52),
+    week_start: date | None = Query(default=None),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -454,6 +506,7 @@ async def get_workout_progress(
         db,
         user_id=current_user.id,
         weeks=weeks,
+        selected_week=week_start,
     )
 
 
@@ -463,6 +516,8 @@ async def log_session(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    await lock_training_user(db, current_user.id)
+    catalog = await _validate_owned_exercises(db, current_user.id, {item.exercise_id for item in body.exercises})
     plan_name = None
     if body.plan_id:
         plan = await db.scalar(
@@ -493,6 +548,7 @@ async def log_session(
         db.add(SessionExercise(
             session_id=session.id,
             exercise_id=ex.exercise_id,
+            exercise_name=catalog[ex.exercise_id].name_zh,
             target_sets=len(ex.sets_data),
             sets_data=[s.model_dump() for s in ex.sets_data],
         ))
@@ -538,6 +594,7 @@ async def record_workout_set(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    await lock_training_user(db, current_user.id)
     if set_number < 1 or set_number > 100:
         raise HTTPException(status_code=422, detail="组号必须在 1 到 100 之间")
     session = await db.scalar(
@@ -584,9 +641,15 @@ async def record_workout_set(
         None,
     )
     if existing_index is None:
+        record['recorded_at'] = datetime.now(timezone.utc).isoformat()
+        if body.finished_at is not None:
+            elapsed = (datetime.now(timezone.utc) - body.finished_at).total_seconds()
+            if elapsed < -300 or elapsed > 86400:
+                raise HTTPException(422, '计时时间超出有效范围，请核对设备时间')
+            record['rest_started_at'] = body.finished_at.isoformat()
         sets_data.append(record)
     else:
-        sets_data[existing_index] = record
+        sets_data[existing_index] = {**sets_data[existing_index], **record}
     sets_data.sort(key=lambda item: item.get("set_number", 0))
     exercise.sets_data = sets_data
     await db.commit()
@@ -603,6 +666,7 @@ async def complete_session(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    await lock_training_user(db, current_user.id)
     session = await db.scalar(
         select(WorkoutSession).where(
             WorkoutSession.id == session_id,
@@ -687,12 +751,62 @@ async def complete_session(
     return result
 
 
+@router.put('/sessions/{session_id}/exercises/{session_exercise_id}/sets/{set_number}/rest', response_model=WorkoutSessionDetail)
+async def record_rest(session_id: str, session_exercise_id: str, set_number: int,
+                      body: WorkoutRestRecord, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    await lock_training_user(db, current_user.id)
+    session = await get_user_workout_session(db, user_id=current_user.id, session_id=session_id)
+    if session is None:
+        raise HTTPException(404, '训练记录不存在')
+    exercise = await db.scalar(select(SessionExercise).where(
+        SessionExercise.id == session_exercise_id, SessionExercise.session_id == session.id,
+    ))
+    if exercise is None:
+        raise HTTPException(404, '训练动作不存在')
+    records = normalized_sets(exercise.sets_data)
+    record = next((row for row in records if row.get('set_number') == set_number), None)
+    if record is None:
+        raise HTTPException(404, '请先保存本组记录')
+    expected = {'actual_rest_seconds': body.actual_rest_seconds, 'rest_event_id': body.event_id, 'rest_end_reason': body.end_reason}
+    if record.get('rest_event_id'):
+        if all(record.get(key) == value for key, value in expected.items()):
+            return await build_session_detail(db, session)
+        raise HTTPException(409, '该组休息已经记录，不可重复覆盖')
+    if session.status != 'in_progress':
+        raise HTTPException(409, '训练已结束，不能补写未知休息')
+    record.update(expected)
+    record['rest_source'] = 'client_timer'
+    exercise.sets_data = records
+    await db.commit()
+    return await build_session_detail(db, session)
+
+
+@router.post('/sessions/{session_id}/finish-early', response_model=WorkoutSessionDetail)
+async def finish_early(session_id: str, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    await lock_training_user(db, current_user.id)
+    session = await get_user_workout_session(db, user_id=current_user.id, session_id=session_id)
+    if session is None:
+        raise HTTPException(404, '训练记录不存在')
+    if session.status == 'ended_early':
+        return await build_session_detail(db, session)
+    if session.status != 'in_progress':
+        raise HTTPException(409, '训练已经完成，不能改为提前结束')
+    now = datetime.now(timezone.utc)
+    started = session.started_at.replace(tzinfo=timezone.utc) if session.started_at.tzinfo is None else session.started_at
+    session.status = 'ended_early'
+    session.completed_at = now
+    session.duration_min = max(1, round((now - started).total_seconds() / 60))
+    await db.commit()
+    return await build_session_detail(db, session)
+
+
 @router.delete("/sessions/{session_id}", status_code=204)
 async def abandon_session(
     session_id: str,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    await lock_training_user(db, current_user.id)
     session = await db.scalar(
         select(WorkoutSession).where(
             WorkoutSession.id == session_id,

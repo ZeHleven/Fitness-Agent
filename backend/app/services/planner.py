@@ -19,7 +19,7 @@ async def generate_workout_plan(
 
     # Pull a bounded, user-safe set of exercises into prompt context.
     exercises = (await db.execute(
-        select(Exercise).where(Exercise.is_active.is_(True)).limit(100)
+        select(Exercise).where(Exercise.is_active.is_(True), Exercise.owner_id.is_(None)).limit(100)
     )).scalars().all()
     injuries = set(profile.injuries or []) if profile and isinstance(profile.injuries, list) else set()
     if injuries:

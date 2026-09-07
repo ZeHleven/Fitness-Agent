@@ -201,6 +201,7 @@ async def _persist_candidate_plan(
 ) -> WorkoutPlan:
     new_plan = WorkoutPlan(
         user_id=user_id,
+        family_id=base_plan.family_id,
         name=candidate.name,
         goal=candidate.goal,
         duration_weeks=candidate.duration_weeks,
@@ -272,6 +273,9 @@ async def apply_confirmed_plan_adjustment_atomically(
     fault_injector: PlanAdjustmentExecutionFaultInjector | None = None,
 ) -> PlanAdjustmentProposalDecisionServiceResult:
     """Flush one atomic apply result; the API caller owns the outer commit."""
+
+    from app.services.training_lifecycle import lock_training_user
+    await lock_training_user(db, user_id)
 
     decision = await decide_plan_adjustment_proposal(
         db,

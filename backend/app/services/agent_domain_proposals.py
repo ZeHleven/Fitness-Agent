@@ -1044,7 +1044,7 @@ async def _unique_exercise(
     else:
         exercise_id = None
         name = reference
-    query = select(Exercise).where(Exercise.is_active.is_(True))
+    query = select(Exercise).where(Exercise.is_active.is_(True), Exercise.owner_id.is_(None))
     if exercise_id:
         query = query.where(Exercise.id == str(exercise_id))
     elif isinstance(name, str) and name.strip():
@@ -1550,6 +1550,8 @@ async def _apply_plan_creation(
     proposal: AgentProposal,
     user_id: str,
 ) -> dict[str, Any]:
+    from app.services.training_lifecycle import lock_training_user
+    await lock_training_user(db, user_id)
     active = await db.scalar(
         select(WorkoutPlan.id)
         .where(WorkoutPlan.user_id == user_id, WorkoutPlan.is_active.is_(True))
@@ -1630,6 +1632,8 @@ async def decide_agent_domain_proposal(
     request: GenericProposalDecisionRequest,
     now: datetime | None = None,
 ) -> GenericProposalDecisionResponse:
+    from app.services.training_lifecycle import lock_training_user
+    await lock_training_user(db, user_id)
     moment = now or datetime.now(timezone.utc)
     proposal = await db.scalar(
         select(AgentProposal).where(

@@ -6,6 +6,8 @@ import { errorMessage } from '../../core/request'
 import { nextTrainingDay } from '../../core/workout-schedule'
 import { profileApi } from '../../services/profile'
 import { workoutApi } from '../../services/workouts'
+import CustomExerciseEntry from '../../components/CustomExerciseEntry'
+import type { PersonalizedExerciseOption } from '../../types/api'
 import type {
   PersonalizedPlanExercise,
   PersonalizedPlanPreview
@@ -92,7 +94,8 @@ export default function PlanBuilderPage () {
     patchExercise(index, {
       exercise_id: option.exercise_id,
       exercise_name: option.exercise_name,
-      category: option.category
+      category: option.category,
+      safety_notice: option.safety_notice
     })
   }
 
@@ -108,6 +111,17 @@ export default function PlanBuilderPage () {
       ...preview,
       exercises: preview.exercises.filter((_, itemIndex) => itemIndex !== index)
     })
+  }
+
+  const addExercise = (day: number, option: PersonalizedExerciseOption) => {
+    if (!preview) return
+    if (preview.exercises.some(item => item.day_of_week === day && item.exercise_id === option.exercise_id)) { setError('同一天已经安排了这个动作'); return }
+    if (preview.exercises.length >= 50) { setError('计划最多包含 50 项动作'); return }
+    setPreview({ ...preview,
+      exercise_options: preview.exercise_options.some(item => item.exercise_id === option.exercise_id) ? preview.exercise_options : [...preview.exercise_options, option],
+      exercises: [...preview.exercises, { exercise_id: option.exercise_id, exercise_name: option.exercise_name, category: option.category, safety_notice: option.safety_notice, day_of_week: day, sets: 3, reps: '8-12', rest_seconds: 90, order_index: preview.exercises.filter(item => item.day_of_week === day).length }]
+    })
+    setError('')
   }
 
   const confirm = async (startImmediately: boolean) => {
@@ -242,13 +256,13 @@ export default function PlanBuilderPage () {
                     </View>
                     <View className='remove-action' onClick={() => removeExercise(index)}>移除</View>
                   </View>
-
+                  {exercise.safety_notice && <Text className='custom-safety-notice'>{exercise.safety_notice}</Text>}
                   <Picker
                     mode='selector'
                     range={preview.exercise_options.map(item => item.exercise_name)}
                     onChange={event => replaceExercise(index, Number(event.detail.value))}
                   >
-                    <View className='replace-action'>换一个安全动作 ›</View>
+                    <View className='replace-action'>换一个已筛选动作 ›</View>
                   </Picker>
 
                   <View className='prescription-grid'>
@@ -280,6 +294,8 @@ export default function PlanBuilderPage () {
                   </View>
                 </View>
               ))}
+              <Picker range={preview.exercise_options.map(item => item.exercise_name)} onChange={event => addExercise(day, preview.exercise_options[Number(event.detail.value)])}><View className='replace-action'>＋ 添加已筛选动作</View></Picker>
+              <CustomExerciseEntry disabled={Boolean(savingMode) || generating} onAdd={option => addExercise(day, option)} />
             </View>
           ))}
 

@@ -71,8 +71,11 @@ def _injury_compatible(injuries: set[str], exercise: Exercise) -> bool:
     contraindications = {str(value).strip() for value in exercise.contraindications or []}
     if injuries.intersection(contraindications):
         return False
+    description = exercise.name_zh
+    if exercise.owner_id:
+        description += ' ' + (exercise.technique_cues or '')
     for injury in injuries:
-        if any(keyword in exercise.name_zh for keyword in INJURY_RISK_KEYWORDS.get(injury, set())):
+        if any(keyword in description for keyword in INJURY_RISK_KEYWORDS.get(injury, set())):
             return False
     return True
 
@@ -87,7 +90,11 @@ def is_exercise_compatible(
     *,
     extra_injuries: set[str] | None = None,
 ) -> bool:
+    if exercise.owner_id and exercise.owner_id != profile.user_id:
+        return False
     injuries = _health_values(profile.injuries).union(extra_injuries or set())
+    if exercise.owner_id and _health_values(profile.chronic_conditions).intersection(exercise.contraindications or []):
+        return False
     location = profile.training_location or "gym"
     if not _location_compatible(location, exercise):
         return False
@@ -268,7 +275,7 @@ def build_personalized_plan_preview(
         safety_notes.insert(0, "已采用更保守的起始训练量；首次训练建议有人陪同并延长热身。")
 
     return PersonalizedPlanPreview(
-        name=f"{goal_label} · {days_per_week}日入门计划",
+        name=f"{goal_label} · {days_per_week}日训练计划",
         goal=goal,
         duration_weeks=request.duration_weeks,
         days_per_week=days_per_week,
@@ -300,7 +307,7 @@ async def preview_personalized_plan(
         raise PersonalizedPlanError("请先完善训练档案")
     exercises = (await db.execute(
         select(Exercise)
-        .where(Exercise.is_active.is_(True))
+        .where(Exercise.is_active.is_(True), Exercise.owner_id.is_(None))
         .order_by(Exercise.name_zh)
         .limit(200)
     )).scalars().all()

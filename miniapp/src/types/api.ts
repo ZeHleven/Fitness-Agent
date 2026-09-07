@@ -59,6 +59,7 @@ export interface WeightLog {
 }
 
 export interface PlannedExercise {
+  safety_notice?: string | null
   id: string
   plan_id: string
   exercise_id: string
@@ -74,6 +75,10 @@ export interface PlannedExercise {
 export interface WorkoutPlan {
   id: string
   name: string
+  display_name?: string | null
+  week_start?: string | null
+  weekly_completed_days?: number
+  weekly_sessions?: { day_of_week: number, session_id: string, status: 'in_progress' | 'completed' }[]
   goal?: string | null
   duration_weeks: number
   days_per_week: number
@@ -133,6 +138,7 @@ export interface DailyNutritionSummary {
 }
 
 export interface PersonalizedExerciseOption {
+  safety_notice?: string | null
   exercise_id: string
   exercise_name: string
   category: string
@@ -141,6 +147,7 @@ export interface PersonalizedExerciseOption {
 }
 
 export interface PersonalizedPlanExercise {
+  safety_notice?: string | null
   exercise_id: string
   exercise_name: string
   category: string
@@ -172,6 +179,11 @@ export interface PersonalizedPlanPreviewRequest {
 }
 
 export interface WorkoutSetRecord {
+  rest_started_at?: string
+  recorded_at?: string
+  actual_rest_seconds?: number
+  rest_event_id?: string
+  rest_end_reason?: 'next_set' | 'workout_ended'
   set_number?: number
   reps: number
   weight_kg?: number | null
@@ -179,6 +191,7 @@ export interface WorkoutSetRecord {
 }
 
 export interface SessionExercise {
+  safety_notice?: string | null
   id: string
   session_id: string
   exercise_id: string
@@ -219,6 +232,7 @@ export interface WorkoutAdjustment {
 }
 
 export interface WorkoutSession {
+  orphaned?: boolean
   id: string
   plan_id?: string | null
   plan_name?: string | null
@@ -262,6 +276,8 @@ export interface WorkoutProgress {
   total_reps: number
   total_volume_kg: number
   weekly: WeeklyWorkoutProgress[]
+  selected_week?: string | null
+  daily?: { date: string, sessions: number, sets: number, reps: number, volume_kg: number }[]
 }
 
 export interface AgentCard {

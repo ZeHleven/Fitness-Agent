@@ -22,6 +22,7 @@ class PlannedExerciseResponse(BaseModel):
     plan_id: str
     exercise_id: str
     exercise_name: str | None = None
+    safety_notice: str | None = None
     day_of_week: int
     sets: int
     reps: str
@@ -42,6 +43,12 @@ class WorkoutPlanCreate(BaseModel):
     exercises: list[PlannedExerciseCreate] = Field(default_factory=list, max_length=50)
 
 
+class WeeklySessionReference(BaseModel):
+    day_of_week: int
+    session_id: str
+    status: Literal['in_progress', 'completed']
+
+
 class WorkoutPlanResponse(BaseModel):
     id: str
     user_id: str
@@ -56,6 +63,10 @@ class WorkoutPlanResponse(BaseModel):
     safety_status: Literal["compatible", "needs_review"] = "compatible"
     safety_reasons: list[str] = Field(default_factory=list)
     manual_proposals_enabled: bool = False
+    display_name: str | None = None
+    week_start: date | None = None
+    weekly_completed_days: int = 0
+    weekly_sessions: list[WeeklySessionReference] = Field(default_factory=list)
     model_config = {"from_attributes": True}
 
 
@@ -78,12 +89,14 @@ class PersonalizedExerciseOption(BaseModel):
     category: str = Field(min_length=1, max_length=30)
     difficulty: str = Field(min_length=1, max_length=20)
     equipment: list[str] = Field(default_factory=list)
+    safety_notice: str | None = None
 
 
 class PersonalizedPlanExercise(BaseModel):
     exercise_id: str = Field(min_length=1, max_length=100)
     exercise_name: str = Field(min_length=1, max_length=100)
     category: str = Field(min_length=1, max_length=30)
+    safety_notice: str | None = None
     day_of_week: int = Field(ge=1, le=7)
     sets: int = Field(ge=1, le=8)
     reps: str = Field(min_length=1, max_length=20)
@@ -143,6 +156,21 @@ class WorkoutSessionStart(BaseModel):
 class WorkoutSetRecord(BaseModel):
     reps: int = Field(ge=1, le=1000)
     weight_kg: float | None = Field(default=None, ge=0, le=1000)
+    finished_at: datetime | None = None
+
+    @field_validator('finished_at')
+    @classmethod
+    def timezone_required(cls, value):
+        if value is not None and value.tzinfo is None:
+            raise ValueError('计时时间必须包含时区')
+        return value
+
+
+class WorkoutRestRecord(BaseModel):
+    model_config = {'extra': 'forbid'}
+    event_id: str = Field(min_length=8, max_length=100)
+    actual_rest_seconds: int = Field(ge=0, le=86400)
+    end_reason: Literal['next_set', 'workout_ended']
 
 
 class WorkoutFeedback(BaseModel):
@@ -180,6 +208,7 @@ class SessionExerciseResponse(BaseModel):
     session_id: str
     exercise_id: str
     exercise_name: str | None = None
+    safety_notice: str | None = None
     order_index: int
     target_sets: int | None
     target_reps: str | None
@@ -230,6 +259,7 @@ class AdaptiveAdjustmentProposalResponse(BaseModel):
 
 class WorkoutSessionDetail(WorkoutSessionResponse):
     plan_name: str | None = None
+    orphaned: bool = False
     total_sets: int = 0
     total_reps: int = 0
     total_volume_kg: float = 0
@@ -251,6 +281,14 @@ class WeeklyWorkoutProgress(BaseModel):
     volume_kg: float = 0
 
 
+class DailyWorkoutProgress(BaseModel):
+    date: date
+    sessions: int = 0
+    sets: int = 0
+    reps: int = 0
+    volume_kg: float = 0
+
+
 class WorkoutProgressResponse(BaseModel):
     weeks: int
     total_sessions: int
@@ -258,6 +296,8 @@ class WorkoutProgressResponse(BaseModel):
     total_reps: int
     total_volume_kg: float
     weekly: list[WeeklyWorkoutProgress]
+    selected_week: date | None = None
+    daily: list[DailyWorkoutProgress] = Field(default_factory=list)
 
 
 # ── AI Generate ───────────────────────────────────────────────────────────────

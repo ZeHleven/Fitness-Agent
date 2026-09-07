@@ -4,6 +4,8 @@ import Taro, { useDidShow, useLoad } from '@tarojs/taro'
 
 import { errorMessage } from '../../core/request'
 import { workoutApi } from '../../services/workouts'
+import { clearRest, endRest, newRest, readRest, recoverRest, restPayload, saveRest } from '../../core/workout-rest'
+import type { RestJournal } from '../../core/workout-rest'
 import type {
   SessionExercise,
   WorkoutAdjustment,
@@ -13,23 +15,19 @@ import type {
 } from '../../types/api'
 import './index.scss'
 
-interface RestState {
-  exerciseName: string
-  endsAt: number
-  totalSeconds: number
-}
-
 export default function ActiveWorkoutPage () {
   const [session, setSession] = useState<WorkoutSession | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [safetyReasons, setSafetyReasons] = useState<string[]>([])
-  const [rest, setRest] = useState<RestState | null>(null)
+  const [rest, setRest] = useState<RestJournal | null>(null)
   const [remaining, setRemaining] = useState(0)
   const [feedbackOpen, setFeedbackOpen] = useState(false)
   const restNotified = useRef(false)
-  const restRef = useRef<RestState | null>(null)
+  const restRef = useRef<RestJournal | null>(null)
+  const busy = useRef(false)
+  const [endingEarly, setEndingEarly] = useState(false)
 
   const load = async () => {
     setLoading(true)
@@ -40,6 +38,11 @@ export default function ActiveWorkoutPage () {
         workoutApi.plans()
       ])
       setSession(activeSession)
+      if (activeSession) {
+        const restored = recoverRest(activeSession)
+        restRef.current = restored
+        setRest(restored)
+      }
       const sourcePlan = activeSession?.plan_id
         ? plans.find(plan => plan.id === activeSession.plan_id)
         : null
@@ -62,7 +65,7 @@ export default function ActiveWorkoutPage () {
   const syncRest = () => {
     const currentRest = restRef.current
     if (!currentRest) return
-    const nextRemaining = Math.max(0, Math.ceil((currentRest.endsAt - Date.now()) / 1000))
+    const nextRemaining = Math.max(0, Math.ceil((currentRest.endsAt - (currentRest.endedAt ?? Date.now())) / 1000))
     setRemaining(nextRemaining)
     if (nextRemaining === 0 && !restNotified.current) {
       restNotified.current = true
@@ -80,16 +83,23 @@ export default function ActiveWorkoutPage () {
     return () => clearInterval(timer)
   }, [rest])
 
-  const startRest = (exercise: SessionExercise) => {
-    const seconds = exercise.rest_seconds != null ? exercise.rest_seconds : 90
-    if (seconds <= 0) return
-    restNotified.current = false
-    setRemaining(seconds)
-    setRest({
-      exerciseName: exercise.exercise_name || '当前动作',
-      endsAt: Date.now() + seconds * 1000,
-      totalSeconds: seconds
-    })
+  const persistRest = async (reason: 'next_set' | 'workout_ended') => {
+    const current = restRef.current
+    if (!current) return
+    const ended = endRest(current, reason)
+    saveRest(ended)
+    restRef.current = ended; setRest(ended)
+    const updated = await workoutApi.recordRest(ended.sessionId, ended.exerciseId, ended.setNumber, restPayload(ended))
+    clearRest(ended.sessionId)
+    restRef.current = null; setRest(null); setSession(updated)
+  }
+
+  const finishRest = async () => {
+    if (busy.current) return
+    busy.current = true; setSaving(true); setError('')
+    try { await persistRest('next_set') }
+    catch (e) { setError(errorMessage(e, '休息记录保存失败，点击重试会保留原结束时刻')) }
+    finally { busy.current = false; setSaving(false) }
   }
 
   const recordSet = async (
@@ -98,49 +108,71 @@ export default function ActiveWorkoutPage () {
     reps: number,
     weightKg: number | null
   ) => {
-    if (!session) return
+    if (!session || busy.current) throw new Error('正在保存上一项，请稍后重试')
+    const existing = setAt(exercise.sets_data, setNumber)
+    const pending = readRest(session.id)
+    if (!existing && restRef.current) {
+      setError('请先结束休息，再开始下一组')
+      throw new Error('请先结束休息，再开始下一组')
+    }
+    if (!existing && pending && (pending.exerciseId !== exercise.id || pending.setNumber !== setNumber)) {
+      setError('上一组的保存结果尚未核对，请先重新读取训练或重试保存上一组')
+      throw new Error('上一组的保存结果尚未核对')
+    }
+    busy.current = true
     setSaving(true)
     setError('')
     try {
+      let journal: RestJournal | null = null
+      if (!existing) {
+        journal = pending?.exerciseId === exercise.id && pending.setNumber === setNumber ? pending : newRest(session.id, exercise, setNumber)
+        saveRest(journal)
+      }
       const updated = await workoutApi.recordSet(
         session.id,
         exercise.id,
         setNumber,
         reps,
-        weightKg
+        weightKg,
+        journal ? new Date(journal.startedAt).toISOString() : undefined
       )
       setSession(updated)
+      if (journal) {
+        restNotified.current = false
+        restRef.current = journal; setRest(journal)
+      }
       const updatedExercise = updated.exercises.find(item => item.id === exercise.id)
       const savedSet = updatedExercise ? setAt(updatedExercise.sets_data, setNumber) : null
       if (savedSet && savedSet.is_personal_record) {
-        await Taro.showToast({
+        void Taro.showToast({
           title: `🏆 新个人纪录：${performanceLabel(savedSet)}`,
           icon: 'none',
           duration: 2600
-        })
+        }).catch(() => {})
       }
-      startRest(exercise)
     } catch (requestError) {
       const message = errorMessage(requestError, '本组保存失败')
       setError(message)
       throw requestError
     } finally {
       setSaving(false)
+      busy.current = false
     }
   }
 
   const complete = async () => {
     if (!session || session.total_sets < 1) return
-    setRest(null)
     setError('')
     setFeedbackOpen(true)
   }
 
   const submitFeedback = async (feedback: WorkoutCompleteInput) => {
-    if (!session) return
+    if (!session || busy.current) return
+    busy.current = true
     setSaving(true)
     setError('')
     try {
+      await persistRest('workout_ended')
       const completed = await workoutApi.complete(session.id, feedback)
       setSession(completed)
       setFeedbackOpen(false)
@@ -148,6 +180,7 @@ export default function ActiveWorkoutPage () {
       setError(errorMessage(requestError, '无法完成训练'))
     } finally {
       setSaving(false)
+      busy.current = false
     }
   }
 
@@ -171,6 +204,19 @@ export default function ActiveWorkoutPage () {
     }
   }
 
+  const finishEarly = async () => {
+    if (!session || busy.current) return
+    busy.current = true; setSaving(true)
+    try {
+      const ended = await workoutApi.finishEarly(session.id)
+      clearRest(session.id); restRef.current = null; setRest(null)
+      setSession(ended)
+      setEndingEarly(false)
+      await Taro.redirectTo({ url: `/pages/workout-detail/index?id=${encodeURIComponent(ended.id)}` })
+    } catch (e) { setError(errorMessage(e, '结束失败，已有记录不会删除')) }
+    finally { busy.current = false; setSaving(false) }
+  }
+
   if (loading) return <View className='loading-state'>正在恢复训练…</View>
 
   if (!session) {
@@ -188,6 +234,10 @@ export default function ActiveWorkoutPage () {
     return <CompletionSummary session={session} />
   }
 
+  if (session.status === 'ended_early') {
+    return <View className='page'><View className='card early-end-card'>已提前结束，{session.total_sets} 组训练记录已保留。</View><Button className='primary-button ended-detail' onClick={() => Taro.redirectTo({ url: `/pages/workout-detail/index?id=${encodeURIComponent(session.id)}` })}>查看本次训练</Button></View>
+  }
+
   const elapsedMinutes = Math.max(1, Math.floor((Date.now() - new Date(session.started_at).getTime()) / 60000))
 
   return (
@@ -203,7 +253,7 @@ export default function ActiveWorkoutPage () {
         <View className='abandon-link' onClick={abandon}>放弃</View>
       </View>
 
-      {error && <View className='error-banner'>{error}</View>}
+      {error && <View className='error-banner'>{error}<Button className='secondary-button reload-workout' disabled={saving} onClick={load}>重新读取训练</Button></View>}
       {safetyReasons.length > 0 && (
         <View className='active-safety-warning'>
           <Text className='active-safety-title'>健康资料已变化，请停止训练并复核计划</Text>
@@ -211,11 +261,16 @@ export default function ActiveWorkoutPage () {
         </View>
       )}
 
+      {session.orphaned && <View className='active-safety-warning'>原计划已删除，已记录组数仍保留。可在下方保留记录并结束，解除旧训练占用。</View>}
+      <View className='card early-end-card'>
+        {endingEarly ? <View><Text>保留已记录组数，提前结束本次训练，不标记本周训练日完成。</Text><Button className='secondary-button cancel-early-end' disabled={saving} onClick={() => setEndingEarly(false)}>继续训练</Button><Button className='secondary-button confirm-early-end' disabled={saving} onClick={finishEarly}>保留记录并结束</Button></View> : <Button className='secondary-button open-early-end' disabled={saving} onClick={() => setEndingEarly(true)}>保留记录并提前结束</Button>}
+      </View>
+
       {session.exercises.map(exercise => (
         <ExerciseCard
           key={exercise.id}
           exercise={exercise}
-          disabled={saving}
+          disabled={saving || Boolean(rest)}
           onSave={(setNumber, reps, weightKg) => recordSet(exercise, setNumber, reps, weightKg)}
         />
       ))}
@@ -224,19 +279,18 @@ export default function ActiveWorkoutPage () {
         <View className={`rest-bar ${remaining === 0 ? 'rest-finished' : ''}`}>
           <View className='rest-main'>
             <View>
-              <Text className='rest-time'>{remaining === 0 ? '休息完成' : `组间休息 ${formatTime(remaining)}`}</Text>
+              <Text className='rest-time'>{rest.endedAt != null ? '休息已结束，待保存' : remaining === 0 ? '目标休息时间已到' : `组间休息 ${formatTime(remaining)}`}</Text>
               <Text className='rest-exercise'>{rest.exerciseName}</Text>
             </View>
             <View className='rest-actions'>
-              <View onClick={() => {
+              <Button size='mini' disabled={saving || rest.endedAt != null} onClick={() => {
                 restNotified.current = false
-                setRest(current => current ? {
-                  ...current,
-                  endsAt: Math.max(current.endsAt, Date.now()) + 30000,
-                  totalSeconds: current.totalSeconds + 30
-                } : current)
-              }}>+30秒</View>
-              <View onClick={() => setRest(null)}>{remaining === 0 ? '收起' : '跳过'}</View>
+                const current = restRef.current
+                if (!current) return
+                const next = { ...current, endsAt: Math.max(current.endsAt, Date.now()) + 30000, totalSeconds: current.totalSeconds + 30 }
+                saveRest(next); restRef.current = next; setRest(next)
+              }}>+30秒</Button>
+              <Button className='end-rest' size='mini' disabled={saving} onClick={finishRest}>{rest.endedAt != null ? '重试保存休息' : '结束休息，开始下一组'}</Button>
             </View>
           </View>
           <View className='rest-track'>
@@ -285,6 +339,7 @@ function ExerciseCard ({
       <View className='exercise-heading'>
         <View>
           <Text className='exercise-name'>{exercise.exercise_name || '未命名动作'}</Text>
+          {exercise.safety_notice && <Text className='custom-safety-notice'>{exercise.safety_notice}</Text>}
           <Text className='exercise-target'>
             目标 {count} 组 × {exercise.target_reps || '--'} 次 · 休息 {exercise.rest_seconds != null ? exercise.rest_seconds : 90} 秒
             {exercise.target_weight_kg != null ? ` · 建议 ${weightText(exercise.target_weight_kg)} kg` : ''}

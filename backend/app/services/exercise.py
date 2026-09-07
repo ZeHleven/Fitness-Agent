@@ -14,7 +14,7 @@ async def query_exercise_library(
     category: str | None = None,
     limit: int = 10,
 ) -> list[Exercise]:
-    stmt = select(Exercise).where(Exercise.is_active.is_(True))
+    stmt = select(Exercise).where(Exercise.is_active.is_(True), Exercise.owner_id.is_(None))
     if muscle_group:
         stmt = stmt.where(
             sa.cast(Exercise.muscle_primary, sa.String).contains(f'"{muscle_group}"')

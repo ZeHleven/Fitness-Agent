@@ -55,7 +55,7 @@ async def evaluate_plan_safety(
     reasons: list[str] = []
     for exercise_id in sorted(exercise_ids):
         exercise = by_id.get(exercise_id)
-        if exercise is None or not exercise.is_active:
+        if exercise is None or not exercise.is_active or (exercise.owner_id and exercise.owner_id != plan.user_id):
             reasons.append("计划包含已下架或不存在的动作")
             continue
         if not is_exercise_compatible(profile, exercise):
