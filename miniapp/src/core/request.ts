@@ -148,13 +148,22 @@ async function refreshAccessToken(): Promise<string> {
   if (response.statusCode < 200 || response.statusCode >= 300) {
     const payload = response.data as ApiErrorPayload
     throw new ApiRequestError(
-      apiErrorPayloadMessage(payload, '登录状态已失效，请重新登录'),
+      response.statusCode === 401
+        ? '登录状态已失效，请重新登录'
+        : '暂时无法续期登录，请检查网络后重试。登录信息已保留',
       response.statusCode,
       payload
     )
   }
 
   const tokens = response.data as TokenResponse
+  if (!tokens || typeof tokens.access_token !== 'string' || !tokens.access_token ||
+      typeof tokens.refresh_token !== 'string' || !tokens.refresh_token) {
+    throw new Error('登录续期响应无效，请稍后重试。登录信息已保留')
+  }
+  if (getRefreshToken() !== refreshToken) {
+    throw new Error('登录状态已改变，请在当前账号下重新操作')
+  }
   saveTokens(tokens.access_token, tokens.refresh_token)
   return tokens.access_token
 }
@@ -175,6 +184,7 @@ export async function apiRequest<T>(
 ): Promise<T> {
   const authenticated = options.authenticated !== false
   const accessToken = authenticated ? getAccessToken() : ''
+  const requestRefreshToken = authenticated ? getRefreshToken() : ''
   const response = await transportRequest<T | ApiErrorPayload>(
     withQuery(path, options.query),
     options.method || 'GET',
@@ -196,8 +206,15 @@ export async function apiRequest<T>(
       await getFreshAccessToken()
       return apiRequest<T>(path, options, false)
     } catch (error) {
-      clearTokens()
-      await Taro.reLaunch({ url: '/pages/login/index' })
+      // Only the refresh endpoint's explicit invalid-credential response is
+      // grounds to discard credentials and the user's recovery journals.
+      if (error instanceof ApiRequestError && error.statusCode === 401) {
+        // Concurrent callers share the refresh promise and must redirect once.
+        if (getRefreshToken() && getRefreshToken() === requestRefreshToken) {
+          clearTokens()
+          await Taro.reLaunch({ url: '/pages/login/index' })
+        }
+      }
       throw error
     }
   }

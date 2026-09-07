@@ -1,6 +1,6 @@
-import { useState } from 'react'
-import { Text, View } from '@tarojs/components'
-import { useDidShow } from '@tarojs/taro'
+import { useRef, useState } from 'react'
+import { Button, Text, View } from '@tarojs/components'
+import Taro, { useDidShow } from '@tarojs/taro'
 
 import { errorMessage } from '../../core/request'
 import { workoutApi } from '../../services/workouts'
@@ -12,8 +12,10 @@ export default function HistoryPage () {
   const [progress, setProgress] = useState<WorkoutProgress | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const loadGeneration = useRef(0)
 
   const load = async () => {
+    const generation = ++loadGeneration.current
     setLoading(true)
     setError('')
     try {
@@ -21,12 +23,13 @@ export default function HistoryPage () {
         workoutApi.history(),
         workoutApi.progress()
       ])
+      if (loadGeneration.current !== generation) return
       setHistory(historyData.filter(item => item.status === 'completed'))
       setProgress(progressData)
     } catch (requestError) {
-      setError(errorMessage(requestError, '训练历史加载失败'))
+      if (loadGeneration.current === generation) setError(errorMessage(requestError, '训练历史加载失败，已显示的记录会保留'))
     } finally {
-      setLoading(false)
+      if (loadGeneration.current === generation) setLoading(false)
     }
   }
 
@@ -41,7 +44,7 @@ export default function HistoryPage () {
       <Text className='history-eyebrow'>长期进步来自每一次完成</Text>
       <Text className='history-title'>训练历史</Text>
 
-      {error && <View className='error-banner'>{error}</View>}
+      {error && <View className='error-banner'>{error}<Button className='secondary-button history-retry' onClick={load}>重新加载</Button></View>}
       {loading && <View className='loading-state'>正在整理训练记录…</View>}
 
       {progress && (
@@ -68,7 +71,7 @@ export default function HistoryPage () {
         </View>
       )}
 
-      {!loading && history.length === 0 && (
+      {!loading && !error && history.length === 0 && (
         <View className='card empty-state'>完成第一场训练后，记录和趋势会出现在这里。</View>
       )}
 
@@ -114,6 +117,16 @@ export default function HistoryPage () {
                   </Text>
                 ))}
               </View>
+            )}
+            {session.adaptive_adjustment_proposal && (
+              <Button
+                className='secondary-button adaptive-proposal-link'
+                onClick={() => Taro.navigateTo({
+                  url: `/pages/plan-proposal-detail/index?id=${encodeURIComponent(session.adaptive_adjustment_proposal!.id)}`
+                })}
+              >
+                {session.adaptive_adjustment_status === 'pending_confirmation' ? '查看调整提案' : '查看提案结果'}
+              </Button>
             )}
           </View>
         )

@@ -28,10 +28,12 @@ const history = [
   { id: 'old-answer', role: 'assistant', content: '旧回答', content_data: {} }
 ]
 
-function createPage ({ savedId = 'old-conversation', pending = null, api = {} } = {}) {
+function createPage ({ savedId = 'old-conversation', pending = null, api = {}, clock = Date, timer = setTimeout } = {}) {
   const slots = []
   let cursor = 0
   let onLoad
+  let onShow
+  let onHide
   let tree
   const state = { savedId, pending, modalCalls: 0, submissions: [], runs: [] }
   const storage = {
@@ -89,7 +91,8 @@ function createPage ({ savedId = 'old-conversation', pending = null, api = {} } 
         }
       },
       useLoad: callback => { onLoad = callback },
-      useDidShow: () => {}
+      useDidShow: callback => { onShow = callback },
+      useDidHide: callback => { onHide = callback }
     },
     '../../core/build-info': { miniappBuildLabel: () => 'test-build' },
     '../../core/proposal-reference': { proposalReferenceFromUnknown: () => null },
@@ -102,10 +105,10 @@ function createPage ({ savedId = 'old-conversation', pending = null, api = {} } 
     './index.scss': {}
   }
   const loaded = { exports: {} }
-  new Function('require', 'exports', 'module', output)(name => {
+  new Function('require', 'exports', 'module', 'Date', 'setTimeout', output)(name => {
     assert.ok(name in imports, `Unexpected import: ${name}`)
     return imports[name]
-  }, loaded.exports, loaded)
+  }, loaded.exports, loaded, clock, timer)
 
   function render () {
     cursor = 0
@@ -125,18 +128,135 @@ function createPage ({ savedId = 'old-conversation', pending = null, api = {} } 
     find,
     render,
     mount: () => onLoad(),
+    show: () => onShow(),
+    hide: () => onHide?.(),
     click: className => {
       const target = find(className)
       assert.ok(target, `Missing control: ${className}`)
       return target.props.onClick()
     },
     text: () => JSON.stringify(tree),
+    input: value => find('composer-input').props.onInput({ detail: { value } }),
     flush: async () => {
       await new Promise(resolve => setImmediate(resolve))
       render()
     }
   }
 }
+
+test('returning to the same conversation resumes an interrupted run', async () => {
+  let calls = 0
+  const page = createPage({
+    pending: { client_request_id: 'pending', message: '旧问题', run_id: 'old-run', conversation_id: 'old-conversation' },
+    api: { run: async () => {
+      if (++calls === 1) throw new Error('网络中断')
+      return { id: 'old-run', status: 'completed', reply: '恢复成功', cards: [] }
+    } }
+  })
+  page.mount(); await page.flush()
+  page.hide(); page.show(); await page.flush()
+  assert.equal(calls, 2)
+  assert.match(page.text(), /恢复成功/)
+  assert.equal(page.state.pending, null)
+})
+
+test('load and show overlap uses one submission, and hidden submission resumes using its receipt', async () => {
+  const response = deferred()
+  const page = createPage({ savedId: '', pending: { client_request_id: 'same', message: '问题' },
+    api: { submit: () => response.promise } })
+  page.mount(); page.show(); await page.flush()
+  assert.equal(page.state.submissions.length, 1)
+  page.hide(); page.show(); await page.flush()
+  assert.equal(page.state.submissions.length, 1)
+  response.resolve({ run_id: 'receipt', conversation_id: 'receipt-conversation' })
+  await page.flush(); await page.flush()
+  assert.equal(page.state.submissions.length, 1)
+  assert.deepEqual(page.state.runs, ['receipt'])
+  assert.equal(page.state.pending, null)
+})
+
+test('hidden in-flight poll cannot append late results and return starts only one new poll', async () => {
+  const response = deferred()
+  let calls = 0
+  const page = createPage({ pending: { client_request_id: 'p', message: '问题', run_id: 'r', conversation_id: 'old-conversation' },
+    api: { run: () => ++calls === 1 ? response.promise : { id: 'r', status: 'completed', reply: '新获取结果', cards: [] } } })
+  page.mount(); await page.flush(); page.hide()
+  response.resolve({ id: 'r', status: 'completed', reply: '隐藏期间返回', cards: [] })
+  await page.flush()
+  assert.doesNotMatch(page.text(), /隐藏期间返回/)
+  assert.ok(page.state.pending)
+  page.show(); page.show(); await page.flush()
+  assert.equal(calls, 2)
+  assert.match(page.text(), /新获取结果/)
+})
+
+test('lost submit response retries with the exact ID and action, never a newly generated request', async () => {
+  let calls = 0
+  const action = { action: 'save_as_proposal', artifact_id: 'artifact', expected_version: 1, payload_fingerprint: 'f'.repeat(64) }
+  const page = createPage({ pending: { client_request_id: 'stable', message: '保存这份方案', artifact_action: action },
+    api: { submit: async () => { if (++calls === 1) throw new Error('响应丢失'); return { run_id: 'r', conversation_id: 'old-conversation' } } } })
+  page.mount(); await page.flush()
+  assert.ok(page.find('resume-agent'))
+  await page.click('resume-agent'); await page.flush()
+  assert.equal(page.state.submissions.length, 2)
+  assert.deepEqual(page.state.submissions[0], page.state.submissions[1])
+  assert.equal(page.state.submissions[1][1], 'stable')
+  assert.deepEqual(page.state.submissions[1][3], action)
+})
+
+test('timeout offers explicit recovery; new input is not silently used to recover old work', async () => {
+  let now = 0, calls = 0
+  class Clock extends Date { static now () { return now } }
+  const page = createPage({ clock: Clock,
+    pending: { client_request_id: 'p', message: '旧问题', run_id: 'r', conversation_id: 'old-conversation' },
+    api: { run: async () => { now += 180001; calls++; return { id: 'r', status: 'running' } } } })
+  page.mount(); await page.flush()
+  assert.match(page.text(), /暂时停止等待/)
+  assert.ok(page.find('resume-agent'))
+  page.input('新的问题'); await page.flush()
+  await page.click('send-button'); await page.flush()
+  assert.equal(calls, 1)
+  assert.equal(page.find('composer-input').props.value, '新的问题')
+  assert.match(page.text(), /当前输入已保留/)
+})
+
+test('cleared account recovery state cannot be resurrected by a late submission', async () => {
+  const response = deferred()
+  const page = createPage({ savedId: '', pending: { client_request_id: 'p', message: '问题' }, api: { submit: () => response.promise } })
+  page.mount(); await page.flush()
+  page.state.pending = null; page.state.savedId = ''
+  response.resolve({ run_id: 'r', conversation_id: 'signed-out-conversation' })
+  await page.flush()
+  assert.equal(page.state.pending, null)
+  assert.equal(page.state.savedId, '')
+  assert.deepEqual(page.state.runs, [])
+})
+
+test('queued status is visible and hiding stops the next scheduled poll', async () => {
+  const timers = []
+  let calls = 0
+  const page = createPage({ timer: callback => { timers.push(callback) },
+    pending: { client_request_id: 'p', message: '问题', run_id: 'r', conversation_id: 'old-conversation' },
+    api: { run: async () => ++calls === 1 ? { id: 'r', status: 'queued' } : { id: 'r', status: 'completed', reply: '完成', cards: [] } } })
+  page.mount(); await page.flush()
+  assert.match(page.text(), /正在排队/)
+  assert.equal(timers.length, 1)
+  page.hide(); timers.shift()(); await page.flush()
+  assert.equal(calls, 1)
+  page.show(); await page.flush()
+  assert.equal(calls, 2); assert.equal(page.state.pending, null)
+})
+
+test('sending is blocked during restoration without clearing the typed text', async () => {
+  const historyResponse = deferred()
+  const page = createPage({ api: { messages: () => historyResponse.promise } })
+  page.mount(); page.input('先保留这句话'); await page.flush()
+  await page.click('send-button')
+  assert.equal(page.state.submissions.length, 0)
+  assert.equal(page.find('composer-input').props.value, '先保留这句话')
+  historyResponse.resolve(history); await page.flush()
+  assert.equal(page.find('send-button').props.disabled, false)
+})
 
 test('new conversation works with a broken native modal and submits without the old ID', async () => {
   const page = createPage()

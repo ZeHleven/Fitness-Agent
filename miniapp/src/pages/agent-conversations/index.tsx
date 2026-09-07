@@ -1,9 +1,9 @@
 import { useState } from 'react'
-import { Text, View } from '@tarojs/components'
+import { Button, Text, View } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
 
 import { errorMessage } from '../../core/request'
-import { getAgentConversationId, saveAgentConversationId } from '../../core/storage'
+import { clearPendingAgentRequest, getAgentConversationId, getPendingAgentRequest, saveAgentConversationId } from '../../core/storage'
 import { agentApi } from '../../services/agent'
 import type { AgentConversationSummary } from '../../types/api'
 import './index.scss'
@@ -14,6 +14,7 @@ export default function AgentConversationsPage () {
   const [currentId, setCurrentId] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [pendingSelection, setPendingSelection] = useState<AgentConversationSummary | null>(null)
 
   useDidShow(() => {
     setCurrentId(getAgentConversationId() || '')
@@ -30,18 +31,32 @@ export default function AgentConversationsPage () {
     })()
   })
 
-  const openConversation = async (conversation: AgentConversationSummary) => {
+  const switchConversation = async (conversation: AgentConversationSummary, abandonPending = false) => {
+    if (abandonPending) clearPendingAgentRequest()
     saveAgentConversationId(conversation.id)
     await Taro.navigateBack()
+  }
+  const openConversation = async (conversation: AgentConversationSummary) => {
+    const pending = getPendingAgentRequest()
+    if (pending && conversation.id !== (pending.conversation_id || getAgentConversationId())) {
+      setPendingSelection(conversation)
+      return
+    }
+    await switchConversation(conversation)
   }
 
   return (
     <View className='page conversations-page'>
       <Text className='conversations-eyebrow'>最近 50 个会话</Text>
       <Text className='conversations-title'>历史对话</Text>
+      {pendingSelection && <View className='card conversation-switch-prompt'>
+        <Text>当前回答尚未取得结果。切换只停止本地等待，不取消后台任务；完成后仍可从原会话查看。</Text>
+        <Button className='secondary-button keep-current-conversation' onClick={() => setPendingSelection(null)}>继续当前会话</Button>
+        <Button className='secondary-button confirm-history-switch' onClick={() => switchConversation(pendingSelection, true)}>确认切换</Button>
+      </View>}
       {error && <View className='error-banner'>{error}</View>}
       {loading && <View className='loading-state'>正在加载会话…</View>}
-      {!loading && conversations.length === 0 && (
+      {!loading && !error && conversations.length === 0 && (
         <View className='card empty-state'>还没有历史对话。</View>
       )}
       {conversations.map(conversation => (
