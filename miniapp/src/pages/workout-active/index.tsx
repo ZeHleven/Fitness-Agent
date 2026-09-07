@@ -555,6 +555,7 @@ function CompletionSummary ({ session }: { session: WorkoutSession }) {
       <View className='card adjustment-summary'>
         <Text className='adjustment-title'>{presentation.title}</Text>
         <Text className='adjustment-subtitle'>{presentation.subtitle}</Text>
+        {proposal && <Text className='adjustment-subtitle'>离开后可从训练历史找回这份调整提案。</Text>}
         {session.adjustments.map((item, index) => (
           <AdjustmentLine adjustment={item} key={`${item.exercise_id}-${index}`} />
         ))}

@@ -1,4 +1,22 @@
 .nutrition-page { padding-bottom: 150px; }
+.meal-editor { margin-top: 24px; }
+.section-heading-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.section-heading-row .history-heading { margin: 24px 0 16px; }
+.refresh-meals { margin: 0; background: transparent; color: #1d6b49; font-size: 22px; }
+.empty-copy, .nutrition-basis-note, .field-error { display: block; font-size: 23px; line-height: 1.6; }
+.empty-copy, .nutrition-basis-note { color: #617269; }
+.nutrition-basis-note { margin: 12px 0; }
+.field-error { margin-top: 10px; color: #9c352b; }
+.inline-confirm { margin-top: 20px; background: #fff6df; font-size: 25px; line-height: 1.6; }
+.confirm-actions { display: grid; grid-template-columns: 1fr; gap: 12px; margin-top: 16px; }
+.confirm-actions button { width: 100%; font-size: 25px; }
+.confirm-delete { color: #9c352b; }
+.toggle-custom { margin-top: 20px; font-size: 24px; }
+.custom-form { margin-top: 18px; }
+.clear-custom { margin-top: 12px; font-size: 23px; }
+.today-retry, .history-retry, .food-retry { margin-top: 12px; font-size: 24px; }
+.meal-actions button, button.remove-item { margin: 0; padding: 10px 14px; min-height: 64px; line-height: 44px; border-radius: 12px; background: #f3f7f2; }
+.food-results { overscroll-behavior: contain; }
 .nutrition-eyebrow, .nutrition-title, .daily-label, .daily-calories,
 .macro-value, .macro-label, .editor-label, .food-name, .food-meta,
 .custom-title, .selected-title, .history-heading, .history-date,

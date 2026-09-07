@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Button, ScrollView, Text, Textarea, View } from '@tarojs/components'
-import Taro, { useDidShow, useLoad } from '@tarojs/taro'
+import Taro, { useDidHide, useDidShow, useLoad } from '@tarojs/taro'
 
 import { miniappBuildLabel } from '../../core/build-info'
 import {
@@ -87,6 +87,10 @@ export default function AgentPage () {
   const conversationGeneration = useRef(0)
   const pollGeneration = useRef(0)
   const sendLock = useRef(false)
+  const visible = useRef(true)
+  const restoredConversation = useRef('')
+  const entryInFlight = useRef<Promise<void> | null>(null)
+  const activeRequest = useRef<{ id: string, generation: number, promise: Promise<void> } | null>(null)
   const proposalSyncInFlight = useRef(false)
   const proposalSyncQueued = useRef(false)
   const messagesRef = useRef(messages)
@@ -96,7 +100,6 @@ export default function AgentPage () {
     const generation = ++conversationGeneration.current
     setLoading(true)
     setError('')
-    setNewConversationPrompt(false)
     try {
       const history = await agentApi.messages(savedId)
       if (conversationGeneration.current !== generation) return false
@@ -104,40 +107,48 @@ export default function AgentPage () {
         .filter(item => item.role === 'user' || item.role === 'assistant')
         .map(toDisplayMessage)
       setConversationId(savedId)
+      restoredConversation.current = savedId
       setMessages(restored.length ? restored : [welcomeMessage])
       if (restored.length) void synchronizeProposalReferences(restored)
     } catch (requestError) {
       if (conversationGeneration.current === generation) {
         setError(errorMessage(requestError, '历史对话加载失败，你仍可开始新对话'))
       }
+      return false
     } finally {
       if (conversationGeneration.current === generation) setLoading(false)
     }
     return conversationGeneration.current === generation
   }
 
-  useLoad(() => {
-    const loadConversation = async () => {
-      const savedId = getAgentConversationId()
+  function enterPage (): Promise<void> {
+    visible.current = true
+    if (entryInFlight.current) return entryInFlight.current
+    const task = (async () => {
+      // Coalesce useLoad/useDidShow even before the first React render.
       const pending = getPendingAgentRequest()
-      if (!savedId) {
-        setLoading(false)
-        if (pending) void resumePendingRequest(pending)
-        return
-      }
-      const stillCurrent = await restoreConversation(savedId)
-      if (pending && stillCurrent) void resumePendingRequest(pending)
-    }
-    void loadConversation()
-  })
+      const savedId = pending?.conversation_id || getAgentConversationId()
+      if (savedId && savedId !== restoredConversation.current) {
+        if (!await restoreConversation(savedId)) return
+      } else if (!savedId) setLoading(false)
+      if (!visible.current) return
+      const current = getPendingAgentRequest()
+      if (current) void resumePendingRequest(current)
+      else void synchronizeProposalReferences(messagesRef.current)
+    })()
+    entryInFlight.current = task
+    void task.finally(() => {
+      if (entryInFlight.current === task) entryInFlight.current = null
+    })
+    return task
+  }
 
-  useDidShow(() => {
-    const selectedId = getAgentConversationId()
-    if (selectedId && selectedId !== conversationId && !getPendingAgentRequest()) {
-      void restoreConversation(selectedId)
-      return
-    }
-    void synchronizeProposalReferences(messagesRef.current)
+  useLoad(() => { void enterPage() })
+  useDidShow(() => { void enterPage() })
+  useDidHide(() => {
+    visible.current = false
+    pollGeneration.current += 1
+    setSending(false)
   })
 
   useEffect(() => {
@@ -146,6 +157,7 @@ export default function AgentPage () {
   }, [messages])
 
   useEffect(() => () => {
+    visible.current = false
     conversationGeneration.current += 1
     pollGeneration.current += 1
   }, [])
@@ -201,9 +213,32 @@ export default function AgentPage () {
   async function resumePendingRequest (
     initialRequest: PendingAgentRequest
   ) {
+    const active = activeRequest.current
+    if (active?.id === initialRequest.client_request_id) {
+      if (active.generation === pollGeneration.current) return active.promise
+      // A hidden page may still have one HTTP request in flight. Do not start
+      // a second submission/poll until that request settles.
+      await active.promise
+      if (!visible.current || getPendingAgentRequest()?.client_request_id !== initialRequest.client_request_id) return
+      return resumePendingRequest(getPendingAgentRequest()!)
+    }
+    if (!visible.current || getPendingAgentRequest()?.client_request_id !== initialRequest.client_request_id) return
     const generation = ++pollGeneration.current
+    const promise = runPendingRequest(initialRequest, generation)
+    const entry = { id: initialRequest.client_request_id, generation, promise }
+    activeRequest.current = entry
+    try { await promise } finally {
+      if (activeRequest.current === entry) activeRequest.current = null
+    }
+  }
+
+  async function runPendingRequest (initialRequest: PendingAgentRequest, generation: number) {
     const startedAt = Date.now()
     let pending = initialRequest
+    const owner = conversationGeneration.current
+    const ownsPending = () => conversationGeneration.current === owner &&
+      getPendingAgentRequest()?.client_request_id === initialRequest.client_request_id
+    const isCurrent = () => visible.current && pollGeneration.current === generation && ownsPending()
 
     setError('')
     setSending(true)
@@ -229,7 +264,9 @@ export default function AgentPage () {
           pending.artifact_action,
           pending.clarification_action
         )
-        if (pollGeneration.current !== generation) return
+        // Persist the receipt even if the page was hidden during submission,
+        // provided this is still the same request and account session.
+        if (!ownsPending()) return
         pending = {
           ...pending,
           run_id: submission.run_id,
@@ -239,15 +276,17 @@ export default function AgentPage () {
         if (submission.conversation_id !== conversationId) {
           setConversationId(submission.conversation_id)
           saveAgentConversationId(submission.conversation_id)
+          restoredConversation.current = submission.conversation_id
         }
       }
 
+      if (!isCurrent()) return
       if (!pending.run_id) throw new Error('后台任务创建失败，请稍后重试')
       setSendingLabel('正在后台查询并思考…')
 
-      while (pollGeneration.current === generation) {
+      while (isCurrent()) {
         const run = await agentApi.run(pending.run_id)
-        if (pollGeneration.current !== generation) return
+        if (!isCurrent()) return
         if (run.status === 'completed') {
           if (!run.reply) throw new Error('回答已完成但内容为空，请重新发送')
           setMessages(current => current.some(item => item.id === run.id)
@@ -269,15 +308,18 @@ export default function AgentPage () {
           clearPendingAgentRequest()
           throw new Error(run.error_message || '训练搭子暂时无法完成请求，请重新发送')
         }
+        setSendingLabel(run.status === 'queued' ? '正在排队，等待后台处理…' : '正在后台查询并思考…')
         if (Date.now() - startedAt >= MAX_AGENT_WAIT_MS) {
-          setError('回答仍在后台处理中。你可以离开本页，稍后返回会自动恢复。')
+          setError('暂时停止等待，后台任务没有取消。可点击“继续获取回答”，或稍后返回本页。')
           return
         }
         await wait(Math.max(500, Math.min(run.poll_after_ms || 800, 2000)))
       }
     } catch (requestError) {
-      if (pollGeneration.current === generation) {
-        setError(errorMessage(requestError, '训练搭子暂时无法回答，稍后返回会自动恢复'))
+      if (visible.current && pollGeneration.current === generation) {
+        setError(getPendingAgentRequest()
+          ? `连接中断或暂时无法获取结果：${errorMessage(requestError, '请检查网络')}。原请求已保留，可继续获取回答。`
+          : errorMessage(requestError, '训练搭子暂时无法完成请求'))
       }
     } finally {
       if (pollGeneration.current === generation) {
@@ -292,14 +334,14 @@ export default function AgentPage () {
     action?: AgentCardAction
   ) => {
     const content = (prompt || input).trim()
-    if (!content || sending || sendLock.current) return
+    if (!content || loading || sending || sendLock.current) return
     const generation = conversationGeneration.current
     sendLock.current = true
 
     try {
       const existingPending = getPendingAgentRequest()
       if (existingPending) {
-        await resumePendingRequest(existingPending)
+        setError('上一条请求还未处理完。请先点击“继续获取回答”，或明确开始新对话；当前输入已保留。')
         return
       }
 
@@ -322,6 +364,8 @@ export default function AgentPage () {
   const switchToNewConversation = () => {
     conversationGeneration.current += 1
     pollGeneration.current += 1
+    entryInFlight.current = null
+    restoredConversation.current = ''
     sendLock.current = false
     clearPendingAgentRequest()
     clearAgentConversationId()
@@ -369,6 +413,12 @@ export default function AgentPage () {
       )}
 
       {error && <View className='error-banner agent-error'>{error}</View>}
+      {!sending && getPendingAgentRequest() && (
+        <View className='agent-recovery'>
+          <Text>有一条尚未取得结果的请求，不需要重新发送问题。</Text>
+          <Button className='secondary-button resume-agent' onClick={() => { void enterPage() }}>继续获取回答</Button>
+        </View>
+      )}
 
       <ScrollView
         className='message-scroll'
@@ -426,12 +476,12 @@ export default function AgentPage () {
           maxlength={2000}
           autoHeight
           placeholder='问训练、健康、体重、饮食或让搭子制定方案…'
-          disabled={sending}
+          disabled={sending || loading}
           onInput={event => setInput(event.detail.value)}
         />
         <Button
           className='send-button'
-          disabled={sending || !input.trim()}
+          disabled={sending || loading || !input.trim()}
           onClick={() => send()}
         >
           {sending ? '处理中' : '发送'}
