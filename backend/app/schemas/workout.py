@@ -217,6 +217,17 @@ class WorkoutAdjustmentResponse(BaseModel):
     safety_priority: bool = False
 
 
+class AdaptiveAdjustmentProposalResponse(BaseModel):
+    id: str
+    proposal_type: Literal["plan_adjustment_v2"]
+    status: Literal[
+        "pending_confirmation", "applied", "rejected", "expired", "stale", "failed"
+    ]
+    version: int = Field(ge=1)
+    expires_at: datetime
+    payload_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class WorkoutSessionDetail(WorkoutSessionResponse):
     plan_name: str | None = None
     total_sets: int = 0
@@ -225,6 +236,11 @@ class WorkoutSessionDetail(WorkoutSessionResponse):
     exercises: list[SessionExerciseResponse] = Field(default_factory=list)
     feedback: WorkoutFeedback | None = None
     adjustments: list[WorkoutAdjustmentResponse] = Field(default_factory=list)
+    adaptive_adjustment_status: Literal[
+        "not_needed", "pending_confirmation", "applied", "rejected",
+        "expired", "stale", "failed", "blocked_by_existing",
+    ] = "not_needed"
+    adaptive_adjustment_proposal: AdaptiveAdjustmentProposalResponse | None = None
 
 
 class WeeklyWorkoutProgress(BaseModel):

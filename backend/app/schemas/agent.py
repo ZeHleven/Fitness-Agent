@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_serializer
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 from app.schemas.agent_trace import AgentExecutionTrace, ExecutionMode
 
@@ -17,12 +17,29 @@ class AgentArtifactActionRequest(BaseModel):
     payload_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class AgentClarificationActionRequest(BaseModel):
+    """A server-issued choice for an active structured clarification."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["select_plan_occurrences"]
+    origin_run_id: str = Field(min_length=1, max_length=100)
+    choice_ids: list[str] = Field(min_length=1, max_length=7)
+
+
 class AgentChatRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     message: str = Field(min_length=1, max_length=4000)
     conversation_id: str | None = Field(default=None, max_length=100)
     artifact_action: AgentArtifactActionRequest | None = None
+    clarification_action: AgentClarificationActionRequest | None = None
+
+    @model_validator(mode="after")
+    def actions_are_mutually_exclusive(self):
+        if self.artifact_action is not None and self.clarification_action is not None:
+            raise ValueError("artifact_action and clarification_action are mutually exclusive")
+        return self
 
 
 class AgentRunCreateRequest(BaseModel):
@@ -32,6 +49,13 @@ class AgentRunCreateRequest(BaseModel):
     conversation_id: str | None = Field(default=None, max_length=100)
     client_request_id: str = Field(min_length=8, max_length=120)
     artifact_action: AgentArtifactActionRequest | None = None
+    clarification_action: AgentClarificationActionRequest | None = None
+
+    @model_validator(mode="after")
+    def actions_are_mutually_exclusive(self):
+        if self.artifact_action is not None and self.clarification_action is not None:
+            raise ValueError("artifact_action and clarification_action are mutually exclusive")
+        return self
 
 
 class AgentRunCreateResponse(BaseModel):

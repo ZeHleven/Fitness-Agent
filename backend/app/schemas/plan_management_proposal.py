@@ -148,7 +148,7 @@ class GenericProposalDecisionRequest(_StrictModel):
 class GenericProposalReadResponse(_StrictModel):
     id: str
     proposal_type: str
-    origin: Literal["agent_chat", "manual_editor"]
+    origin: Literal["agent_chat", "manual_editor", "workout_completion"]
     status: Literal[
         "pending_confirmation", "applied", "rejected", "expired", "stale", "failed"
     ]

@@ -1,7 +1,9 @@
 import { apiRequest } from '../core/request'
 import type {
-  AgentMessage,
   AgentArtifactAction,
+  AgentClarificationAction,
+  AgentConversationSummary,
+  AgentMessage,
   AgentRunStatus,
   AgentRunSubmission
 } from '../types/api'
@@ -12,7 +14,8 @@ export const agentApi = {
     message: string,
     clientRequestId: string,
     conversationId?: string,
-    artifactAction?: AgentArtifactAction
+    artifactAction?: AgentArtifactAction,
+    clarificationAction?: AgentClarificationAction
   ) => apiRequest<AgentRunSubmission>(
     '/agent/runs',
     {
@@ -21,7 +24,8 @@ export const agentApi = {
         message,
         client_request_id: clientRequestId,
         ...(conversationId ? { conversation_id: conversationId } : {}),
-        ...(artifactAction ? { artifact_action: artifactAction } : {})
+        ...(artifactAction ? { artifact_action: artifactAction } : {}),
+        ...(clarificationAction ? { clarification_action: clarificationAction } : {})
       }
     }
   ),
@@ -29,5 +33,9 @@ export const agentApi = {
   messages: (conversationId: string) => apiRequest<AgentMessage[]>(
     `/agent/conversations/${conversationId}/messages`,
     { query: { limit: 100 } }
+  ),
+  conversations: (limit = 50) => apiRequest<AgentConversationSummary[]>(
+    '/agent/conversations',
+    { query: { limit } }
   )
 }

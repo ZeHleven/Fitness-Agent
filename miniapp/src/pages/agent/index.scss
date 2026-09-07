@@ -35,15 +35,6 @@
   font-size: 18px;
 }
 
-.new-chat {
-  padding: 14px 20px;
-  border-radius: 999px;
-  background: #e6f1e9;
-  color: #1d6b49;
-  font-size: 24px;
-  font-weight: 750;
-}
-
 .agent-error {
   margin-bottom: 14px;
 }
@@ -401,4 +392,42 @@
 
 .scroll-spacer {
   height: 24px;
+}
+
+.agent-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.chat-history,
+.new-chat {
+  padding: 12px 17px;
+  border-radius: 999px;
+  background: #e7f2e9;
+  color: #1d6b49;
+  font-size: 21px;
+  font-weight: 800;
+}
+
+.clarification-card {
+  background: #f4f9f4;
+}
+
+.clarification-options {
+  display: grid;
+  margin-top: 16px;
+  gap: 12px;
+}
+
+.clarification-option {
+  width: 100%;
+  min-height: 68px;
+  margin: 0;
+  border: 1px solid #cfe1d2;
+  border-radius: 17px;
+  background: #ffffff;
+  color: #1d6b49;
+  font-size: 23px;
+  font-weight: 780;
 }

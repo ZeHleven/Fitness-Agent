@@ -15,6 +15,8 @@
 .editor-row, .search-row, .portion-row, .food-row, .selected-row,
 .history-day-heading, .history-meal-heading { display: flex; align-items: center; }
 .editor-row, .history-day-heading, .history-meal-heading { justify-content: space-between; }
+.date-row { margin-top: 14px; }
+.date-label { color: #617269; font-size: 22px; }
 .editor-label { font-size: 29px; font-weight: 850; }
 .meal-picker { padding: 14px 20px; border-radius: 16px; background: #eaf3ec; color: #1d6b49; font-size: 23px; font-weight: 750; }
 .search-row { margin-top: 24px; gap: 10px; }
@@ -35,9 +37,19 @@
 .custom-add { min-height: 72px; margin-top: 14px; font-size: 24px; }
 .selected-items { margin-top: 26px; padding-top: 20px; border-top: 1px solid #e5ebe5; }
 .selected-title { margin-bottom: 10px; font-size: 24px; font-weight: 800; }
-.selected-row { padding: 12px 0; justify-content: space-between; gap: 14px; color: #4c5f54; font-size: 21px; }
+.selected-row { padding: 16px 0; align-items: flex-start; justify-content: space-between; gap: 14px; border-bottom: 1px solid #edf1ed; color: #4c5f54; font-size: 21px; }
+.selected-main { min-width: 0; flex: 1; }
+.selected-name { display: block; font-size: 23px; font-weight: 780; }
+.selected-name-input { min-height: 54px; box-sizing: border-box; padding: 8px 10px; border: 2px solid #dce5dd; border-radius: 13px; background: #fff; font-size: 23px; font-weight: 780; }
+.selected-amount { display: flex; margin-top: 9px; align-items: center; gap: 8px; color: #718178; }
+.selected-amount-input { width: 112px; min-height: 54px; box-sizing: border-box; padding: 8px 10px; border: 2px solid #dce5dd; border-radius: 13px; background: #fff; text-align: center; }
+.selected-custom-grid { display: grid; margin-top: 10px; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+.draft-summary { display: grid; margin-top: 16px; padding: 15px; border-radius: 14px; background: #f2f7f2; color: #315341; font-size: 21px; gap: 5px; }
 .remove-item, .delete-meal { flex: 0 0 auto; color: #a44538; }
+.edit-meal { color: #1d6b49; }
+.meal-actions { display: flex; gap: 22px; font-size: 21px; }
 .save-meal { margin-top: 22px; }
+.cancel-edit { margin-top: 12px; }
 .history-heading { margin: 32px 4px 16px; font-size: 29px; font-weight: 850; }
 .history-day-heading { margin-bottom: 12px; }
 .history-date { font-size: 27px; font-weight: 820; }

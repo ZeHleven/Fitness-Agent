@@ -20,6 +20,14 @@ export const nutritionApi = {
     method: 'POST',
     data
   }),
+  updateMeal: (mealId: string, data: {
+    logged_at: string
+    meal_type: MealLog['meal_type']
+    items: MealItemInput[]
+  }) => apiRequest<MealLog>(`/meals/${mealId}`, {
+    method: 'PUT',
+    data
+  }),
   deleteMeal: (mealId: string) => apiRequest<void>(`/meals/${mealId}`, {
     method: 'DELETE'
   })

@@ -5,7 +5,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from langchain.agents import create_agent
@@ -27,6 +27,7 @@ from app.models.agent import (
 from app.schemas.agent import (
     AgentArtifactActionRequest,
     AgentArtifactReference,
+    AgentClarificationActionRequest,
     AgentProposalReference,
 )
 from app.schemas.agent_plan_adjustment_proposal_api import (
@@ -528,6 +529,10 @@ def _message_content_text(content: Any) -> str:
     return ""
 
 
+def _conversation_summary(reply: str) -> str:
+    return re.sub(r"\s+", " ", reply).strip()[:200]
+
+
 def _json_result(content: Any) -> dict[str, Any]:
     if isinstance(content, dict):
         return content
@@ -764,6 +769,24 @@ _ORDINAL_SELECTIONS = {
     "第3个": 2,
     "第3项": 2,
 }
+_STRUCTURED_CLARIFICATION_TTL = timedelta(hours=24)
+
+
+def _structured_clarification_is_current(
+    pending_clarification: dict[str, Any] | None,
+) -> bool:
+    if not pending_clarification:
+        return False
+    expires_at = pending_clarification.get("expires_at")
+    if not isinstance(expires_at, str) or not expires_at:
+        return False
+    try:
+        parsed = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed > datetime.now(timezone.utc)
 
 
 def _resolve_plan_target_selection(
@@ -906,6 +929,138 @@ def _resolve_plan_target_selection(
         resolution=resolution,
         source="rules",
         fallback_reason="persisted_plan_target_selection",
+    )
+
+
+def _plan_target_choice_card(
+    context: dict[str, Any] | None,
+    *,
+    origin_run_id: str,
+) -> dict[str, Any] | None:
+    if not isinstance(context, dict) or context.get("clarification_type") != (
+        "plan_exercise_occurrence"
+    ):
+        return None
+    raw_candidates = context.get("candidates")
+    if not isinstance(raw_candidates, list) or len(raw_candidates) < 2:
+        return None
+    options: list[dict[str, Any]] = []
+    all_ids: list[str] = []
+    for raw in raw_candidates[:7]:
+        if not isinstance(raw, dict):
+            return None
+        item_key = raw.get("item_key")
+        day = raw.get("day_of_week")
+        name = raw.get("exercise_name")
+        if (
+            not isinstance(item_key, str)
+            or not item_key.startswith("planned:")
+            or not isinstance(day, int)
+            or day not in _WEEKDAY_SELECTION_LABELS
+            or not isinstance(name, str)
+            or not name.strip()
+        ):
+            return None
+        all_ids.append(item_key)
+        options.append({
+            "label": f"{_WEEKDAY_SELECTION_LABELS[day]}的{name.strip()}",
+            "message": f"选择{_WEEKDAY_SELECTION_LABELS[day]}的{name.strip()}",
+            "action": {
+                "action": "select_plan_occurrences",
+                "origin_run_id": origin_run_id,
+                "choice_ids": [item_key],
+            },
+        })
+    options.append({
+        "label": "全部匹配动作",
+        "message": "修改全部匹配动作",
+        "action": {
+            "action": "select_plan_occurrences",
+            "origin_run_id": origin_run_id,
+            "choice_ids": all_ids,
+        },
+    })
+    return {
+        "type": "clarification_choices",
+        "data": {
+            "title": "请选择要修改的动作",
+            "options": options,
+        },
+    }
+
+
+def _resolve_structured_plan_target_selection(
+    action: AgentClarificationActionRequest,
+    pending_clarification: dict[str, Any] | None,
+) -> IntentResolverOutcome | None:
+    if not _structured_clarification_is_current(pending_clarification):
+        return None
+    if pending_clarification.get("origin_run_id") != action.origin_run_id:
+        return None
+    context = pending_clarification.get("clarification_context")
+    if not isinstance(context, dict) or context.get("clarification_type") != (
+        "plan_exercise_occurrence"
+    ):
+        return None
+    inherited = pending_clarification_to_resolution(pending_clarification)
+    if (
+        inherited is None
+        or inherited.intent_domain != "workout_plan"
+        or inherited.request_kind != "mutation"
+    ):
+        return None
+    raw_candidates = context.get("candidates")
+    if not isinstance(raw_candidates, list):
+        return None
+    candidates = {
+        str(item.get("item_key")): item
+        for item in raw_candidates
+        if isinstance(item, dict)
+        and isinstance(item.get("item_key"), str)
+        and str(item["item_key"]).startswith("planned:")
+    }
+    choice_ids = list(dict.fromkeys(action.choice_ids))
+    if len(choice_ids) != len(action.choice_ids) or any(
+        item_key not in candidates for item_key in choice_ids
+    ):
+        return None
+    ambiguous_reference = context.get("target_reference")
+    if not isinstance(ambiguous_reference, str) or not ambiguous_reference:
+        return None
+
+    expanded_changes: list[ChangeRequest] = []
+    replaced = False
+    for change in inherited.change_requests:
+        if (
+            change.resource == "workout_plan"
+            and change.target_reference == ambiguous_reference
+        ):
+            replaced = True
+            expanded_changes.extend(
+                change.model_copy(update={"target_reference": item_key})
+                for item_key in choice_ids
+            )
+        else:
+            expanded_changes.append(change)
+    if not replaced or len(expanded_changes) > 12:
+        return None
+    labels = [
+        f"{_WEEKDAY_SELECTION_LABELS[int(candidates[item_key]['day_of_week'])]}"
+        f"的{candidates[item_key]['exercise_name']}"
+        for item_key in choice_ids
+    ]
+    resolution = inherited.model_copy(update={
+        "change_requests": expanded_changes,
+        "resolved_query": f"{inherited.resolved_query}；目标位置：{'、'.join(labels)}"[:4000],
+        "missing_slots": [],
+        "clarification_required": False,
+        "clarification_question": None,
+        "confidence": 1.0,
+    })
+    return IntentResolverOutcome(
+        resolution=resolution,
+        source="rules",
+        fallback_reason="structured_plan_target_selection",
     )
 
 
@@ -1191,6 +1346,7 @@ async def execute_agent_run(
     conversation: AgentConversation,
     user_message: str,
     artifact_action: dict[str, Any] | None = None,
+    clarification_action: dict[str, Any] | None = None,
     expected_attempt_count: int | None = None,
 ) -> AgentRuntimeResult:
     started = time.perf_counter()
@@ -1253,7 +1409,34 @@ async def execute_agent_run(
             user_id=run.user_id,
             conversation_id=conversation.id,
         )
-        if artifact_action is not None:
+        structured_choice_invalid = False
+        if clarification_action is not None:
+            parsed_action = AgentClarificationActionRequest.model_validate(
+                clarification_action
+            )
+            intent_outcome = _resolve_structured_plan_target_selection(
+                parsed_action,
+                pending_clarification_state,
+            )
+            if intent_outcome is None:
+                structured_choice_invalid = True
+                inherited = pending_clarification_to_resolution(
+                    pending_clarification_state or {}
+                )
+                intent_outcome = IntentResolverOutcome(
+                    resolution=(inherited or IntentResolution(
+                        primary_intent="plan_query",
+                        intent_domain="workout_plan",
+                        request_kind="query",
+                        requested_effect="read",
+                        resolved_query="重新选择要修改的计划动作",
+                        risk_level="low",
+                        confidence=1.0,
+                    )),
+                    source="rules",
+                    fallback_reason="structured_clarification_invalid",
+                )
+        elif artifact_action is not None:
             intent_outcome = _structured_artifact_action_outcome(
                 AgentArtifactActionRequest.model_validate(artifact_action)
             )
@@ -1432,8 +1615,12 @@ async def execute_agent_run(
                     conversation.pending_clarification[
                         "clarification_context"
                     ] = clarification_context
+                    conversation.pending_clarification["expires_at"] = (
+                        now + _STRUCTURED_CLARIFICATION_TTL
+                    ).isoformat()
             else:
                 conversation.pending_clarification = {}
+            conversation.summary = _conversation_summary(reply)
             conversation.updated_at = now
             await db.commit()
             short_proposal = _proposal_reference_from_data(
@@ -1450,6 +1637,38 @@ async def execute_agent_run(
                 execution_trace=execution_trace,
                 proposal=short_proposal,
                 artifact=short_artifact,
+            )
+
+        if structured_choice_invalid:
+            context = (
+                pending_clarification_state.get("clarification_context")
+                if pending_clarification_state
+                else None
+            )
+            card = (
+                _plan_target_choice_card(
+                    context if isinstance(context, dict) else None,
+                    origin_run_id=str(
+                        pending_clarification_state.get("origin_run_id")
+                    ),
+                )
+                if _structured_clarification_is_current(
+                    pending_clarification_state
+                )
+                else None
+            )
+            if card is None:
+                return await complete_semantic_short_circuit(
+                    "这个澄清选项已经失效，请重新发起计划修改请求。当前数据未作修改。",
+                    termination_reason="structured_clarification_expired",
+                )
+            return await complete_semantic_short_circuit(
+                "这个选项无法验证，请从下方候选项中重新选择。当前数据未作修改。",
+                terminal_action="clarify",
+                termination_reason="structured_clarification_invalid",
+                content_data={"cards": [card]},
+                missing_slots=["要修改的训练日"],
+                clarification_context=context,
             )
 
         if intent_outcome.understanding_failed:
@@ -1542,6 +1761,17 @@ async def execute_agent_run(
                         if exc.status_code == 422 else None
                     ),
                     clarification_context=clarification_context,
+                    content_data=(
+                        {"cards": [choice_card]}
+                        if (
+                            clarification_context is not None
+                            and (choice_card := _plan_target_choice_card(
+                                clarification_context,
+                                origin_run_id=run.id,
+                            )) is not None
+                        )
+                        else None
+                    ),
                 )
             proposal_data = proposal_reference.model_dump(mode="json")
             reply = (
@@ -1605,6 +1835,7 @@ async def execute_agent_run(
             run.duration_ms = round((time.perf_counter() - started) * 1000)
             run.lease_expires_at = None
             run.execution_trace = execution_trace.model_dump(mode="json")
+            conversation.summary = _conversation_summary(reply)
             conversation.updated_at = now
             await db.commit()
             return AgentRuntimeResult(
@@ -2103,6 +2334,7 @@ async def execute_agent_run(
             run.duration_ms = round((time.perf_counter() - started) * 1000)
             run.lease_expires_at = None
             run.execution_trace = execution_trace.model_dump(mode="json")
+            conversation.summary = _conversation_summary(reply)
             conversation.updated_at = now
             await db.commit()
             _log_proposal_creation_diagnostic(
@@ -2191,6 +2423,7 @@ async def execute_agent_run(
         run.duration_ms = round((time.perf_counter() - started) * 1000)
         run.lease_expires_at = None
         run.execution_trace = execution_trace.model_dump(mode="json")
+        conversation.summary = _conversation_summary(reply)
         conversation.updated_at = now
         await db.commit()
         return AgentRuntimeResult(
@@ -2254,6 +2487,7 @@ async def run_agent_chat(
     conversation: AgentConversation,
     user_message: str,
     artifact_action: dict[str, Any] | None = None,
+    clarification_action: dict[str, Any] | None = None,
 ) -> AgentRuntimeResult:
     """Compatibility path for existing HTTP clients and focused tests.
 
@@ -2277,9 +2511,18 @@ async def run_agent_chat(
         role="user",
         content=user_message,
         content_data=(
-            {"artifact_action": artifact_action}
-            if artifact_action is not None
-            else {}
+            {
+                **(
+                    {"artifact_action": artifact_action}
+                    if artifact_action is not None
+                    else {}
+                ),
+                **(
+                    {"clarification_action": clarification_action}
+                    if clarification_action is not None
+                    else {}
+                ),
+            }
         ),
     ))
     await db.commit()
@@ -2289,4 +2532,5 @@ async def run_agent_chat(
         conversation=conversation,
         user_message=user_message,
         artifact_action=artifact_action,
+        clarification_action=clarification_action,
     )

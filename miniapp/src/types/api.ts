@@ -235,6 +235,16 @@ export interface WorkoutSession {
   exercises: SessionExercise[]
   feedback?: WorkoutFeedback | null
   adjustments: WorkoutAdjustment[]
+  adaptive_adjustment_status:
+    | 'not_needed'
+    | 'pending_confirmation'
+    | 'applied'
+    | 'rejected'
+    | 'expired'
+    | 'stale'
+    | 'failed'
+    | 'blocked_by_existing'
+  adaptive_adjustment_proposal?: PlanAdjustmentProposalReference | null
 }
 
 export interface WeeklyWorkoutProgress {
@@ -273,6 +283,21 @@ export interface AgentArtifactAction {
   artifact_id: string
   expected_version: number
   payload_fingerprint: string
+}
+
+export interface AgentClarificationAction {
+  action: 'select_plan_occurrences'
+  origin_run_id: string
+  choice_ids: string[]
+}
+
+export interface AgentConversationSummary {
+  id: string
+  title?: string | null
+  summary?: string | null
+  status: string
+  created_at: string
+  updated_at: string
 }
 
 export interface AgentChatResponse {

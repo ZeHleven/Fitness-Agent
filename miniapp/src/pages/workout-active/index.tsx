@@ -532,7 +532,7 @@ function FeedbackPanel ({
         <View className='feedback-actions'>
           <Button className='secondary-button' disabled={saving} onClick={onCancel}>返回修改</Button>
           <Button className='primary-button' disabled={saving} onClick={submit}>
-            {saving ? '正在调整计划…' : '完成并调整下一练'}
+            {saving ? '正在保存训练…' : '完成训练'}
           </Button>
         </View>
       </View>
@@ -541,6 +541,8 @@ function FeedbackPanel ({
 }
 
 function CompletionSummary ({ session }: { session: WorkoutSession }) {
+  const presentation = adaptivePresentation(session)
+  const proposal = session.adaptive_adjustment_proposal
   return (
     <View className='page completion-page'>
       <View className='completion-hero'>
@@ -551,13 +553,23 @@ function CompletionSummary ({ session }: { session: WorkoutSession }) {
       </View>
 
       <View className='card adjustment-summary'>
-        <Text className='adjustment-title'>下一练已自动调整</Text>
-        <Text className='adjustment-subtitle'>结合完成度、重量和你的主观反馈，共生成 {session.adjustments.length} 项建议。</Text>
+        <Text className='adjustment-title'>{presentation.title}</Text>
+        <Text className='adjustment-subtitle'>{presentation.subtitle}</Text>
         {session.adjustments.map((item, index) => (
           <AdjustmentLine adjustment={item} key={`${item.exercise_id}-${index}`} />
         ))}
         {session.adjustments.length === 0 && (
-          <Text className='no-adjustment'>本次训练没有关联可调整的计划，训练记录已正常保存。</Text>
+          <Text className='no-adjustment'>训练记录和反馈已正常保存。</Text>
+        )}
+        {session.adaptive_adjustment_status === 'pending_confirmation' && proposal && (
+          <Button
+            className='primary-button adaptive-proposal-button'
+            onClick={() => Taro.navigateTo({
+              url: `/pages/plan-proposal-detail/index?id=${encodeURIComponent(proposal.id)}`
+            })}
+          >
+            查看调整提案
+          </Button>
         )}
       </View>
 
@@ -565,6 +577,48 @@ function CompletionSummary ({ session }: { session: WorkoutSession }) {
       <Button className='secondary-button completion-history' onClick={() => Taro.redirectTo({ url: '/pages/history/index' })}>查看训练历史</Button>
     </View>
   )
+}
+
+function adaptivePresentation (session: WorkoutSession): { title: string, subtitle: string } {
+  const count = session.adjustments.length
+  const suggestions = count ? `共 ${count} 项建议，计划尚未自动修改。` : ''
+  return ({
+    pending_confirmation: {
+      title: '下一练调整待确认',
+      subtitle: `已结合完成度和主观反馈生成建议；${suggestions}`
+    },
+    applied: {
+      title: '下一练调整已应用',
+      subtitle: `你已确认这份调整提案。${count ? `共应用 ${count} 项。` : ''}`
+    },
+    rejected: {
+      title: '下一练调整已拒绝',
+      subtitle: '训练记录已保留，原计划保持不变。'
+    },
+    expired: {
+      title: '下一练调整已过期',
+      subtitle: '训练记录已保留；如仍需调整，请重新发起。'
+    },
+    stale: {
+      title: '下一练调整已失效',
+      subtitle: '已有更新的训练结果或计划版本，本次旧建议不再可执行。'
+    },
+    failed: {
+      title: '调整提案未生成',
+      subtitle: '训练记录已保存，但本次调整建议无法安全生成，原计划保持不变。'
+    },
+    blocked_by_existing: {
+      title: '已有计划提案待处理',
+      subtitle: '本次训练已完成；为避免覆盖你的修改，请先处理现有计划提案。'
+    },
+    not_needed: {
+      title: '当前目标保持不变',
+      subtitle: '本次反馈未产生有效调整，原计划继续使用。'
+    }
+  } as const)[session.adaptive_adjustment_status] || {
+    title: '当前目标保持不变',
+    subtitle: '本次训练记录已保存。'
+  }
 }
 
 function AdjustmentLine ({ adjustment }: { adjustment: WorkoutAdjustment }) {

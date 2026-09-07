@@ -2,7 +2,7 @@ import Taro from '@tarojs/taro'
 
 import { isPendingProposalDecision } from './proposal-interaction'
 import type { PendingPlanAdjustmentProposalDecision } from '../types/plan-adjustment-proposal'
-import type { AgentArtifactAction } from '../types/api'
+import type { AgentArtifactAction, AgentClarificationAction } from '../types/api'
 
 const ACCESS_TOKEN_KEY = 'fitness_access_token'
 const REFRESH_TOKEN_KEY = 'fitness_refresh_token'
@@ -21,6 +21,7 @@ export interface PendingAgentRequest {
   message: string
   conversation_id?: string
   artifact_action?: AgentArtifactAction
+  clarification_action?: AgentClarificationAction
   run_id?: string
   created_at: number
 }
@@ -33,6 +34,16 @@ function isAgentArtifactAction (value: unknown): value is AgentArtifactAction {
     typeof action.expected_version === 'number' && action.expected_version >= 1 &&
     typeof action.payload_fingerprint === 'string' &&
     /^[0-9a-f]{64}$/.test(action.payload_fingerprint)
+}
+
+function isAgentClarificationAction (value: unknown): value is AgentClarificationAction {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const action = value as Partial<AgentClarificationAction>
+  return action.action === 'select_plan_occurrences' &&
+    typeof action.origin_run_id === 'string' && action.origin_run_id.length > 0 &&
+    Array.isArray(action.choice_ids) && action.choice_ids.length > 0 &&
+    action.choice_ids.length <= 7 &&
+    action.choice_ids.every(item => typeof item === 'string' && item.startsWith('planned:'))
 }
 
 export function getAccessToken(): string {
@@ -80,6 +91,10 @@ export function getPendingAgentRequest(): PendingAgentRequest | null {
   if (value.artifact_action && !isAgentArtifactAction(value.artifact_action)) {
     return null
   }
+  if (value.clarification_action && !isAgentClarificationAction(value.clarification_action)) {
+    return null
+  }
+  if (value.artifact_action && value.clarification_action) return null
   return value
 }
 
