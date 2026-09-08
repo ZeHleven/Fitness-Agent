@@ -169,12 +169,69 @@
 
 .plan-heading {
   align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 12px;
   margin-bottom: 18px;
+}
+
+.plan-heading-copy {
+  min-width: 0;
+  flex: 1 1 280px;
 }
 
 .plan-name {
   margin-top: 0;
+  overflow-wrap: anywhere;
 }
+
+.archive-header-actions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 10px;
+  margin-left: auto;
+}
+
+// The visible chip hugs the text; the transparent button keeps an 88rpx target
+// after conversion, without inheriting the large secondary-button box.
+.delete-archive {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 88px;
+  min-height: 88px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #9d382b;
+  font-size: 22px;
+  line-height: 1.4;
+}
+
+// Both visible frames use exactly the same box and typography. Do not inherit
+// the button's native line height/font, which differs from a standalone Text.
+.archive-status-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  min-height: 44px;
+  margin: 0;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 999px;
+  background: #edf0ed;
+  color: #718178;
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.archive-delete-hover .archive-delete-label { background: #fce0da; }
+.delete-archive[disabled] .archive-delete-label { opacity: 0.5; }
 
 .plan-meta {
   color: #718178;
@@ -290,7 +347,8 @@
   color: #1d6b49;
 }
 
-.delete-plan-button {
+.delete-plan-button,
+.archive-delete-label {
   background: #fff0ed;
   color: #9d382b;
 }

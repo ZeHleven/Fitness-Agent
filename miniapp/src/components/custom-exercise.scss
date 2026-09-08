@@ -3,7 +3,22 @@
 .custom-title { font-weight: 600; color: #163d2b; }
 .custom-help, .custom-safety-notice { display: block; font-size: 24px; line-height: 1.65; color: #637168; }
 .custom-safety-notice { margin-top: 12px; }
-.custom-exercise-form input, .custom-exercise-description, .custom-select { background: #fff; border: 1px solid #dce6dc; padding: 16px; border-radius: 10px; box-sizing: border-box; }
+.custom-exercise-input, .custom-exercise-description, .custom-select { background: #fff; border: 1px solid #dce6dc; padding: 16px; border-radius: 10px; box-sizing: border-box; }
+// Native single-line inputs need an explicit height. Vertical padding would
+// otherwise consume their default content box and clip both text and cursor.
+.custom-exercise-input {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  height: 88px;
+  min-height: 88px;
+  flex-shrink: 0;
+  margin: 0;
+  padding: 0 16px;
+  color: #173226;
+  font-size: 30px;
+  line-height: 1.5;
+}
 .custom-exercise-description { width: 100%; min-height: 140px; }
 .custom-select { color: #1d6b49; }
 .custom-actions { display: flex; gap: 16px; }
