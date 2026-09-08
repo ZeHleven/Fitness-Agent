@@ -199,13 +199,26 @@ export default function WorkoutsPage () {
         return (
           <View className='plan-card card' key={plan.id}>
             <View className='plan-heading'>
-              <View>
+              <View className='plan-heading-copy'>
                 <Text className='plan-name'>{plan.display_name || plan.name}</Text>
                 <Text className='plan-meta'>{plan.duration_weeks} 周 · 每周 {plan.days_per_week} 天</Text>
               </View>
               {plan.is_active
                 ? <Text className='ai-tag'>{trainingProgressLabel(plan)}</Text>
-                : <Text className='archived-tag'>已归档</Text>}
+                : (
+                  <View className='archive-header-actions'>
+                    <Button
+                      className='delete-archive'
+                      ariaLabel={`删除归档计划：${plan.display_name || plan.name}`}
+                      hoverClass='archive-delete-hover'
+                      disabled={Boolean(deletingPlanId) || removeTarget === plan.id}
+                      onClick={() => setRemoveTarget(plan.id)}
+                    >
+                      <Text className='archive-status-chip archive-delete-label'>删除</Text>
+                    </Button>
+                    <Text className='archive-status-chip archived-tag'>已归档</Text>
+                  </View>
+                  )}
             </View>
             {plan.is_active && plan.safety_status === 'needs_review' && (
               <View className='plan-safety-warning'>
@@ -250,11 +263,9 @@ export default function WorkoutsPage () {
                 </Button>
               </View>
             )}
-            {!plan.is_active && (
+            {!plan.is_active && removeTarget === plan.id && (
               <View className='archive-actions'>
-                {removeTarget === plan.id
-                  ? <View className='archive-confirm'><Text>从列表删除此归档计划；训练历史与提案记录仍保留。</Text><Button className='secondary-button cancel-archive-delete' disabled={Boolean(deletingPlanId)} onClick={() => setRemoveTarget(null)}>保留</Button><Button className='secondary-button confirm-archive-delete' disabled={Boolean(deletingPlanId)} onClick={removeArchived}>确认删除归档</Button></View>
-                  : <Button className='secondary-button delete-archive' size='mini' onClick={() => setRemoveTarget(plan.id)}>删除归档计划</Button>}
+                <View className='archive-confirm'><Text>从列表删除此归档计划；训练历史与提案记录仍保留。</Text><Button className='secondary-button cancel-archive-delete' disabled={Boolean(deletingPlanId)} onClick={() => setRemoveTarget(null)}>保留</Button><Button className='secondary-button confirm-archive-delete' disabled={Boolean(deletingPlanId)} onClick={removeArchived}>确认删除归档</Button></View>
               </View>
             )}
             {days.map(day => {
@@ -270,6 +281,7 @@ export default function WorkoutsPage () {
                   <Button
                     className='start-button'
                     size='mini'
+                    ariaLabel={completed ? `已完成，查看周${dayLabel(day)}训练详情` : undefined}
                     disabled={
                       !completed && (!plan.is_active ||
                       plan.safety_status === 'needs_review' ||
@@ -278,7 +290,7 @@ export default function WorkoutsPage () {
                     }
                     onClick={() => start(plan.id, day)}
                   >
-                    {completed ? '已完成 · 查看' : !plan.is_active
+                    {completed ? '已完成' : !plan.is_active
                       ? '已归档'
                       : plan.safety_status === 'needs_review'
                         ? '待复核'

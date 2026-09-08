@@ -53,11 +53,11 @@ export default function CustomExerciseEntry ({ onAdd, disabled = false }: { onAd
       <Text className='custom-help'>支持动作库中没有的新动作，仅自己可用。本轮使用组数、次数、重量和组间休息记录。</Text>
       {loading && <Text className='custom-help'>正在加载我的动作…</Text>}
       {options.length > 0 && <Picker range={options.map(item => item.exercise_name)} onChange={event => add(options[Number(event.detail.value)])}><View className='custom-select'>选择之前创建的动作 ›</View></Picker>}
-      <Text>动作名称</Text><Input className='custom-exercise-name' value={name} maxlength={100} placeholder='例如：弹力带单臂划船变式' onInput={e => setName(e.detail.value)} />
+      <Text>动作名称</Text><Input className='custom-exercise-input custom-exercise-name' value={name} maxlength={100} placeholder='例如：弹力带单臂划船变式' onInput={e => setName(e.detail.value)} />
       <Text>动作方法</Text><Textarea className='custom-exercise-description' value={description} maxlength={2000} placeholder='描述姿势、动作过程和负重方式' onInput={e => setDescription(e.detail.value)} />
-      <Text>训练部位（选填）</Text><Input className='custom-exercise-muscles' value={muscles} maxlength={300} placeholder='多个部位用逗号分隔' onInput={e => setMuscles(e.detail.value)} />
+      <Text>训练部位（选填）</Text><Input className='custom-exercise-input custom-exercise-muscles' value={muscles} maxlength={300} placeholder='多个部位用逗号分隔' onInput={e => setMuscles(e.detail.value)} />
       <Text>器械（选填）</Text><Picker range={equipmentOptions.map(x => x[0])} value={equipment} onChange={e => setEquipment(Number(e.detail.value))}><View className='custom-select'>{equipmentOptions[equipment][0]}</View></Picker>
-      <Text>已知禁忌（选填）</Text><Input className='custom-exercise-contraindications' value={contraindications} maxlength={500} placeholder='例如：肩关节；不知道可留空' onInput={e => setContraindications(e.detail.value)} />
+      <Text>已知禁忌（选填）</Text><Input className='custom-exercise-input custom-exercise-contraindications' value={contraindications} maxlength={500} placeholder='例如：肩关节；不知道可留空' onInput={e => setContraindications(e.detail.value)} />
       <Text className='custom-safety-notice'>{CUSTOM_EXERCISE_NOTICE}</Text>
       {error && <View className='error-banner'>{error}<Button className='secondary-button reload-custom-exercises' disabled={saving || loading} onClick={show}>重新加载我的动作</Button></View>}
       <View className='custom-actions'><Button className='secondary-button close-custom-exercise' disabled={saving} onClick={() => setOpen(false)}>收起</Button><Button className='primary-button create-custom-exercise' disabled={saving || disabled} onClick={create}>{saving ? '保存中…' : '创建并添加'}</Button></View>

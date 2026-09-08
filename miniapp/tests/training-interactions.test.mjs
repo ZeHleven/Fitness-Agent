@@ -17,21 +17,28 @@ function platform () {
   } }
 }
 
-test('completed day opens read-only session; cannot call start and shows all-completed progress', async () => {
-  const p = platform(); let writes = 0
-  const page = runtime('../../src/pages/workouts/index.tsx', {
-    '@tarojs/taro': p.module, '../../core/request': { errorMessage: e => e.message },
-    '../../services/profile': { profileApi: { get: async () => ({ onboarding_completed: true }) } },
-    '../../services/plan-management': { planManagementApi: {} },
-    '../../services/workouts': { workoutApi: { plans: async () => [plan], active: async () => null, progress: async () => stats, start: async () => { writes++ } } }
+for (const isActive of [true, false]) {
+  test(`completed day in ${isActive ? 'active' : 'archived'} plan opens read-only session and cannot call start`, async () => {
+    const p = platform(); let writes = 0
+    const page = runtime('../../src/pages/workouts/index.tsx', {
+      '@tarojs/taro': p.module, '../../core/request': { errorMessage: e => e.message },
+      '../../services/profile': { profileApi: { get: async () => ({ onboarding_completed: true }) } },
+      '../../services/plan-management': { planManagementApi: {} },
+      '../../services/workouts': { workoutApi: { plans: async () => [{ ...plan, is_active: isActive }], active: async () => null, progress: async () => stats, start: async () => { writes++ } } }
+    })
+    page.render(); p.hooks.show(); await page.flush()
+    if (isActive) {
+      assert.match(page.text(), /本周计划已完成/)
+      assert.equal(page.find('delete-archive'), undefined)
+    } else assert.ok(page.find('archived-tag'))
+    assert.equal(page.find('start-button').props.disabled, false)
+    assert.equal(page.find('start-button').props.children, '已完成')
+    assert.equal(page.find('start-button').props.ariaLabel, '已完成，查看周一训练详情')
+    await page.click('start-button')
+    assert.equal(writes, 0)
+    assert.deepEqual(p.navigations, [{ url: '/pages/workout-detail/index?id=s' }])
   })
-  page.render(); p.hooks.show(); await page.flush()
-  assert.match(page.text(), /本周计划已完成/)
-  assert.equal(page.find('start-button').props.disabled, false)
-  await page.click('start-button')
-  assert.equal(writes, 0)
-  assert.deepEqual(p.navigations, [{ url: '/pages/workout-detail/index?id=s' }])
-})
+}
 
 test('archive delete and orphan release require inline choice, preserve state on failure', async () => {
   const p = platform(); let removed = 0, ended = 0, failed = true
@@ -42,7 +49,21 @@ test('archive delete and orphan release require inline choice, preserve state on
     '../../services/plan-management': { planManagementApi: {} }, '../../services/workouts': { workoutApi: api }
   })
   page.render(); p.hooks.show(); await page.flush()
+  const heading = page.find('plan-heading')
+  const headingActions = heading.props.children.find(item => item?.props?.className === 'archive-header-actions')
+  assert.ok(headingActions, 'archive delete must be next to the archived badge in the heading')
+  const [deleteButton, archivedBadge] = headingActions.props.children
+  assert.ok(deleteButton.props.className.split(' ').includes('delete-archive'))
+  assert.equal(deleteButton.props.children.props.children, '删除')
+  assert.equal(deleteButton.props.size, undefined, 'custom sizing must not inherit the native mini button preset')
+  assert.ok(deleteButton.props.children.props.className.split(' ').includes('archive-status-chip'))
+  assert.ok(archivedBadge.props.className.split(' ').includes('archive-status-chip'))
+  assert.ok(archivedBadge.props.className.split(' ').includes('archived-tag'))
+  assert.ok(!deleteButton.props.className.split(' ').includes('secondary-button'), 'compact delete must not inherit the generic large button')
+  assert.equal(page.find('archive-confirm'), undefined)
   page.click('delete-archive'); await page.flush(); assert.equal(removed, 0)
+  page.click('cancel-archive-delete'); await page.flush(); assert.equal(removed, 0); assert.equal(page.find('archive-confirm'), undefined)
+  page.click('delete-archive'); await page.flush()
   await page.click('confirm-archive-delete'); await page.flush(); assert.ok(page.find('archive-confirm')); assert.equal(removed, 0)
   failed = false; await page.click('confirm-archive-delete'); await page.flush(); assert.equal(removed, 1)
   page.click('show-end-active'); await page.flush(); assert.equal(ended, 0)
@@ -90,10 +111,14 @@ test('custom creation permits unknown metadata with inline notice only and keeps
   page.exports.default = () => component({ onAdd: () => { added++ } })
   page.render(); await page.click('open-custom-exercise'); await page.flush()
   assert.ok(page.find('custom-safety-notice'))
+  assert.equal(page.findAll('custom-exercise-input').length, 3)
   page.input('custom-exercise-name', '完全不存在的新动作'); page.input('custom-exercise-description', '用户描述的方法'); await page.flush()
+  page.input('custom-exercise-muscles', '背部、手臂'); page.input('custom-exercise-contraindications', ''); await page.flush()
+  assert.equal(page.find('custom-exercise-name').props.value, '完全不存在的新动作')
+  assert.equal(page.find('custom-exercise-muscles').props.value, '背部、手臂')
   await page.click('create-custom-exercise'); await page.flush(); assert.equal(added, 0); assert.match(page.text(), /已知冲突/)
   denied = false; await page.click('create-custom-exercise'); await page.flush()
-  assert.equal(added, 1); assert.deepEqual(posted.contraindications, []); assert.equal(page.find('custom-exercise-form'), undefined)
+  assert.equal(added, 1); assert.deepEqual(posted.contraindications, []); assert.deepEqual(posted.muscles, ['背部', '手臂']); assert.equal(page.find('custom-exercise-form'), undefined)
 })
 
 test('rest duration survives background time, early stop, retry and set-save recovery', () => {
