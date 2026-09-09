@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { Button, Input, Picker, Slider, Text, View } from '@tarojs/components'
 import Taro, { useLoad } from '@tarojs/taro'
 
@@ -18,31 +18,49 @@ const weekday = (day: number) => ['一', '二', '三', '四', '五', '六', '日
 
 export default function PlanBuilderPage () {
   const [preview, setPreview] = useState<PersonalizedPlanPreview | null>(null)
-  const [daysPerWeek, setDaysPerWeek] = useState(3)
+  const [trainingDays, setTrainingDays] = useState<number[]>([])
   const [sessionDuration, setSessionDuration] = useState(45)
   const [loading, setLoading] = useState(true)
   const [generating, setGenerating] = useState(false)
   const [savingMode, setSavingMode] = useState<'save' | 'start' | ''>('')
   const [error, setError] = useState('')
+  const busy = useRef(false)
+  const daysPerWeek = trainingDays.length
+  const needsRegeneration = Boolean(preview && (
+    !sameDays(trainingDays, previewDays(preview)) ||
+    sessionDuration !== preview.session_duration_min
+  ))
+  const cannotSave = !preview || !daysPerWeek || needsRegeneration || generating || Boolean(savingMode)
 
-  const generate = async (days: number, duration: number, initial = false) => {
+  const generate = async (days: number, duration: number, initial = false, selectedDays?: number[]) => {
+    if (busy.current) return
+    if (!days) { setError('请至少选择一个训练日'); return }
+    busy.current = true
     if (initial) setLoading(true)
     else setGenerating(true)
     setError('')
     try {
       const data = await workoutApi.previewPersonalizedPlan({
         days_per_week: days,
+        ...(selectedDays ? { training_days: [...selectedDays] } : {}),
         session_duration_min: duration,
         duration_weeks: 4
       })
+      const actualDays = previewDays(data)
+      if (actualDays.length !== days || data.days_per_week !== days ||
+          data.session_duration_min !== duration || actualDays.some(day => !Number.isInteger(day) || day < 1 || day > 7) ||
+          (selectedDays && !sameDays(selectedDays, actualDays))) {
+        throw new Error('返回的安排与所选训练日或时长不一致，请确认后端已更新并重试')
+      }
       setPreview(data)
-      setDaysPerWeek(data.days_per_week)
+      setTrainingDays(actualDays)
       setSessionDuration(data.session_duration_min)
     } catch (requestError) {
       setError(errorMessage(requestError, '暂时无法生成训练计划'))
     } finally {
       setLoading(false)
       setGenerating(false)
+      busy.current = false
     }
   }
 
@@ -67,6 +85,7 @@ export default function PlanBuilderPage () {
   })
 
   const patchExercise = (index: number, patch: Partial<PersonalizedPlanExercise>) => {
+    if (busy.current) return
     setPreview(current => current
       ? {
           ...current,
@@ -78,7 +97,7 @@ export default function PlanBuilderPage () {
   }
 
   const replaceExercise = async (index: number, optionIndex: number) => {
-    if (!preview) return
+    if (!preview || busy.current) return
     const option = preview.exercise_options[optionIndex]
     const current = preview.exercises[index]
     if (!option || !current) return
@@ -100,7 +119,7 @@ export default function PlanBuilderPage () {
   }
 
   const removeExercise = async (index: number) => {
-    if (!preview) return
+    if (!preview || busy.current) return
     const target = preview.exercises[index]
     const sameDay = preview.exercises.filter(item => item.day_of_week === target.day_of_week)
     if (sameDay.length <= 1) {
@@ -114,7 +133,7 @@ export default function PlanBuilderPage () {
   }
 
   const addExercise = (day: number, option: PersonalizedExerciseOption) => {
-    if (!preview) return
+    if (!preview || busy.current || !option) return
     if (preview.exercises.some(item => item.day_of_week === day && item.exercise_id === option.exercise_id)) { setError('同一天已经安排了这个动作'); return }
     if (preview.exercises.length >= 50) { setError('计划最多包含 50 项动作'); return }
     setPreview({ ...preview,
@@ -125,7 +144,11 @@ export default function PlanBuilderPage () {
   }
 
   const confirm = async (startImmediately: boolean) => {
-    if (!preview) return
+    if (!preview || busy.current) return
+    if (!daysPerWeek || needsRegeneration) {
+      setError('请先按所选训练日和时长重新编排，再保存计划')
+      return
+    }
     const actualDays = new Set(preview.exercises.map(item => item.day_of_week))
     if (actualDays.size !== preview.days_per_week) {
       setError('每个训练日至少需要保留一个动作')
@@ -136,11 +159,12 @@ export default function PlanBuilderPage () {
       return
     }
 
+    busy.current = true
     setSavingMode(startImmediately ? 'start' : 'save')
     setError('')
     const normalized = normalizeOrder(preview)
     try {
-      const plan = await workoutApi.confirmPersonalizedPlan(normalized)
+      const plan = await workoutApi.confirmPersonalizedPlan({ ...normalized, training_days: [...trainingDays] })
       if (!startImmediately) {
         await Taro.showToast({ title: '计划已保存', icon: 'success' })
         await Taro.reLaunch({ url: '/pages/workouts/index' })
@@ -179,6 +203,7 @@ export default function PlanBuilderPage () {
       setError(errorMessage(requestError, '计划保存失败，请检查后重试'))
     } finally {
       setSavingMode('')
+      busy.current = false
     }
   }
 
@@ -199,19 +224,27 @@ export default function PlanBuilderPage () {
           <Text className='section-title'>训练节奏</Text>
           <Text className='section-value'>每周 {daysPerWeek} 天 · {sessionDuration} 分钟</Text>
         </View>
-        <Text className='slider-label'>每周训练天数</Text>
-        <Slider
-          min={1}
-          max={7}
-          step={1}
-          value={daysPerWeek}
-          activeColor='#1d6b49'
-          backgroundColor='#dfe8e0'
-          blockSize={22}
-          onChange={event => setDaysPerWeek(event.detail.value)}
-        />
+        <Text className='slider-label'>每周训练日（可多选）</Text>
+        <View className='weekday-row'>
+          {[1, 2, 3, 4, 5, 6, 7].map(day => (
+            <Button
+              key={day}
+              className={`weekday ${trainingDays.includes(day) ? 'selected' : ''}`}
+              disabled={generating || Boolean(savingMode)}
+              onClick={() => {
+                if (busy.current) return
+                setTrainingDays(current => current.includes(day)
+                  ? current.filter(value => value !== day)
+                  : [...current, day].sort((left, right) => left - right))
+                setError('')
+              }}
+            >{`周${weekday(day)}`}</Button>
+          ))}
+        </View>
+        <Text className='schedule-hint'>选择你方便训练的星期，天数自动计算；至少选择一天。</Text>
         <Text className='slider-label'>单次训练时长</Text>
         <Slider
+          className='session-duration-slider'
           min={20}
           max={120}
           step={5}
@@ -219,12 +252,15 @@ export default function PlanBuilderPage () {
           activeColor='#1d6b49'
           backgroundColor='#dfe8e0'
           blockSize={22}
-          onChange={event => setSessionDuration(event.detail.value)}
+          disabled={generating || Boolean(savingMode)}
+          onChange={event => { if (!busy.current) setSessionDuration(event.detail.value) }}
         />
+        {needsRegeneration && <Text className='schedule-pending'>训练日或时长已变更，下方仍是旧预览。请重新编排后再保存。</Text>}
+        <Text className='schedule-hint'>重新编排会替换下方预览和手动调整，不会立即保存计划。</Text>
         <Button
           className='secondary-button regenerate-button'
-          disabled={generating || Boolean(savingMode)}
-          onClick={() => generate(daysPerWeek, sessionDuration)}
+          disabled={!daysPerWeek || generating || Boolean(savingMode)}
+          onClick={() => generate(daysPerWeek, sessionDuration, false, trainingDays)}
         >
           {generating ? '正在重新编排…' : '按新节奏重新编排'}
         </Button>
@@ -307,14 +343,14 @@ export default function PlanBuilderPage () {
           <View className='builder-actions'>
             <Button
               className='secondary-button save-button'
-              disabled={Boolean(savingMode)}
+              disabled={cannotSave}
               onClick={() => confirm(false)}
             >
               {savingMode === 'save' ? '保存中…' : '仅保存计划'}
             </Button>
             <Button
               className='primary-button start-now-button'
-              disabled={Boolean(savingMode)}
+              disabled={cannotSave}
               onClick={() => confirm(true)}
             >
               {savingMode === 'start' ? '正在保存…' : '保存并开始推荐训练'}
@@ -324,6 +360,14 @@ export default function PlanBuilderPage () {
       )}
     </View>
   )
+}
+
+function previewDays (preview: PersonalizedPlanPreview): number[] {
+  return [...new Set(preview.exercises.map(item => item.day_of_week))].sort((left, right) => left - right)
+}
+
+function sameDays (left: number[], right: number[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index])
 }
 
 function normalizeOrder (preview: PersonalizedPlanPreview): PersonalizedPlanPreview {

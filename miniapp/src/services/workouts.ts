@@ -26,6 +26,7 @@ export const workoutApi = {
       method: 'POST',
       data: {
         name: data.name,
+        ...(data.training_days ? { training_days: data.training_days } : {}),
         goal: data.goal,
         duration_weeks: data.duration_weeks,
         days_per_week: data.days_per_week,

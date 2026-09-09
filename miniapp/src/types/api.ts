@@ -207,6 +207,7 @@ export interface PersonalizedPlanExercise {
 }
 
 export interface PersonalizedPlanPreview {
+  training_days?: number[]
   name: string
   goal: string
   duration_weeks: number
@@ -220,6 +221,7 @@ export interface PersonalizedPlanPreview {
 }
 
 export interface PersonalizedPlanPreviewRequest {
+  training_days?: number[]
   goal?: string
   duration_weeks?: number
   days_per_week?: number

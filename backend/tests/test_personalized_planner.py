@@ -71,6 +71,39 @@ def test_preview_uses_profile_schedule_and_session_duration():
     assert preview.generation_strategy == "profile_rules_v1"
 
 
+@pytest.mark.parametrize("days", [[2, 4, 7], [7], [6, 7], [1, 2, 3, 4, 5, 6, 7]])
+def test_explicit_weekdays_override_profile_and_derive_frequency(days):
+    request = PersonalizedPlanPreviewRequest(training_days=list(reversed(days)))
+    preview = build_personalized_plan_preview(_profile(), EXERCISES, request)
+    assert preview.days_per_week == len(days)
+    assert sorted({item.day_of_week for item in preview.exercises}) == days
+    assert request.training_days == days
+    assert any("周日" in value for value in preview.rationale)
+
+
+@pytest.mark.parametrize("days", [[], [1, 1], [0], [8], [True], [1.5], ["2"]])
+def test_invalid_explicit_weekdays_are_rejected(days):
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        PersonalizedPlanPreviewRequest(training_days=days)
+
+
+def test_explicit_weekday_count_must_match_frequency():
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        PersonalizedPlanPreviewRequest(training_days=[2, 7], days_per_week=3)
+
+
+def test_explicit_weekdays_preserve_health_filtering_and_targets():
+    profile = _profile(injuries=["膝关节"], chronic_conditions=["高血压"])
+    legacy = build_personalized_plan_preview(profile, EXERCISES)
+    custom = build_personalized_plan_preview(profile, EXERCISES,
+        PersonalizedPlanPreviewRequest(training_days=[2, 4, 7]))
+    assert [item.model_dump(exclude={"day_of_week"}) for item in custom.exercises] == [
+        item.model_dump(exclude={"day_of_week"}) for item in legacy.exercises]
+    assert all(item.exercise_id != "squat" and item.rest_seconds == 120 for item in custom.exercises)
+
+
 def test_preview_home_location_only_offers_bodyweight_actions():
     preview = build_personalized_plan_preview(
         _profile(training_location="home", training_days_per_week=2),
