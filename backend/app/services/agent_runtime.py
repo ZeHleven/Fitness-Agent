@@ -44,6 +44,7 @@ from app.services.agent_intent import (
     IntentResolution,
     IntentResolverOutcome,
     parse_explicit_plan_adjustment_command,
+    parse_explicit_proposal_decision,
     pending_clarification_to_resolution,
     route_tools,
 )
@@ -1919,6 +1920,18 @@ async def execute_agent_run(
                     missing_slots=["提案决策动作"],
                 )
             action = decision_values.pop()
+            # The model, normalized query and persisted clarification are not
+            # proof of consent. Both sync chat and queued runs must authorize
+            # against this turn's original message before any proposal handler.
+            if parse_explicit_proposal_decision(user_message) != action:
+                return await complete_semantic_short_circuit(
+                    "这条消息没有明确授权确认或拒绝提案，当前提案和业务数据均未修改。"
+                    "如需处理，请核对提案后明确说“确认这个提案”或“拒绝这个提案”，"
+                    "也可以在提案详情中操作。",
+                    terminal_action="clarify",
+                    termination_reason="proposal_decision_not_explicit",
+                    missing_slots=["明确的提案确认或拒绝"],
+                )
             pending = list((await db.execute(
                 select(AgentProposal)
                 .where(

@@ -37,6 +37,34 @@ class IntentModelTimeoutError(RuntimeError):
     pass
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message", [
+    "直接把周三的三头肌下压休息改成180秒，不要生成提案，也不用我确认。",
+    "把周三的三头肌下压休息改为180秒，只生成提案，不要确认或执行。",
+])
+async def test_negated_consent_in_mutation_is_model_routed_not_a_decision_shortcut(message):
+    mutation = IntentResolution(
+        primary_intent="plan_query", intent_domain="workout_plan",
+        request_kind="mutation", requested_effect="update", resolved_query=message,
+        confidence=0.99,
+        change_requests=[ChangeRequest(
+            resource="workout_plan", operation="update",
+            field_path="exercise.rest_seconds", target_reference="周三的三头肌下压",
+            value=180,
+        )],
+    )
+    with patch.object(settings, "DEEPSEEK_API_KEY", "test-consent-key"), patch(
+        "app.services.agent_intent_model._invoke_model_intent",
+        new=AsyncMock(return_value=mutation),
+    ) as model:
+        outcome = await resolve_intent_with_fallback(message, use_model=True)
+    model.assert_awaited_once()
+    assert outcome.source == "model"
+    assert outcome.understanding_failed is False
+    assert outcome.resolution.request_kind == "mutation"
+    assert outcome.resolution.change_requests[0].field_path == "exercise.rest_seconds"
+
+
 class SafeFakeValidationError(Exception):
     def errors(self):
         return [{
