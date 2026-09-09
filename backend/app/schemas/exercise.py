@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field, field_validator
 from typing import Any
+from app.schemas.exercise_energy import EnergyCategory
 
 
 class CustomExerciseCreate(BaseModel):
@@ -9,6 +10,7 @@ class CustomExerciseCreate(BaseModel):
     muscles: list[str] = Field(default_factory=list, max_length=10)
     equipment: list[str] = Field(default_factory=list, max_length=10)
     contraindications: list[str] = Field(default_factory=list, max_length=20)
+    energy_category: EnergyCategory | None = None
 
     @field_validator('name', 'description')
     @classmethod

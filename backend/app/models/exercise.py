@@ -13,6 +13,8 @@ class Exercise(Base):
     name_zh: Mapped[str] = mapped_column(String(100))
     name_en: Mapped[str] = mapped_column(String(100))
     category: Mapped[str] = mapped_column(String(30))
+    energy_category: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    energy_category_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     muscle_primary: Mapped[list] = mapped_column(JSONB, default=list)
     muscle_secondary: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     equipment: Mapped[list | None] = mapped_column(JSONB, nullable=True)

@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class ProfileUpdateRequest(BaseModel):
+    daily_activity_level: Literal['sedentary', 'walking', 'physical_work'] | None = None
     age: int | None = Field(default=None, ge=12, le=100)
     gender: Literal["male", "female", "prefer_not_to_say"] | None = None
     height_cm: float | None = Field(default=None, ge=100, le=250)
@@ -31,6 +32,7 @@ class ProfileUpdateRequest(BaseModel):
 
 
 class ProfileResponse(BaseModel):
+    daily_activity_level: Literal['sedentary', 'walking', 'physical_work'] | None = None
     user_id: str
     age: int | None
     gender: Literal["male", "female", "prefer_not_to_say"] | None

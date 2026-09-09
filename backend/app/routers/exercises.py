@@ -11,6 +11,8 @@ from app.models.exercise import Exercise
 from app.schemas.workout import PersonalizedExerciseOption
 from app.services.custom_exercises import safety_notice
 from app.services.personalized_planner import is_exercise_compatible
+from app.schemas.exercise_energy import EnergyCategoryUpdate
+from app.services.exercise_energy import update_library_category
 
 router = APIRouter(prefix="/exercises", tags=["exercises"])
 
@@ -20,6 +22,7 @@ def custom_option(exercise: Exercise) -> PersonalizedExerciseOption:
         exercise_id=exercise.id, exercise_name=exercise.name_zh,
         category=exercise.category, difficulty=exercise.difficulty,
         equipment=exercise.equipment or [], safety_notice=safety_notice(exercise),
+        energy_category=exercise.energy_category, energy_category_version=exercise.energy_category_version,
     )
 
 
@@ -42,6 +45,7 @@ async def create_custom_exercise(body: CustomExerciseCreate, current_user: User 
         category='力量', difficulty='未知', technique_cues=body.description,
         muscle_primary=body.muscles, equipment=body.equipment,
         contraindications=body.contraindications, is_active=True,
+        energy_category=body.energy_category, energy_category_version=1 if body.energy_category else 0,
     )
     canonical = (await db.execute(select(Exercise).where(
         Exercise.owner_id.is_(None), Exercise.is_active.is_(True), Exercise.name_zh == body.name,
@@ -58,10 +62,18 @@ async def create_custom_exercise(body: CustomExerciseCreate, current_user: User 
         if (row.technique_cues, row.muscle_primary, row.equipment, row.contraindications) == (
             body.description, body.muscles, body.equipment, body.contraindications,
         ):
+            if body.energy_category is not None and body.energy_category != row.energy_category:
+                raise HTTPException(409, '相同动作已存在且分类不同，请使用修改估算分类入口')
             return custom_option(row)
     db.add(exercise)
     await db.commit()
     return custom_option(exercise)
+
+
+@router.put('/custom/{exercise_id}/energy-category', response_model=PersonalizedExerciseOption)
+async def set_energy_category(exercise_id: str, body: EnergyCategoryUpdate,
+                              current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    return custom_option(await update_library_category(db, current_user.id, exercise_id, body))
 
 
 @router.get("", response_model=list[ExerciseResponse])

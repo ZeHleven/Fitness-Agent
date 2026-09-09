@@ -1,5 +1,6 @@
 import pytest
-from datetime import date, timedelta
+from datetime import timedelta
+from app.services.training_lifecycle import training_today
 
 
 async def get_token(client, email):
@@ -12,7 +13,7 @@ async def test_log_meal_no_items(client):
     token = await get_token(client, "meal1@example.com")
     resp = await client.post(
         "/api/v1/meals",
-        json={"logged_at": str(date.today()), "meal_type": "早餐", "items": []},
+        json={"logged_at": str(training_today()), "meal_type": "早餐", "items": []},
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 422
@@ -24,7 +25,7 @@ async def test_log_meal_with_items(client):
     resp = await client.post(
         "/api/v1/meals",
         json={
-            "logged_at": str(date.today()),
+            "logged_at": str(training_today()),
             "meal_type": "午餐",
             "items": [
                 {"food_name": "鸡胸肉", "amount_g": 150.0, "calories": 165.0, "protein_g": 31.0, "carbs_g": 0.0, "fat_g": 3.6},
@@ -52,7 +53,7 @@ async def test_today_summary_empty(client):
 @pytest.mark.asyncio
 async def test_today_summary_with_meals(client):
     token = await get_token(client, "meal4@example.com")
-    today = str(date.today())
+    today = str(training_today())
     await client.post(
         "/api/v1/meals",
         json={
@@ -75,7 +76,7 @@ async def test_delete_meal(client):
     token = await get_token(client, "meal5@example.com")
     create_resp = await client.post(
         "/api/v1/meals",
-        json={"logged_at": str(date.today()), "meal_type": "晚餐", "items": [
+        json={"logged_at": str(training_today()), "meal_type": "晚餐", "items": [
             {"food_name": "米饭", "amount_g": 100, "calories": 130,
              "protein_g": 2.5, "carbs_g": 28, "fat_g": 0.3}
         ]},
@@ -99,7 +100,7 @@ async def test_meals_isolated_between_users(client):
     token2 = await get_token(client, "meal7b@example.com")
     await client.post(
         "/api/v1/meals",
-        json={"logged_at": str(date.today()), "meal_type": "早餐", "items": [
+        json={"logged_at": str(training_today()), "meal_type": "早餐", "items": [
             {"food_name": "燕麦", "amount_g": 50, "calories": 190,
              "protein_g": 6, "carbs_g": 32, "fat_g": 4}
         ]},
@@ -112,7 +113,7 @@ async def test_meals_isolated_between_users(client):
 @pytest.mark.asyncio
 async def test_history_returns_dates(client):
     token = await get_token(client, "meal8@example.com")
-    today = str(date.today())
+    today = str(training_today())
     await client.post(
         "/api/v1/meals",
         json={"logged_at": today, "meal_type": "早餐", "items": [
@@ -159,7 +160,7 @@ async def test_update_meal_replaces_all_items_and_recalculates_standard_food(
     created = await client.post(
         "/api/v1/meals",
         json={
-            "logged_at": str(date.today()),
+            "logged_at": str(training_today()),
             "meal_type": "早餐",
             "items": [{
                 "food_name": "客户端伪造名称",
@@ -178,7 +179,7 @@ async def test_update_meal_replaces_all_items_and_recalculates_standard_food(
     updated = await client.put(
         f"/api/v1/meals/{meal_id}",
         json={
-            "logged_at": str(date.today() - timedelta(days=1)),
+            "logged_at": str(training_today() - timedelta(days=1)),
             "meal_type": "加餐",
             "items": [
                 {
@@ -218,7 +219,7 @@ async def test_update_meal_validation_failure_keeps_original_items(client):
     created = await client.post(
         "/api/v1/meals",
         json={
-            "logged_at": str(date.today()),
+            "logged_at": str(training_today()),
             "meal_type": "午餐",
             "items": [{
                 "food_name": "原餐",
@@ -235,7 +236,7 @@ async def test_update_meal_validation_failure_keeps_original_items(client):
     rejected = await client.put(
         f"/api/v1/meals/{meal_id}",
         json={
-            "logged_at": str(date.today()),
+            "logged_at": str(training_today()),
             "meal_type": "晚餐",
             "items": [{
                 "food_id": "missing-food",
@@ -268,7 +269,7 @@ async def test_update_meal_rejects_records_outside_thirty_days(client):
     created = await client.post(
         "/api/v1/meals",
         json={
-            "logged_at": str(date.today() - timedelta(days=30)),
+            "logged_at": str(training_today() - timedelta(days=30)),
             "meal_type": "午餐",
             "items": [{
                 "food_name": "旧餐",
@@ -284,7 +285,7 @@ async def test_update_meal_rejects_records_outside_thirty_days(client):
     rejected = await client.put(
         f"/api/v1/meals/{created.json()['id']}",
         json={
-            "logged_at": str(date.today()),
+            "logged_at": str(training_today()),
             "meal_type": "晚餐",
             "items": [{
                 "food_name": "新餐",

@@ -21,7 +21,10 @@ from app.schemas.workout import (
     WorkoutRestRecord,
 )
 from app.services.training_lifecycle import lock_training_user, training_today, training_week
+from app.services.training_day_continuity import load_training_day_continuity
 from app.services.custom_exercises import visible_exercise
+from app.services.exercise_energy import classification_snapshot, update_session_categories
+from app.schemas.exercise_energy import SessionEnergyUpdate
 from app.schemas.plan_management_proposal import (
     CreatePlanAdjustmentProposalRequest,
     CreatePlanDeletionProposalRequest,
@@ -113,8 +116,12 @@ async def list_plans(
         WorkoutSession.week_start == training_week(),
         WorkoutSession.status.in_(['in_progress', 'completed']),
     ).order_by(WorkoutSession.started_at, WorkoutSession.id))).scalars().all())
+    day_continuity = await load_training_day_continuity(
+        db, user_id=current_user.id, family_ids={plan.family_id for plan in rows},
+    )
     return [
-        await build_plan_detail(db, plan, profile=profile, weekly_sessions=weekly_sessions)
+        await build_plan_detail(db, plan, profile=profile, weekly_sessions=weekly_sessions,
+                                day_continuity=day_continuity)
         for plan in rows
     ]
 
@@ -421,13 +428,17 @@ async def start_session(
         raise HTTPException(status_code=400, detail="训练计划已归档，请选择当前计划")
 
     week = training_week()
-    completed = await db.scalar(select(WorkoutSession.id).where(
+    day_continuity = await load_training_day_continuity(
+        db, user_id=current_user.id, family_ids={plan.family_id},
+    )
+    candidates = (await db.execute(select(WorkoutSession).where(
         WorkoutSession.user_id == current_user.id,
         WorkoutSession.plan_family_id == plan.family_id,
         WorkoutSession.week_start == week,
         WorkoutSession.day_of_week == body.day_of_week,
         WorkoutSession.status == 'completed',
-    ).limit(1))
+    ).order_by(WorkoutSession.started_at, WorkoutSession.id))).scalars().all()
+    completed = next((row.id for row in candidates if day_continuity.matches(plan, row)), None)
     if completed:
         raise HTTPException(409, detail={'code': 'training_day_completed', 'message': '本周该训练日已完成，请查看本次训练', 'session_id': completed})
 
@@ -475,6 +486,7 @@ async def start_session(
             session_id=session.id,
             exercise_id=item.exercise_id,
             exercise_name=catalog[item.exercise_id].name_zh,
+            **classification_snapshot(catalog[item.exercise_id]),
             order_index=item.order_index,
             target_sets=item.sets,
             target_reps=item.reps,
@@ -549,11 +561,19 @@ async def log_session(
             session_id=session.id,
             exercise_id=ex.exercise_id,
             exercise_name=catalog[ex.exercise_id].name_zh,
+            **classification_snapshot(catalog[ex.exercise_id]),
             target_sets=len(ex.sets_data),
             sets_data=[s.model_dump() for s in ex.sets_data],
         ))
 
     await db.commit()
+    return await build_session_detail(db, session)
+
+
+@router.put('/sessions/{session_id}/energy-classifications', response_model=WorkoutSessionDetail)
+async def set_session_energy_categories(session_id: str, body: SessionEnergyUpdate,
+                                         current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    session = await update_session_categories(db, current_user.id, session_id, body)
     return await build_session_detail(db, session)
 
 

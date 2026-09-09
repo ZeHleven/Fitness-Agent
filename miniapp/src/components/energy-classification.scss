@@ -1,0 +1,8 @@
+.energy-classification-editor, .energy-library-editor, .energy-classification-row { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.energy-classification-editor { margin-bottom: 24px; padding: 28px; }
+.energy-library-editor { border-top: 1px solid #dce6dc; padding-top: 24px; }
+.energy-classification-row { border-top: 1px solid #e7ede7; padding-top: 18px; }
+.energy-help { display: block; color: #637168; font-size: 24px; line-height: 1.65; }
+.energy-category-select { padding: 20px 16px; background: #fff; border: 1px solid #dce6dc; border-radius: 10px; color: #1d6b49; font-size: 28px; line-height: 1.6; white-space: normal; overflow-wrap: anywhere; }
+.energy-save-message { font-size: 26px; line-height: 1.65; color: #735a25; }
+.energy-future-toggle { white-space: normal; text-align: left; height: auto; line-height: 1.6; padding: 18px; }

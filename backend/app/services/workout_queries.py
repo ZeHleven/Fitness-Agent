@@ -22,7 +22,9 @@ from app.schemas.workout import (
     DailyWorkoutProgress, WeeklySessionReference,
 )
 from app.services.training_lifecycle import training_today, training_week, display_plan_name
+from app.services.training_day_continuity import TrainingDayContinuity, load_training_day_continuity
 from app.services.custom_exercises import safety_notice, visible_exercise
+from app.services.exercise_energy import valid_sets
 
 
 def sets_metrics(sets_data: object) -> tuple[int, int, float]:
@@ -125,6 +127,7 @@ async def build_plan_detail(
     *,
     profile: UserProfile | None = None,
     weekly_sessions: list[WorkoutSession] | None = None,
+    day_continuity: TrainingDayContinuity | None = None,
 ) -> WorkoutPlanDetail:
     exercises = (await db.execute(
         select(PlannedExercise)
@@ -153,10 +156,14 @@ async def build_plan_detail(
             WorkoutSession.week_start == result.week_start,
             WorkoutSession.status.in_(['in_progress', 'completed']),
         ).order_by(WorkoutSession.started_at, WorkoutSession.id))).scalars().all()
-    # Historic duplicate sessions are kept intact; one reference per scheduled day.
+    if day_continuity is None:
+        day_continuity = await load_training_day_continuity(
+            db, user_id=plan.user_id, family_ids={plan.family_id},
+        )
+    # One reference per uninterrupted weekday arrangement, not all old versions.
     by_day = {}
     for session in sessions:
-        if session.plan_family_id != plan.family_id or session.user_id != plan.user_id:
+        if session.week_start != result.week_start or not day_continuity.matches(plan, session):
             continue
         day = session.day_of_week
         if day not in {item.day_of_week for item in exercises}:
@@ -296,10 +303,12 @@ async def build_session_detail(
     exercise_ids = {item.exercise_id for item in exercises}
     names: dict[str, str] = {}
     notices: dict[str, str | None] = {}
+    catalog: dict[str, Exercise] = {}
     if exercise_ids:
         rows = (await db.execute(
             select(Exercise).where(Exercise.id.in_(exercise_ids), visible_exercise(session.user_id))
         )).scalars().all()
+        catalog = {row.id: row for row in rows}
         names = {row.id: row.name_zh for row in rows}
         notices = {row.id: safety_notice(row) for row in rows}
 
@@ -322,6 +331,8 @@ async def build_session_detail(
     total_volume = 0.0
     for item in exercises:
         sets_data = normalized_sets(item.sets_data)
+        source = catalog.get(item.exercise_id)
+        custom_owned = source is not None and source.owner_id == session.user_id
         history = history_by_exercise.get(item.exercise_id, [])
         previous_sets = normalized_sets(history[0].sets_data) if history else []
         all_sets = [
@@ -349,6 +360,13 @@ async def build_session_detail(
             previous_sets_data=previous_sets,
             personal_best_weight_kg=best_weight,
             personal_best_reps=best_reps,
+            energy_category=item.energy_category,
+            energy_category_source=item.energy_category_source,
+            energy_rule_version=item.energy_rule_version,
+            energy_classification_editable=bool(custom_owned and valid_sets(item) and session.status in {'completed', 'ended_early'}),
+            library_energy_category=source.energy_category if custom_owned else None,
+            library_energy_category_version=source.energy_category_version if custom_owned else None,
+            library_energy_editable=bool(custom_owned and source.is_active),
         ))
 
     result = WorkoutSessionDetail.model_validate(session)

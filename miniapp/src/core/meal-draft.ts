@@ -6,6 +6,8 @@ type Nutrition = Record<NutrientKey, number>
 export interface MealDraftItem {
   key: string
   food_id?: string | null
+  custom_food_id?: string | null
+  custom_food_version?: number | null
   food_name: string
   amountText: string
   nutrients: Record<NutrientKey, string>
@@ -29,8 +31,12 @@ export function existingMealDraft (item: MealItemInput, key: string): MealDraftI
 }
 
 export function foodMealDraft (food: Food, grams: number, key: string): MealDraftItem {
-  const item = existingMealDraft({ food_id: food.id, food_name: food.name_zh, amount_g: 100,
+  const item = existingMealDraft({ food_id: food.source === 'custom' ? undefined : food.id, food_name: food.name_zh, amount_g: 100,
     calories: food.calories_per_100g, protein_g: food.protein_g, carbs_g: food.carbs_g, fat_g: food.fat_g }, key)
+  if (food.source === 'custom') {
+    item.custom_food_id = food.id
+    item.custom_food_version = food.version
+  }
   return changeMealAmount(item, String(grams))
 }
 
@@ -47,7 +53,8 @@ export function changeMealNutrition (item: MealDraftItem, key: NutrientKey, raw:
   const invalidNutrition = { ...item.invalidNutrition }
   if (parseMealNumber(raw, nutrientLimit(key)) === null) invalidNutrition[key] = raw
   else delete invalidNutrition[key]
-  const next = { ...item, invalidNutrition, nutrients: { ...item.nutrients, [key]: raw } }
+  // A deliberate manual change is a meal-only snapshot, never a library update.
+  const next = { ...item, custom_food_id: undefined, custom_food_version: undefined, invalidNutrition, nutrients: { ...item.nutrients, [key]: raw } }
   const candidate = mealDraftCandidate(next)
   // Partial/invalid input stays visible but can never reset the valid basis.
   if (!candidate) return next
@@ -62,5 +69,6 @@ export function mealDraftCandidate (item: MealDraftItem): MealItemInput | null {
   const values = nutrientKeys.map(key => parseMealNumber(item.nutrients[key], nutrientLimit(key)))
   if (values.some(value => value === null)) return null
   return { ...(item.food_id ? { food_id: item.food_id } : {}), food_name: item.food_name.trim(), amount_g: amount,
+    ...(item.custom_food_id ? { custom_food_id: item.custom_food_id, custom_food_version: item.custom_food_version } : {}),
     calories: values[0]!, protein_g: values[1]!, carbs_g: values[2]!, fat_g: values[3]! }
 }

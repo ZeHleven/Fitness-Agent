@@ -27,6 +27,7 @@ class UserProfile(Base):
     session_duration_min: Mapped[int | None] = mapped_column(Integer, nullable=True)
     training_location: Mapped[str | None] = mapped_column(String(50), nullable=True)
     diet_restriction: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    daily_activity_level: Mapped[str | None] = mapped_column(String(20), nullable=True)
     injuries: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     chronic_conditions: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     onboarding_completed: Mapped[bool] = mapped_column(Boolean, default=False)

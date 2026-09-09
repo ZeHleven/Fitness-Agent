@@ -1,6 +1,7 @@
 import uuid
+from datetime import datetime
 
-from sqlalchemy import Boolean, Float, ForeignKey, String
+from sqlalchemy import Boolean, Float, ForeignKey, String, Integer, DateTime, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -45,3 +46,23 @@ class FoodAlias(Base):
     normalized_alias: Mapped[str] = mapped_column(
         String(100), nullable=False, unique=True
     )
+
+
+class CustomFood(Base):
+    """Private manual library. Never queried by the Agent standard-food tools."""
+    __tablename__ = 'custom_foods'
+    __table_args__ = (UniqueConstraint('user_id', 'client_request_id', name='uq_custom_food_request'),)
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(String, ForeignKey('users.id'), index=True)
+    name: Mapped[str] = mapped_column(String(100))
+    amount_g: Mapped[float] = mapped_column(Float)
+    calories: Mapped[float] = mapped_column(Float)
+    protein_g: Mapped[float] = mapped_column(Float)
+    carbs_g: Mapped[float] = mapped_column(Float)
+    fat_g: Mapped[float] = mapped_column(Float)
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default='1')
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default='true')
+    client_request_id: Mapped[str] = mapped_column(String(100))
+    creation_fingerprint: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

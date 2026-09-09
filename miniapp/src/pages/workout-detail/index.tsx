@@ -5,6 +5,7 @@ import { workoutApi } from '../../services/workouts'
 import { errorMessage } from '../../core/request'
 import { actualRestLabel } from '../../core/training'
 import type { WorkoutSession } from '../../types/api'
+import SessionEnergyEditor from '../../components/SessionEnergyEditor'
 import './index.scss'
 
 export default function WorkoutDetailPage () {
@@ -45,6 +46,7 @@ export default function WorkoutDetailPage () {
           <Text className='detail-note'>本组后实际休息：{actualRestLabel(set)}</Text>
         </View>)}
       </View>)}
+      <SessionEnergyEditor key={session.id} session={session} onSaved={setSession} />
       <View className='card detail-notes'><Text className='detail-note'>实际休息由计时开始至点击“结束休息，开始下一组”记录，不包含下一组动作耗时。历史未记录的休息不会估算补填。</Text>{session.feedback?.feedback_notes && <Text>训练反馈：{session.feedback.feedback_notes}</Text>}{session.notes && <Text>备注：{session.notes}</Text>}</View>
       {session.adaptive_adjustment_proposal && <Button className='secondary-button detail-proposal' onClick={() => Taro.navigateTo({ url: `/pages/plan-proposal-detail/index?id=${encodeURIComponent(session.adaptive_adjustment_proposal!.id)}` })}>查看调整提案</Button>}
     </>}

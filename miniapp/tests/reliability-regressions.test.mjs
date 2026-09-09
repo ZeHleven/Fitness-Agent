@@ -12,7 +12,8 @@ test('clearing then retyping grams preserves the original nutrition basis', asyn
       today: async () => summary, history: async () => [], foods: async () => [food],
       logMeal: async value => { saved.push(value); return value }
     } },
-    '../../core/request': { errorMessage: e => e.message }
+    '../../core/request': { errorMessage: e => e.message },
+    '../../services/profile': { profileApi: { update: async () => {} } }
   })
   page.render(); page.hooks.useDidShow(); await page.flush()
   if (page.find('start-meal')) { page.click('start-meal'); await page.flush() }

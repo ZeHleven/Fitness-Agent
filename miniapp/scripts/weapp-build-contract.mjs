@@ -1,5 +1,11 @@
+import { createRequire } from 'node:module'
 import { validateMiniappBuildMetadata } from './miniapp-build-metadata.mjs'
 
+// Use the parser from our pinned Webpack dependency, never a global installation.
+const require = createRequire(import.meta.url)
+const webpackRequire = createRequire(require.resolve('webpack/package.json'))
+const { parse } = webpackRequire('acorn')
+const WEAPP_ECMA_VERSION = 2019
 const RUNTIME_ENVIRONMENT_PATTERN = /\bprocess\s*(?:\.\s*env|\[\s*['"]env['"]\s*\])/u
 const REQUIRED_PAGES = ['pages/proposal-detail/index']
 
@@ -12,6 +18,17 @@ export function validateWeappArtifact ({
   const errors = []
 
   for (const file of javascriptFiles) {
+    try {
+      // Node's own parser accepts newer syntax that the preview compiler rejects.
+      // Parse every final chunk so dependencies/minification cannot bypass Babel.
+      parse(file.content, { ecmaVersion: WEAPP_ECMA_VERSION, sourceType: 'script' })
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error
+      errors.push({
+        code: 'unsupported_javascript_syntax',
+        message: `${file.path}:${error.loc.line}:${error.loc.column} is not valid ES${WEAPP_ECMA_VERSION} preview JavaScript: ${error.message}`
+      })
+    }
     if (RUNTIME_ENVIRONMENT_PATTERN.test(file.content)) {
       errors.push({
         code: 'runtime_environment_reference',
