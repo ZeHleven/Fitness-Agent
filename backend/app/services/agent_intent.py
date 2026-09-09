@@ -433,12 +433,17 @@ _NEGATED_MUTATION_PATTERN = re.compile(
 _CREATE_VERB_PATTERN = re.compile(r"(?:新增|新建|添加|创建|写入|录入)")
 _DELETE_VERB_PATTERN = re.compile(r"(?:删除|移除)")
 _HOW_TO_PREFIX_PATTERN = re.compile(r"^(?:怎样|怎么|如何|应该怎样|应该怎么)")
-_CONFIRM_DECISION_PATTERN = re.compile(
-    r"(?<!待)(?:确认|同意|接受|应用|执行|提交)"
-)
-_REJECT_DECISION_PATTERN = re.compile(r"(?:拒绝|不同意|取消|放弃)")
-_PROPOSAL_REFERENCE_PATTERN = re.compile(
-    r"(?:提案|方案|调整|改动|变更|刚才|上一个|这个)"
+_PROPOSAL_DECISION_PATTERN = re.compile(
+    r"(?:(?:请(?:你|帮我)?|麻烦(?:你|帮我)?|帮我|我)\s*)?"
+    r"(?P<action>确认(?:并?(?:应用|执行|提交))?|"
+    r"同意(?:并?(?:应用|执行|提交))?|接受|应用|执行|提交|拒绝|不同意|取消|放弃)"
+    r"\s*"
+    r"(?P<reference>"
+    r"(?:(?:当前|刚才|上一个|上个|这个|这一个|这份|该)(?:的)?)?"
+    r"(?:(?:训练计划|计划|饮食|健康|个人资料|资料|体重)(?:的)?)?"
+    r"(?:待确认|待处理)?"
+    r"(?:提案|方案|调整|改动|变更|记录))?"
+    r"[。.!！]*"
 )
 _PLAN_DOMAIN_PATTERN = re.compile(
     r"(?:训练计划|当前计划|我的计划|计划周期|训练频率|训练天数|"
@@ -576,15 +581,24 @@ def _infer_domain(message: str, fallback_intent: IntentName) -> IntentDomain:
     return _DOMAIN_BY_INTENT[fallback_intent]
 
 
-def _proposal_decision_action(message: str) -> Literal["confirm", "reject"] | None:
-    normalized = message.strip().lower()
-    if not _PROPOSAL_REFERENCE_PATTERN.search(normalized):
+def parse_explicit_proposal_decision(message: str) -> Literal["confirm", "reject"] | None:
+    """Recognize an entire, unconditional decision, never a keyword inside prose.
+
+    This is an authorization boundary, not general semantic extraction. Unknown
+    wording remains model-routed but cannot authorize a decision by itself.
+    Keep quotes, question marks and clause boundaries intact: stripping them
+    could turn quoted, conditional or negated text into apparent consent.
+    The runtime must check the original message again before dispatching.
+    """
+    match = _PROPOSAL_DECISION_PATTERN.fullmatch(message.strip())
+    if match is None:
         return None
-    confirms = bool(_CONFIRM_DECISION_PATTERN.search(normalized))
-    rejects = bool(_REJECT_DECISION_PATTERN.search(normalized))
-    if confirms == rejects:
+    action = match.group("action")
+    # Bare cancellation can refer to a pending query/clarification, not a
+    # proposal. Require an explicit object before allowing this rejection.
+    if action in {"取消", "放弃"} and match.group("reference") is None:
         return None
-    return "confirm" if confirms else "reject"
+    return "reject" if action in {"拒绝", "不同意", "取消", "放弃"} else "confirm"
 
 
 def _exercise_reference(message: str) -> str | None:
@@ -741,7 +755,7 @@ def _infer_request_semantics(
 ]:
     normalized = message.strip().lower()
     domain = _infer_domain(message, fallback_intent)
-    decision_action = _proposal_decision_action(message)
+    decision_action = parse_explicit_proposal_decision(message)
     if decision_action is not None and not contains_health_red_flag(message):
         return (
             domain,

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from datetime import date
+from unittest.mock import AsyncMock, patch
 
 import bcrypt
 import pytest
 from sqlalchemy import select
 
-from app.models.agent import AgentProposal
+from app.config import settings
+from app.models.agent import AgentConversation, AgentProposal, AgentRun
 from app.models.exercise import Exercise
 from app.models.profile import UserProfile
 from app.models.user import User
@@ -24,6 +26,8 @@ from app.services.plan_management_proposals import (
     decide_manual_plan_proposal,
     plan_snapshot_fingerprint,
 )
+from app.services.agent_intent import ChangeRequest, IntentResolution, IntentResolverOutcome
+from app.services.auth import create_access_token
 
 
 async def _seed(db_session, suffix: str):
@@ -261,3 +265,74 @@ async def test_deletion_never_orphans_an_in_progress_session(db_session):
     assert preserved.plan_id == plan_id
     assert preserved.status == 'in_progress'
     assert (await db_session.get(WorkoutPlan, plan_id)).is_active
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("proposal_kind", ["adjustment", "deletion"])
+async def test_manual_plan_proposal_requires_explicit_chat_consent(
+    client, db_session, proposal_kind,
+):
+    user, plan = await _seed(db_session, f"consent-{proposal_kind}")
+    user_id, plan_id = user.id, plan.id
+    conversation = AgentConversation(user_id=user_id)
+    db_session.add(conversation)
+    await db_session.flush()
+    conversation_id = conversation.id
+    before = await build_plan_snapshot_v2(db_session, plan=plan)
+    common = dict(
+        client_request_id=f"consent-{proposal_kind}-create",
+        expected_base_fingerprint=plan_snapshot_fingerprint(before),
+    )
+    if proposal_kind == "adjustment":
+        request = CreatePlanAdjustmentProposalRequest(
+            **common, candidate=PlanCandidate.model_validate({
+                "duration_weeks": 6, "training_days": before.training_days,
+                "exercises": [{
+                    key: value for key, value in item.model_dump().items()
+                    if key not in {"exercise_name", "category"}
+                } for item in before.exercises],
+            }),
+        )
+        reference = await create_manual_plan_adjustment_proposal(
+            db_session, enabled=True, user_id=user_id, plan_id=plan_id, request=request,
+            origin="agent_chat", conversation_id=conversation_id,
+        )
+    else:
+        reference = await create_manual_plan_deletion_proposal(
+            db_session, enabled=True, user_id=user_id, plan_id=plan_id,
+            request=CreatePlanDeletionProposalRequest(**common),
+            origin="agent_chat", conversation_id=conversation_id,
+        )
+    await db_session.commit()
+    bogus_decision = IntentResolverOutcome(
+        resolution=IntentResolution(
+            primary_intent="general_qa", intent_domain="general", confidence=1.0,
+            request_kind="proposal_decision", requested_effect="decide",
+            resolved_query="确认这个提案",
+            change_requests=[ChangeRequest(
+                resource="general", operation="update", field_path="proposal.status",
+                value="confirm",
+            )],
+        ), source="model",
+    )
+    with patch.object(settings, "MANUAL_PLAN_PROPOSALS_ENABLED", True), patch(
+        "app.services.agent_runtime.resolve_intent_with_fallback",
+        new=AsyncMock(return_value=bogus_decision),
+    ):
+        response = await client.post(
+            "/api/v1/agent/chat",
+            headers={"Authorization": f"Bearer {create_access_token(user_id)}"},
+            json={"message": "这个提案先别执行", "conversation_id": conversation_id},
+        )
+    assert response.status_code == 200
+    db_session.expire_all()
+    proposal = await db_session.get(AgentProposal, reference.id)
+    assert proposal.status == "pending_confirmation"
+    assert proposal.version == 1
+    plans = list((await db_session.scalars(
+        select(WorkoutPlan).where(WorkoutPlan.user_id == user_id)
+    )).all())
+    assert len(plans) == 1 and plans[0].id == plan_id and plans[0].is_active
+    assert plans[0].duration_weeks == 4
+    run = await db_session.get(AgentRun, response.json()["run_id"])
+    assert run.execution_trace["termination_reason"] == "proposal_decision_not_explicit"

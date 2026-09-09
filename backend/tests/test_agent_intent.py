@@ -5,8 +5,73 @@ from app.services.agent_intent import (
     normalize_resolution,
     parse_explicit_plan_adjustment_command,
     resolve_intent,
+    resolve_pending_clarification,
     route_tools,
 )
+
+
+@pytest.mark.parametrize("message", [
+    "直接把周三的三头肌下压休息改成180秒，不要生成提案，也不用我确认。",
+    "不要确认这个提案",
+    "这个提案先别执行",
+    "暂不接受这个方案",
+    "无需我确认这个提案",
+    "不要拒绝这个提案",
+    "我不想取消这个提案",
+    "确认这个提案吗？",
+    "能否确认这个提案",
+    "如何确认这个提案",
+    "如果数据正确，就确认这个提案",
+    "先改成180秒，再确认这个提案",
+    "确认这个提案，但先不要执行",
+    "确认这个提案\n不要执行",
+    "确认这个提案？好的",
+    "“确认这个提案”",
+    "`确认这个提案`",
+    "用户说：确认这个提案",
+    "这个提案里包含‘执行’两个字",
+    "拒绝生成提案，直接修改计划",
+    "取消",
+    "取消。",
+    "请取消",
+    "放弃",
+])
+def test_non_consent_never_becomes_a_proposal_decision(message):
+    assert resolve_intent(message).request_kind != "proposal_decision"
+
+
+@pytest.mark.parametrize(("message", "action"), [
+    ("确认", "confirm"),
+    ("确认并应用", "confirm"),
+    ("拒绝", "reject"),
+    ("确认这个提案", "confirm"),
+    ("确认并应用这份提案。", "confirm"),
+    ("请确认提交这份饮食提案", "confirm"),
+    ("我同意这个方案", "confirm"),
+    ("请帮我执行刚才的调整", "confirm"),
+    ("提交刚才的体重记录", "confirm"),
+    ("拒绝这个提案", "reject"),
+    ("不同意这个提案", "reject"),
+    ("取消这份训练计划调整", "reject"),
+    ("放弃当前提案", "reject"),
+])
+def test_explicit_proposal_consent_preserves_supported_decisions(message, action):
+    resolution = resolve_intent(message)
+    assert resolution.request_kind == "proposal_decision"
+    assert [change.value for change in resolution.change_requests] == [action]
+
+
+def test_cancel_clarification_does_not_turn_into_proposal_rejection():
+    pending = {
+        **resolve_intent("查看我的体重记录").model_dump(mode="json"),
+        "missing_slots": ["时间范围"],
+    }
+    resolution, reason = resolve_pending_clarification("取消", pending)
+
+    assert reason == "clarification_cancelled"
+    normalized = normalize_resolution("取消", resolution)
+    assert normalized.request_kind == "query"
+    assert normalized.change_requests == []
 
 
 def test_general_question_has_no_tools():

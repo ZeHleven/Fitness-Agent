@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import date
 from unittest.mock import AsyncMock, patch
 
 import bcrypt
 import pytest
+from langchain_core.messages import AIMessage
 from sqlalchemy import select
 
 from app.config import settings
@@ -25,8 +27,10 @@ from app.services.agent_intent import (
     ChangeRequest,
     IntentResolution,
     IntentResolverOutcome,
+    resolve_intent,
 )
 from app.services.auth import create_access_token
+from app.services.agent_jobs import process_agent_run
 from app.services.plan_management_proposals import PlanProposalError
 
 
@@ -59,6 +63,153 @@ async def _context(db_session, suffix: str):
     db_session.add(run)
     await db_session.commit()
     return user, profile, conversation, run
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["chat_model", "queued_model", "persisted"])
+@pytest.mark.parametrize("has_pending", [False, True])
+async def test_proposal_consent_guard_covers_jobs_and_persisted_decisions(
+    client, db_session, session_factory, entry, has_pending,
+):
+    user, profile, conversation, run = await _context(
+        db_session, f"consent-{entry}-{has_pending}"
+    )
+    user_id, conversation_id = user.id, conversation.id
+    reference = None
+    if has_pending:
+        reference = await create_agent_weight_proposal(
+            db_session, enabled=True, user_id=user_id,
+            conversation_id=conversation_id, run_id=run.id,
+            changes=[ChangeRequest(
+                resource="profile", operation="create",
+                field_path="weight_log.weight_kg", value=67.5,
+            )],
+        )
+    resolution = IntentResolution(
+        primary_intent="general_qa", intent_domain="general",
+        request_kind="proposal_decision", requested_effect="decide",
+        resolved_query="确认这个提案", confidence=0.99,
+        change_requests=[ChangeRequest(
+            resource="general", operation="update",
+            field_path="proposal.status", value="confirm",
+        )],
+    )
+    message = "不要确认这个提案"
+    if entry == "persisted":
+        # An older run can persist a decision while asking which proposal to
+        # handle. Selecting its object is NOT fresh permission to execute it.
+        conversation.pending_clarification = {
+            **resolution.model_dump(mode="json"),
+            "missing_slots": ["要处理的待确认提案"],
+            "clarification_question": "要处理哪个提案？",
+        }
+        message = "这一个"
+    await db_session.commit()
+    headers = {"Authorization": f"Bearer {create_access_token(user_id)}"}
+    resolver_patch = (
+        nullcontext() if entry == "persisted" else patch(
+            "app.services.agent_runtime.resolve_intent_with_fallback",
+            new=AsyncMock(return_value=IntentResolverOutcome(
+                resolution=resolution, source="model",
+            )),
+        )
+    )
+    with patch.object(settings, "AGENT_INTENT_MODEL_ENABLED", False), resolver_patch:
+        if entry == "queued_model":
+            response = await client.post(
+                "/api/v1/agent/runs", headers=headers,
+                json={"message": message, "conversation_id": conversation_id,
+                      "client_request_id": f"consent-queued-{has_pending}"},
+            )
+            assert response.status_code == 202
+            result_run_id = response.json()["run_id"]
+            queued = await db_session.get(AgentRun, result_run_id)
+            queued.status = "running"
+            queued.attempt_count = 1
+            await db_session.commit()
+            await process_agent_run(session_factory, result_run_id)
+            polled = await client.get(f"/api/v1/agent/runs/{result_run_id}", headers=headers)
+            assert polled.json()["status"] == "completed"
+        else:
+            response = await client.post(
+                "/api/v1/agent/chat", headers=headers,
+                json={"message": message, "conversation_id": conversation_id},
+            )
+            assert response.status_code == 200
+            result_run_id = response.json()["run_id"]
+    db_session.expire_all()
+    result_run = await db_session.get(AgentRun, result_run_id)
+    assert result_run.execution_trace["termination_reason"] == "proposal_decision_not_explicit"
+    await db_session.refresh(profile)
+    assert profile.weight_kg == 65
+    assert await db_session.scalar(select(WeightLog.id).where(WeightLog.user_id == user_id)) is None
+    if reference:
+        proposal = await db_session.get(AgentProposal, reference.id)
+        assert proposal.status == "pending_confirmation"
+        assert proposal.version == 1
+        # A fresh explicit decision still works after the safe clarification;
+        # neither model failure nor stale state can silently change its action.
+        with patch.object(settings, "AGENT_INTENT_MODEL_ENABLED", False):
+            confirmed = await client.post(
+                "/api/v1/agent/chat", headers=headers,
+                json={"message": "确认这个提案", "conversation_id": conversation_id},
+            )
+            repeated = await client.post(
+                "/api/v1/agent/chat", headers=headers,
+                json={"message": "确认这个提案", "conversation_id": conversation_id},
+            )
+        assert confirmed.status_code == repeated.status_code == 200
+        assert "已确认并应用提案" in confirmed.json()["reply"]
+        logs = list((await db_session.scalars(
+            select(WeightLog).where(WeightLog.user_id == user_id)
+        )).all())
+        assert [log.weight_kg for log in logs] == [67.5]
+
+
+@pytest.mark.asyncio
+async def test_cancelling_query_clarification_keeps_existing_proposal_pending(
+    client, db_session,
+):
+    user, profile, conversation, run = await _context(db_session, "cancel-query")
+    reference = await create_agent_weight_proposal(
+        db_session, enabled=True, user_id=user.id,
+        conversation_id=conversation.id, run_id=run.id,
+        changes=[ChangeRequest(
+            resource="profile", operation="create",
+            field_path="weight_log.weight_kg", value=67.5,
+        )],
+    )
+    conversation.pending_clarification = {
+        **resolve_intent("查看我的体重记录").model_dump(mode="json"),
+        "missing_slots": ["时间范围"],
+        "clarification_question": "查看哪个时间范围？",
+    }
+    await db_session.commit()
+    answer = AsyncMock(return_value={
+        "messages": [AIMessage(content="已取消本次查询。")],
+    })
+    with (
+        patch.object(settings, "AGENT_INTENT_MODEL_ENABLED", False),
+        patch("app.services.agent_runtime.invoke_langchain_agent", new=answer),
+    ):
+        response = await client.post(
+            "/api/v1/agent/chat",
+            headers={"Authorization": f"Bearer {create_access_token(user.id)}"},
+            json={"message": "取消", "conversation_id": conversation.id},
+        )
+
+    assert response.status_code == 200
+    answer.assert_awaited_once()
+    assert response.json()["reply"] == "已取消本次查询。"
+    await db_session.refresh(conversation)
+    assert conversation.pending_clarification == {}
+    proposal = await db_session.get(AgentProposal, reference.id)
+    await db_session.refresh(proposal)
+    assert proposal.status == "pending_confirmation"
+    assert proposal.version == 1
+    await db_session.refresh(profile)
+    assert profile.weight_kg == 65
+    assert await db_session.scalar(select(WeightLog.id).where(WeightLog.user_id == user.id)) is None
 
 
 def _decision(run_id: str) -> GenericProposalDecisionRequest:

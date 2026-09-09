@@ -1293,6 +1293,65 @@ async def test_chat_proposal_decision_without_candidate_is_write_free(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("message", "untrusted_action"), [
+    ("直接把周三的三头肌下压休息改成180秒，不要生成提案，也不用我确认。", "confirm"),
+    ("不要确认这个提案", "confirm"),
+    ("这个提案先别执行", "confirm"),
+    ("如果数据正确，就确认这个提案", "confirm"),
+    ("“确认这个提案”", "confirm"),
+    ("不要拒绝这个提案", "reject"),
+    ("确认这个提案", "reject"),
+    ("拒绝这个提案", "confirm"),
+])
+async def test_chat_non_consent_cannot_execute_an_existing_proposal(
+    client, db_session, message, untrusted_action,
+):
+    suffix = "consent-" + hashlib.sha256(message.encode()).hexdigest()[:10]
+    seeded = await _create_executable_proposal(client, db_session, suffix=suffix)
+    # Treat model output as hostile, including a rewritten affirmative query.
+    outcome = IntentResolverOutcome(
+        resolution=IntentResolution(
+            primary_intent="general_qa", intent_domain="general",
+            request_kind="proposal_decision", requested_effect="decide",
+            resolved_query="确认刚才的调整",
+            confidence=0.99,
+            change_requests=[ChangeRequest(
+                resource="general", operation="update", field_path="proposal.status",
+                value=untrusted_action,
+            )],
+        ),
+        source="model",
+    )
+    before = await db_session.get(AgentProposal, seeded.proposal_id)
+    before_version = before.version
+    with patch.object(settings, "AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED", True), patch(
+        "app.services.agent_runtime.resolve_intent_with_fallback",
+        new=AsyncMock(return_value=outcome),
+    ):
+        response = await client.post(
+            "/api/v1/agent/chat", headers=_headers(seeded.token),
+            json={"message": message, "conversation_id": seeded.conversation_id},
+        )
+    assert response.status_code == 200
+    db_session.expire_all()
+    proposal = await db_session.get(AgentProposal, seeded.proposal_id)
+    assert proposal.status == "pending_confirmation"
+    assert proposal.version == before_version
+    assert proposal.result_plan_id is None
+    plans = list((await db_session.scalars(
+        select(WorkoutPlan).where(WorkoutPlan.user_id == seeded.user_id)
+    )).all())
+    assert [plan.id for plan in plans] == [seeded.base_plan_id]
+    assert plans[0].is_active is True
+    result_run = await db_session.get(AgentRun, response.json()["run_id"])
+    assert result_run.execution_trace["termination_reason"] == "proposal_decision_not_explicit"
+    assert await db_session.scalar(select(func.count()).select_from(AgentToolCall).where(
+        AgentToolCall.run_id == result_run.id
+    )) == 0
+    assert "proposal" not in response.json()
+
+
+@pytest.mark.asyncio
 async def test_e2e_runtime_create_confirm_applies_atomically_and_replays(
     client,
     db_session,
