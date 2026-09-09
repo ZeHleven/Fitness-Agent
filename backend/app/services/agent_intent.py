@@ -426,9 +426,14 @@ _MUTATION_VERB_PATTERN = re.compile(
     r"删除|移除|替换|创建|保存|记录|开始|完成)"
 )
 _NEGATED_MUTATION_PATTERN = re.compile(
-    r"(?:不要|别|先别|无需|不用|不必|暂不|别再).{0,12}?"
-    r"(?:调整|修改|更新|改成|改为|设置|增加|新增|新建|添加|写入|"
-    r"录入|减少|降低|删除|移除|替换|创建|保存|记录|开始|完成)"
+    # Bare 不 only negates an adjacent verb; it must not reach across a
+    # clause (or turn 不只是查看 into a prohibition on a later modification).
+    # Keep common double-negation suffixes such as 不得不 / 不能不 positive.
+    r"(?:(?:不要|别|先别|无需|不用|不必|暂不|别再)[^，,。；;！？!?\n]{0,12}?"
+    r"|(?<![得能是非不])不[ \t]*)"
+    + _MUTATION_VERB_PATTERN.pattern
+    + r"(?:[ \t]*(?:或|和|及|、)[ \t]*"
+    + _MUTATION_VERB_PATTERN.pattern + r")*"
 )
 _CREATE_VERB_PATTERN = re.compile(r"(?:新增|新建|添加|创建|写入|录入)")
 _DELETE_VERB_PATTERN = re.compile(r"(?:删除|移除)")
@@ -807,9 +812,11 @@ def _infer_request_semantics(
     ):
         return domain, "assessment", "read", [], [], None
 
-    mutation_requested = bool(_MUTATION_VERB_PATTERN.search(normalized))
-    if _NEGATED_MUTATION_PATTERN.search(normalized):
-        mutation_requested = False
+    # Exclude only negated verbs, not every command in the message. This is
+    # legacy consistency evidence, never permission to bypass model routing
+    # or to execute a write: mixed positive requests still need a Proposal.
+    mutation_text = _NEGATED_MUTATION_PATTERN.sub(" ", normalized)
+    mutation_requested = bool(_MUTATION_VERB_PATTERN.search(mutation_text))
     if (
         "记录" in normalized
         and re.search(r"(?:查看|查询|看看|历史|最近|过去|有哪些|是什么)", normalized)
@@ -817,7 +824,7 @@ def _infer_request_semantics(
             r"(?:调整|修改|更新|改成|改为|改到|设成|设为|设置|增加|新增|"
             r"新建|添加|写入|录入|减少|降低|调低|调高|缩短|延长|"
             r"删除|移除|替换|制定|创建|保存)",
-            normalized,
+            mutation_text,
         )
     ):
         mutation_requested = False
