@@ -92,6 +92,7 @@ test('week selection changes seven bars, metrics and records; old late response 
 test('workout detail shows per-set actual and unknown rest without any writes', async () => {
   const p = platform(); let reads = 0
   const page = runtime('../../src/pages/workout-detail/index.tsx', {
+    '../services/workouts': { workoutApi: {} }, '../core/request': { errorMessage: e => e.message },
     '@tarojs/taro': p.module, '../../core/request': { errorMessage: e => e.message },
     '../../services/workouts': { workoutApi: { detail: async id => { reads++; assert.equal(id, 's'); return { ...session, exercises: [{ ...exercise, sets_data: [{ reps: 8, weight_kg: 25, actual_rest_seconds: 17 }, { reps: 7, weight_kg: 22.5 }] }] } } } }
   })

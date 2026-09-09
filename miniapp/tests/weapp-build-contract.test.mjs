@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { execFileSync } from 'node:child_process'
 import test from 'node:test'
 
 import ts from 'typescript'
@@ -200,4 +201,78 @@ test('missing or malformed build manifest fails the artifact gate', () => {
       ['build_manifest_invalid']
     )
   }
+})
+
+test('preview syntax gate rejects unsupported syntax with a file and location', () => {
+  for (const content of [
+    'const code = payload?.detail?.code',
+    'const count = value ?? 0',
+    'state.value ??= 1',
+    'class Item { value = 1 }',
+    'const malformed = ;'
+  ]) {
+    const errors = validateWeappArtifact(artifact({
+      javascriptFiles: [{ path: 'common.js', content }]
+    }))
+    assert.deepEqual(errors.map(error => error.code), ['unsupported_javascript_syntax'])
+    assert.match(errors[0].message, /common\.js:1:\d+/u)
+  }
+})
+
+test('syntax gate parses code, not optional-chain text inside comments or strings', () => {
+  assert.deepEqual(validateWeappArtifact(artifact({
+    javascriptFiles: [{
+      path: 'pages/nutrition/index.js',
+      content: '/* a?.b */ const text = "value ?? fallback"; const re = /\\?\\./; const out = { ...{ value: 1 } }'
+    }]
+  })), [])
+})
+
+test('syntax gate checks page chunks as well as common.js', () => {
+  const errors = validateWeappArtifact(artifact({
+    javascriptFiles: [
+      { path: 'common.js', content: 'const ok = true' },
+      { path: 'pages/nutrition/index.js', content: 'const value = input?.value' }
+    ]
+  }))
+  assert.equal(errors.length, 1)
+  assert.match(errors[0].message, /pages\/nutrition\/index\.js:1:\d+/u)
+})
+
+test('actual WeChat Babel config lowers modern syntax without changing nullish or call semantics', () => {
+  const source = `function exercise(input) {
+    let reads = 0;
+    const get = () => { reads++; return input; };
+    const selected = get()?.nested?.value ?? 17;
+    const context = input?.read?.();
+    const kept = { value: 0 };
+    kept.value ??= 99;
+    return { selected, context, reads, kept: kept.value };
+  }`
+  // A fresh process uses the real build config and target, not a test-only preset.
+  const output = execFileSync(process.execPath, ['-e', `
+    const babel = require('@babel/core');
+    const fs = require('node:fs');
+    const output = babel.transformSync(fs.readFileSync(0, 'utf8'), {
+      filename: 'src/preview-syntax-fixture.ts',
+      configFile: require('node:path').resolve('babel.config.js'),
+      babelrc: false
+    }).code;
+    process.stdout.write(output);
+  `], {
+    cwd: fileURLToPath(new URL('..', import.meta.url)),
+    env: { ...process.env, TARO_ENV: 'weapp', TARO_PLATFORM: 'mini', NODE_ENV: 'production' },
+    input: source,
+    encoding: 'utf8'
+  })
+  assert.deepEqual(validateWeappArtifact(artifact({
+    javascriptFiles: [{ path: 'fixture.js', content: output }]
+  })), [])
+  assert.doesNotMatch(output, /\?\.|\?\?/u)
+  const exercise = new Function(`${output}; return exercise;`)()
+  assert.deepEqual(exercise(null), { selected: 17, context: undefined, reads: 1, kept: 0 })
+  assert.deepEqual(exercise({ nested: { value: 0 } }), { selected: 0, context: undefined, reads: 1, kept: 0 })
+  assert.deepEqual(exercise({ nested: { value: 5 }, read () { return this.nested.value } }), {
+    selected: 5, context: 5, reads: 1, kept: 0
+  })
 })

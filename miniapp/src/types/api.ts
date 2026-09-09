@@ -13,6 +13,7 @@ export interface WeChatLoginResponse extends TokenResponse {
 }
 
 export interface UserProfile {
+  daily_activity_level?: DailyActivityLevel | null
   user_id: string
   age?: number | null
   gender?: string | null
@@ -32,6 +33,7 @@ export interface UserProfile {
 }
 
 export interface ProfileUpdate {
+  daily_activity_level?: DailyActivityLevel
   age?: number
   gender?: string
   height_cm?: number
@@ -92,6 +94,9 @@ export interface WorkoutPlan {
 }
 
 export interface Food {
+  source?: 'standard' | 'custom'
+  version?: number | null
+  basis?: CustomFoodValues | null
   id: string
   name_zh: string
   name_en?: string | null
@@ -107,6 +112,8 @@ export interface Food {
 
 export interface MealItemInput {
   food_id?: string | null
+  custom_food_id?: string | null
+  custom_food_version?: number | null
   food_name: string
   amount_g: number
   calories: number
@@ -129,6 +136,7 @@ export interface MealLog {
 }
 
 export interface DailyNutritionSummary {
+  energy_estimate?: EnergyEstimate | null
   date: string
   total_calories: number
   total_protein_g: number
@@ -137,7 +145,47 @@ export interface DailyNutritionSummary {
   meals: MealLog[]
 }
 
+export type DailyActivityLevel = 'sedentary' | 'walking' | 'physical_work'
+export interface CustomFoodValues {
+  name: string
+  amount_g: number
+  calories: number
+  protein_g: number
+  carbs_g: number
+  fat_g: number
+}
+export type EnergyCategory = 'resistance_training' | 'bodyweight_resistance'
+
+export interface SessionEnergyUpdate {
+  expected_version: number
+  update_future: boolean
+  exercises: { session_exercise_id: string, energy_category: EnergyCategory, expected_exercise_version?: number }[]
+}
+
+export interface EnergyEstimate {
+  version?: string
+  status: 'estimated' | 'partial' | 'unavailable'
+  bmr_kcal: number | null
+  total_kcal: number | null
+  balance_kcal: number | null
+  baseline_kcal?: number | null
+  training_kcal?: number | null
+  reasons: string[]
+  activity_level?: DailyActivityLevel
+  activity_defaulted?: boolean
+  activity_factor?: number
+  profile_inputs?: { age: number, height_cm: number, weight_kg: number, gender: string, weight_source: string } | null
+  workouts?: {
+    session_id: string, effective_minutes: number | null, net_kcal: number | null, met: number | null, reason: string | null, excluded_interruption_minutes?: number
+    started_at?: string | null, completed_at?: string | null, trained_at?: string | null, plan_name?: string | null, reason_code?: string | null
+    unestimated_exercises?: { session_exercise_id: string, exercise_name: string, reason_code: string }[]
+    performed_exercises?: { session_exercise_id: string, exercise_name: string }[]
+  }[]
+}
+
 export interface PersonalizedExerciseOption {
+  energy_category?: EnergyCategory | null
+  energy_category_version?: number
   safety_notice?: string | null
   exercise_id: string
   exercise_name: string
@@ -191,6 +239,13 @@ export interface WorkoutSetRecord {
 }
 
 export interface SessionExercise {
+  energy_category?: EnergyCategory | null
+  energy_category_source?: string | null
+  energy_rule_version?: string | null
+  energy_classification_editable?: boolean
+  library_energy_category?: EnergyCategory | null
+  library_energy_category_version?: number | null
+  library_energy_editable?: boolean
   safety_notice?: string | null
   id: string
   session_id: string
@@ -232,6 +287,7 @@ export interface WorkoutAdjustment {
 }
 
 export interface WorkoutSession {
+  energy_classification_version?: number
   orphaned?: boolean
   id: string
   plan_id?: string | null

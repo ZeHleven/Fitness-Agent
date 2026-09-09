@@ -24,6 +24,27 @@
 .nutrition-eyebrow { color: #6b7d72; font-size: 22px; font-weight: 750; }
 .nutrition-title { margin: 8px 0 24px; font-size: 44px; font-weight: 900; }
 .daily-card { text-align: center; }
+.daily-overview { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; align-items: center; }
+.daily-intake, .energy-column { min-width: 0; }
+.daily-unit { display: block; margin-top: 5px; color: #718178; font-size: 22px; font-weight: 600; }
+.energy-column { display: grid; gap: 14px; padding-left: 20px; border-left: 1px solid #e1e9df; text-align: left; }
+.energy-label, .energy-value, .macro-percent, .energy-note, .energy-reason, .energy-warning { display: block; }
+.energy-label, .macro-percent { font-size: 19px; line-height: 1.5; color: #718178; overflow-wrap: anywhere; }
+.energy-value { margin-top: 3px; font-size: 24px; font-weight: 800; line-height: 1.4; overflow-wrap: anywhere; }
+.macro-percent { margin-top: 5px; }
+.energy-note, .energy-reason, .energy-warning { margin-top: 14px; font-size: 20px; line-height: 1.6; text-align: left; color: #718178; }
+.energy-warning { color: #86601d; }
+.energy-toggle, .energy-profile { margin: 12px 0 0; padding: 10px 0; min-height: 64px; background: transparent; color: #1d6b49; font-size: 23px; line-height: 1.6; }
+.energy-details { display: grid; gap: 16px; padding-top: 20px; border-top: 1px solid #e1e9df; text-align: left; color: #617269; font-size: 22px; line-height: 1.7; }
+.energy-detail-title { color: #203e30; font-weight: 750; }
+.activity-options, .library-tabs { display: flex; flex-wrap: wrap; gap: 10px; }
+.activity-choice, .library-tab { margin: 0; padding: 12px 16px; min-height: 70px; border-radius: 14px; background: #f2f7f2; font-size: 23px; color: #617269; line-height: 1.7; }
+.activity-choice.is-selected, .library-tab.is-selected { background: #dfeee3; color: #175f42; font-weight: 800; }
+.energy-workout { display: flex; flex-direction: column; gap: 12px; padding: 14px; background: #f2f7f2; border-radius: 12px; overflow-wrap: anywhere; }
+.library-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
+.library-actions button { margin: 0; padding: 8px 14px; min-height: 64px; font-size: 22px; line-height: 44px; border-radius: 12px; background: #eaf3ec; color: #1d6b49; }
+.library-actions .library-delete, .confirm-food-delete { color: #9d382b; background: #fff0ed; }
+.library-tabs { margin-bottom: 12px; }
 .daily-label { color: #718178; font-size: 22px; }
 .daily-calories { margin-top: 6px; font-size: 42px; font-weight: 900; }
 .macro-row { display: grid; margin-top: 24px; grid-template-columns: repeat(3, 1fr); gap: 10px; }
@@ -49,6 +70,9 @@
 .food-meta { margin-top: 5px; color: #718178; font-size: 20px; }
 .custom-title { margin: 28px 0 12px; font-size: 25px; font-weight: 800; }
 .custom-input.wide { width: 100%; }
+.custom-form .custom-input, .selected-name-input, .search-input { height: 88px; min-height: 88px; padding-top: 0; padding-bottom: 0; line-height: normal; }
+.small-input-wrap { min-width: 0; }
+.small-input { height: 76px; min-height: 76px; padding-top: 0; padding-bottom: 0; line-height: normal; }
 .custom-grid { display: grid; margin-top: 12px; grid-template-columns: repeat(2, 1fr); gap: 10px; }
 .small-input-wrap { display: flex; min-height: 62px; padding: 0 12px; align-items: center; border: 2px solid #dce5dd; border-radius: 15px; color: #718178; font-size: 19px; }
 .small-input { min-width: 0; flex: 1; font-size: 23px; }

@@ -84,6 +84,8 @@ class PersonalizedPlanPreviewRequest(BaseModel):
 
 
 class PersonalizedExerciseOption(BaseModel):
+    energy_category: Literal['resistance_training', 'bodyweight_resistance'] | None = None
+    energy_category_version: int = 0
     exercise_id: str = Field(min_length=1, max_length=100)
     exercise_name: str = Field(min_length=1, max_length=100)
     category: str = Field(min_length=1, max_length=30)
@@ -204,6 +206,13 @@ class WorkoutSessionComplete(WorkoutFeedback):
 
 
 class SessionExerciseResponse(BaseModel):
+    energy_category: Literal['resistance_training', 'bodyweight_resistance'] | None = None
+    energy_category_source: str | None = None
+    energy_rule_version: str | None = None
+    energy_classification_editable: bool = False
+    library_energy_category: Literal['resistance_training', 'bodyweight_resistance'] | None = None
+    library_energy_category_version: int | None = None
+    library_energy_editable: bool = False
     id: str
     session_id: str
     exercise_id: str
@@ -258,6 +267,7 @@ class AdaptiveAdjustmentProposalResponse(BaseModel):
 
 
 class WorkoutSessionDetail(WorkoutSessionResponse):
+    energy_classification_version: int = 0
     plan_name: str | None = None
     orphaned: bool = False
     total_sets: int = 0

@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { Button, Text, View } from '@tarojs/components'
-import Taro, { useDidShow, useLoad } from '@tarojs/taro'
+import Taro, { useDidHide, useDidShow, useLoad } from '@tarojs/taro'
 
 import { errorMessage } from '../../core/request'
 import { planManagementApi } from '../../services/plan-management'
@@ -12,6 +12,14 @@ import type {
 import './index.scss'
 
 const weekday = (day: number) => ['一', '二', '三', '四', '五', '六', '日'][day - 1]
+type DecisionAction = 'confirm' | 'reject'
+interface ConfirmationTarget {
+  action: DecisionAction
+  id: string
+  version: number
+  fingerprint: string
+  revision: number
+}
 
 export default function PlanProposalDetailPage () {
   const [proposalId, setProposalId] = useState('')
@@ -21,20 +29,51 @@ export default function PlanProposalDetailPage () {
   const [reviewed, setReviewed] = useState(false)
   const [deciding, setDeciding] = useState<'confirm' | 'reject' | ''>('')
   const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  const [verified, setVerified] = useState(false)
+  const [inlineConfirmation, setInlineConfirmation] = useState<ConfirmationTarget | null>(null)
+  const currentProposal = useRef<ManualPlanProposalReadResponse | null>(null)
+  const reviewedRef = useRef(false)
+  const verifiedRef = useRef(false)
+  const interactionLock = useRef(false)
+  const navigationLock = useRef(false)
+  const confirmationRevision = useRef(0)
+  const readSequence = useRef(0)
+  const inlineTarget = useRef<ConfirmationTarget | null>(null)
 
-  const load = async (id: string, refresh = false) => {
+  const clearConfirmation = () => {
+    confirmationRevision.current += 1
+    inlineTarget.current = null
+    setInlineConfirmation(null)
+    reviewedRef.current = false
+    setReviewed(false)
+  }
+
+  const load = async (id: string, refresh = false, reconcile = false) => {
+    if (interactionLock.current && !reconcile) return null
+    const sequence = ++readSequence.current
+    clearConfirmation()
+    verifiedRef.current = false
+    setVerified(false)
     if (refresh) setRefreshing(true)
     else setLoading(true)
     setError('')
     try {
       const value = await planManagementApi.manualProposal(id)
+      if (sequence !== readSequence.current) return null
+      currentProposal.current = value
       setProposal(value)
-      if (value.status !== 'pending_confirmation') setReviewed(false)
+      verifiedRef.current = true
+      setVerified(true)
+      return value
     } catch (requestError) {
-      setError(errorMessage(requestError, '提案读取失败'))
+      if (sequence === readSequence.current) setError(errorMessage(requestError, '提案读取失败'))
+      return null
     } finally {
-      setLoading(false)
-      setRefreshing(false)
+      if (sequence === readSequence.current) {
+        setLoading(false)
+        setRefreshing(false)
+      }
     }
   }
 
@@ -53,45 +92,93 @@ export default function PlanProposalDetailPage () {
     if (proposalId && proposal) void load(proposalId, true)
   })
 
-  const decide = async (action: 'confirm' | 'reject') => {
-    if (!proposal || !reviewed || deciding) return
-    const deletion = proposal.proposal_type === 'plan_deletion_v1'
-    const answer = await Taro.showModal({
-      title: action === 'confirm'
-        ? deletion ? '永久删除当前计划？' : '确认应用调整？'
-        : '拒绝这份提案？',
-      content: action === 'confirm'
-        ? deletion
-          ? '计划定义和动作编排将永久删除；历史训练记录仍会保留。'
-          : '系统将原子创建新计划并切换活动版本，本次进行中的训练不会变化。'
-        : '拒绝后当前活动计划不会发生变化。',
-      confirmText: action === 'confirm' ? deletion ? '永久删除' : '确认应用' : '确认拒绝',
-      confirmColor: deletion || action === 'reject' ? '#a13d31' : '#1d6b49'
-    })
-    if (!answer.confirm) return
-    setDeciding(action)
-    setError('')
+  useDidHide(clearConfirmation)
+
+  const targetIsCurrent = (target: ConfirmationTarget) => {
+    const current = currentProposal.current
+    return Boolean(current && verifiedRef.current && reviewedRef.current &&
+      target.revision === confirmationRevision.current && current.id === target.id &&
+      current.version === target.version && current.payload_fingerprint === target.fingerprint &&
+      current.status === 'pending_confirmation' && current.allowed_actions.includes(target.action) &&
+      Date.parse(current.expires_at) > Date.now())
+  }
+
+  const returnToTraining = async () => {
+    if (navigationLock.current) return
+    navigationLock.current = true
     try {
-      const response = await planManagementApi[action](proposal.id, proposal.version)
-      if (response.status === 'applied') {
-        await Taro.showModal({
-          title: deletion ? '计划已删除' : '新计划已生效',
-          content: deletion
-            ? '训练历史已保留。现在可以重新生成个性化计划。'
-            : '未修改内容已完整保留；新计划从下一次训练生效。',
-          showCancel: false
-        })
-        await Taro.switchTab({ url: '/pages/workouts/index' })
-      } else {
-        await Taro.showToast({ title: '提案已拒绝', icon: 'success' })
-        await Taro.navigateBack()
-      }
-    } catch (requestError) {
-      setError(`${errorMessage(requestError, '提案操作结果尚未确定')}。请先刷新状态；如仍待确认，可再次手动提交。`)
-      await load(proposal.id, true)
+      await Taro.switchTab({ url: '/pages/workouts/index' })
+    } catch {
+      setNotice('自动返回失败，请点击“返回训练页”重试。提案结果已保留，无需重复提交。')
     } finally {
-      setDeciding('')
+      navigationLock.current = false
     }
+  }
+
+  const executeDecision = async (target: ConfirmationTarget) => {
+    if (!targetIsCurrent(target)) return
+    verifiedRef.current = false
+    setVerified(false)
+    setError('')
+    let response
+    try {
+      response = await planManagementApi[target.action](target.id, target.version)
+    } catch (requestError) {
+      const refreshed = await load(target.id, true, true)
+      if (refreshed && ['applied', 'rejected'].includes(refreshed.status)) {
+        setNotice('已从服务端核实提案结果，请以当前状态为准，无需重复提交。')
+      } else {
+        setError(`${errorMessage(requestError, '提案操作结果尚未确定')}。${refreshed ? '已刷新状态；如仍待确认，请重新核对后手动提交。' : '暂未核实结果，请先刷新服务端状态，不要重复提交。'}`)
+      }
+      return
+    }
+    // Commit the authoritative result before any optional native navigation.
+    readSequence.current += 1
+    const current = currentProposal.current!
+    const updated = { ...current, status: response.status, version: response.version,
+      payload_fingerprint: response.payload_fingerprint, allowed_actions: [], result: response.result_data }
+    currentProposal.current = updated
+    setProposal(updated)
+    verifiedRef.current = true
+    setVerified(true)
+    clearConfirmation()
+    setNotice('')
+    await returnToTraining()
+  }
+
+  const decide = (action: DecisionAction) => {
+    const current = currentProposal.current
+    if (!current || interactionLock.current || inlineTarget.current) return
+    const target = { action, id: current.id, version: current.version,
+      fingerprint: current.payload_fingerprint, revision: confirmationRevision.current }
+    if (!targetIsCurrent(target)) return
+    setError('')
+    // This screen's second confirmation is always inline, not dependent on native dialogs.
+    inlineTarget.current = target
+    setInlineConfirmation(target)
+  }
+
+  const acceptInlineConfirmation = async () => {
+    const target = inlineTarget.current
+    if (!target || interactionLock.current || !targetIsCurrent(target)) return
+    interactionLock.current = true
+    inlineTarget.current = null
+    setInlineConfirmation(null)
+    setDeciding(target.action)
+    try { await executeDecision(target) }
+    finally { interactionLock.current = false; setDeciding('') }
+  }
+
+  const cancelInlineConfirmation = () => {
+    if (interactionLock.current) return
+    inlineTarget.current = null
+    setInlineConfirmation(null)
+  }
+
+  const toggleReviewed = () => {
+    if (interactionLock.current || inlineTarget.current || !verifiedRef.current) return
+    reviewedRef.current = !reviewedRef.current
+    setReviewed(reviewedRef.current)
   }
 
   if (loading) return <View className='loading-state'>正在读取计划提案…</View>
@@ -107,6 +194,9 @@ export default function PlanProposalDetailPage () {
   const payload = proposal.payload
   const deletion = payload.proposal_type === 'plan_deletion_v1'
   const pending = proposal.status === 'pending_confirmation'
+  const locallyExpired = !(Date.parse(proposal.expires_at) > Date.now())
+  const decisionDisabled = (action: DecisionAction) => !reviewed || !verified || locallyExpired ||
+    !proposal.allowed_actions.includes(action) || Boolean(deciding) || Boolean(inlineConfirmation)
   return (
     <View className='page manual-proposal-page'>
       <View className={`proposal-status status-${proposal.status}`}>{statusLabel(proposal.status)}</View>
@@ -114,6 +204,7 @@ export default function PlanProposalDetailPage () {
       <Text className='proposal-title'>{deletion ? '确认永久删除前，请核对影响' : '核对完整变化后再决定'}</Text>
       <Text className='proposal-note'>创建时间 {formatTime(proposal.created_at)} · 有效期至 {formatTime(proposal.expires_at)}</Text>
       {error && <View className='error-banner'>{error}</View>}
+      {notice && <View className='pending-note'>{notice}</View>}
 
       {deletion ? (
         <>
@@ -145,21 +236,44 @@ export default function PlanProposalDetailPage () {
       <View className='decision-panel'>
         {pending ? (
           <>
-            <View className={`review-row ${reviewed ? 'selected' : ''}`} onClick={() => !deciding && setReviewed(current => !current)}>
+            <View className={`review-row ${reviewed ? 'selected' : ''}`} onClick={toggleReviewed}>
               <View className='check-box'>{reviewed ? '✓' : ''}</View>
               <Text>我已查看完整计划、全部变化及安全说明</Text>
             </View>
             {planManagementApi.pendingDecision(proposal.id) && <View className='pending-note'>上次操作结果尚未完全核实；再次提交会复用同一请求标识。</View>}
+            {locallyExpired && <View className='pending-note'>提案有效期已到或无法核实，请先刷新服务端状态。</View>}
             <View className='decision-actions'>
-              <Button className='secondary-button' disabled={!reviewed || Boolean(deciding)} onClick={() => decide('reject')}>{deciding === 'reject' ? '提交中…' : '拒绝提案'}</Button>
-              <Button className={deletion ? 'danger-button' : 'primary-button'} disabled={!reviewed || Boolean(deciding)} onClick={() => decide('confirm')}>{deciding === 'confirm' ? '执行中…' : deletion ? '确认永久删除' : '确认并应用'}</Button>
+              <Button className='secondary-button' disabled={decisionDisabled('reject')} onClick={() => decide('reject')}>{deciding === 'reject' ? '处理中…' : '拒绝提案'}</Button>
+              <Button className={deletion ? 'danger-button' : 'primary-button'} disabled={decisionDisabled('confirm')} onClick={() => decide('confirm')}>{deciding === 'confirm' ? '处理中…' : deletion ? '确认永久删除' : '确认并应用'}</Button>
             </View>
+            {inlineConfirmation && <View className='inline-confirmation-panel'>
+              <Text className='section-title'>请再次确认本次操作</Text>
+              <Text className='detail-line'>当前计划尚未修改。</Text>
+              <Text className='detail-line'>{confirmationOptions(inlineConfirmation.action, deletion).title}</Text>
+              <Text className='detail-line'>{confirmationOptions(inlineConfirmation.action, deletion).content}</Text>
+              <View className='decision-actions'>
+                <Button className='secondary-button cancel-inline-confirmation' disabled={Boolean(deciding)} onClick={cancelInlineConfirmation}>暂不操作</Button>
+                <Button className={`${deletion || inlineConfirmation.action === 'reject' ? 'danger-button' : 'primary-button'} accept-inline-confirmation`} disabled={Boolean(deciding) || locallyExpired || !verified} onClick={acceptInlineConfirmation}>{confirmationOptions(inlineConfirmation.action, deletion).confirmText}</Button>
+              </View>
+            </View>}
           </>
         ) : <Text className='terminal-copy'>{terminalCopy(proposal.status, deletion)}</Text>}
         <Button className='refresh-button' disabled={refreshing || Boolean(deciding)} onClick={() => load(proposal.id, true)}>{refreshing ? '正在刷新…' : '刷新服务端状态'}</Button>
+        {!pending && <Button className='secondary-button return-to-training' onClick={returnToTraining}>返回训练页</Button>}
       </View>
     </View>
   )
+}
+
+function confirmationOptions (action: DecisionAction, deletion: boolean) {
+  return {
+    title: action === 'confirm' ? deletion ? '永久删除当前计划？' : '确认应用调整？' : '拒绝这份提案？',
+    content: action === 'confirm'
+      ? deletion ? '计划定义和动作编排将永久删除；历史训练记录仍会保留。'
+        : '系统将原子创建新计划并切换活动版本，本次进行中的训练不会变化。'
+      : '拒绝后当前活动计划不会发生变化。',
+    confirmText: action === 'confirm' ? deletion ? '永久删除' : '确认应用' : '确认拒绝',
+  }
 }
 
 function PlanSnapshot ({ plan }: { plan: PlanSnapshotV2 }) {

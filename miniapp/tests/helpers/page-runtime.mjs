@@ -43,7 +43,7 @@ export function runtime (relative, overrides = {}, globals = {}) {
     '@tarojs/components': Object.fromEntries(['View', 'Text', 'Button', 'Input', 'Picker', 'Textarea', 'ScrollView'].map(x => [x, x])),
     '@tarojs/taro': {
       __esModule: true,
-      default: { pageScrollTo: async () => {}, showToast: async () => {} },
+      default: { pageScrollTo: async () => {}, showToast: async () => {}, nextTick: callback => { queueMicrotask(callback) } },
       ...Object.fromEntries(['useLoad', 'useDidShow', 'useDidHide'].map(x => [x, callback => { hooks[x] = callback }]))
     },
     ...overrides

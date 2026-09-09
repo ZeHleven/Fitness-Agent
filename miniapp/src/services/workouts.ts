@@ -5,7 +5,8 @@ import type {
   WorkoutPlan,
   WorkoutCompleteInput,
   WorkoutProgress,
-  WorkoutSession
+  WorkoutSession,
+  SessionEnergyUpdate
 } from '../types/api'
 
 export const workoutApi = {
@@ -37,6 +38,9 @@ export const workoutApi = {
   ),
   active: () => apiRequest<WorkoutSession | null>('/workouts/sessions/active'),
   detail: (id: string) => apiRequest<WorkoutSession>(`/workouts/sessions/${encodeURIComponent(id)}`),
+  updateEnergyClassifications: (id: string, data: SessionEnergyUpdate) => apiRequest<WorkoutSession>(
+    `/workouts/sessions/${encodeURIComponent(id)}/energy-classifications`, { method: 'PUT', data }
+  ),
   removeArchived: (id: string) => apiRequest<void>(`/workouts/plans/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   finishEarly: (id: string) => apiRequest<WorkoutSession>(`/workouts/sessions/${encodeURIComponent(id)}/finish-early`, { method: 'POST' }),
   history: () => apiRequest<WorkoutSession[]>('/workouts/sessions'),
