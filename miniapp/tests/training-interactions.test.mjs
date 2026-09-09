@@ -168,7 +168,7 @@ for (const target of ['plan-editor', 'plan-builder']) {
     p.module.default.reLaunch = async value => { p.navigations.push(value) }
     const page = runtime(`../../src/pages/${target}/index.tsx`, {
       '@tarojs/taro': p.module, '../../core/request': { errorMessage: e => e.message }, '../core/request': { errorMessage: e => e.message },
-      '../../services/profile': { profileApi: { get: async () => ({ onboarding_completed: true }) } },
+      '../../services/profile': { profileApi: { get: async () => ({ onboarding_completed: true, training_days_per_week: 1, session_duration_min: 45 }) } },
       '../../services/workouts': { workoutApi: { previewPersonalizedPlan: async () => preview, confirmPersonalizedPlan: async data => { sent.push(data); return plan } } },
       '../../services/plan-management': { planManagementApi: { editContext: async () => context, createAdjustment: async (_id, _fp, data) => { sent.push(data); return { id: 'proposal' } } } },
       '../services/exercises': { exerciseApi: { custom: async () => [], createCustom: async () => ({ exercise_id: 'private', exercise_name: '全新自定义动作', category: '力量', difficulty: '未知', equipment: [], safety_notice: '本平台仅提供记录与计划管理，请自行核对动作方法、训练负荷及身体适用性；如有疑问，请咨询专业人士。' }) } }

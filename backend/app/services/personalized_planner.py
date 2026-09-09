@@ -217,7 +217,8 @@ def build_personalized_plan_preview(
         raise PersonalizedPlanError("请先完成新用户资料与健康筛查")
 
     goal = request.goal or profile.primary_goal or "general_fitness"
-    days_per_week = request.days_per_week or profile.training_days_per_week or 3
+    days_per_week = (len(request.training_days) if request.training_days is not None
+                     else request.days_per_week or profile.training_days_per_week or 3)
     session_duration = request.session_duration_min or profile.session_duration_min or 45
     experience = profile.experience_level or "beginner"
     injuries = _health_values(profile.injuries)
@@ -235,7 +236,7 @@ def build_personalized_plan_preview(
     exercise_count = min(exercise_count, len(compatible))
 
     planned: list[PersonalizedPlanExercise] = []
-    schedule = _schedule_days(days_per_week)
+    schedule = request.training_days if request.training_days is not None else _schedule_days(days_per_week)
     for day_index, day_of_week in enumerate(schedule):
         # Rotate the stable list so repeated full-body days do not all start identically.
         offset = day_index % len(compatible)
@@ -263,6 +264,9 @@ def build_personalized_plan_preview(
         f"动作器械已按{location_label}训练场景筛选。",
         "首轮不预设训练重量，将用第一练的逐组记录校准后续重量参考。",
     ]
+    if request.training_days is not None:
+        labels = [f"周{'一二三四五六日'[day - 1]}" for day in schedule]
+        rationale.append(f"按你选择的{'、'.join(labels)}安排训练。")
     if injuries:
         rationale.append(f"已根据健康筛查避开与{ '、'.join(sorted(injuries)) }明显冲突的动作。")
 

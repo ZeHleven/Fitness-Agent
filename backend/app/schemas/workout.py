@@ -76,11 +76,34 @@ class WorkoutPlanDetail(WorkoutPlanResponse):
 
 # ── Personalized Plan Draft ──────────────────────────────────────────────────
 
-class PersonalizedPlanPreviewRequest(BaseModel):
+class _PersonalizedSchedule(BaseModel):
+    # Optional for older clients. When supplied, dates are explicit, never inferred.
+    training_days: list[Annotated[int, Field(strict=True, ge=1, le=7)]] | None = Field(
+        default=None, min_length=1, max_length=7,
+    )
+
+    @field_validator("training_days")
+    @classmethod
+    def validate_training_days(cls, values: list[int] | None) -> list[int] | None:
+        if values is not None:
+            if len(values) != len(set(values)):
+                raise ValueError("训练日不能重复")
+            return sorted(values)
+        return None
+
+
+class PersonalizedPlanPreviewRequest(_PersonalizedSchedule):
     goal: str | None = Field(default=None, max_length=50)
     duration_weeks: int = Field(default=4, ge=2, le=12)
     days_per_week: int | None = Field(default=None, ge=1, le=7)
     session_duration_min: int | None = Field(default=None, ge=20, le=120)
+
+    @model_validator(mode="after")
+    def validate_schedule_count(self):
+        if self.training_days is not None and self.days_per_week is not None:
+            if len(self.training_days) != self.days_per_week:
+                raise ValueError("训练日数量与每周天数不一致")
+        return self
 
 
 class PersonalizedExerciseOption(BaseModel):
@@ -119,7 +142,7 @@ class PersonalizedPlanPreview(BaseModel):
     generation_strategy: str = "profile_rules_v1"
 
 
-class PersonalizedPlanConfirmRequest(BaseModel):
+class PersonalizedPlanConfirmRequest(_PersonalizedSchedule):
     name: str = Field(min_length=1, max_length=100)
     goal: str = Field(min_length=1, max_length=50)
     duration_weeks: int = Field(ge=2, le=12)
@@ -128,6 +151,15 @@ class PersonalizedPlanConfirmRequest(BaseModel):
     rationale: list[PlanExplanation] = Field(default_factory=list, max_length=12)
     safety_notes: list[PlanExplanation] = Field(default_factory=list, max_length=12)
     exercises: list[PersonalizedPlanExercise] = Field(min_length=1, max_length=50)
+
+    @model_validator(mode="after")
+    def validate_selected_schedule(self):
+        if self.training_days is not None:
+            if len(self.training_days) != self.days_per_week:
+                raise ValueError("训练日数量与每周天数不一致")
+            if {item.day_of_week for item in self.exercises} != set(self.training_days):
+                raise ValueError("动作安排与所选训练日不一致，请重新编排")
+        return self
 
 
 # ── Workout Session ───────────────────────────────────────────────────────────
