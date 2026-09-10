@@ -3,6 +3,7 @@ import { Button, ScrollView, Text, Textarea, View } from '@tarojs/components'
 import Taro, { useDidHide, useDidShow, useLoad } from '@tarojs/taro'
 
 import { miniappBuildLabel } from '../../core/build-info'
+import AgentMessageContent from '../../components/AgentMessageContent'
 import {
   proposalReferenceFromRead,
   proposalReferenceFromUnknown,
@@ -58,7 +59,7 @@ const quickPrompts = [
 const welcomeMessage: DisplayMessage = {
   id: 'welcome',
   role: 'assistant',
-  content: '你好，我是训练搭子。现在可以读取训练计划与记录、个人档案、健康筛查、体重和饮食数据，也可以回答一般健身问题。凡是支持的数据写入，我都会先生成前后对比提案，只有你确认后才会执行。',
+  content: '你好，我是训练搭子。可以一起看看训练安排、饮食记录，或聊聊你的健身问题。\n\n需要修改数据时，我会先给你一份前后对比提案，等你确认后再执行。今天想聊什么？',
   cards: [],
   proposal: null
 }
@@ -436,7 +437,9 @@ export default function AgentPage () {
             {message.role === 'assistant' && <View className='assistant-avatar'>练</View>}
             <View className='message-column'>
               <View className='message-bubble'>
-                <Text selectable>{message.content}</Text>
+                {message.role === 'assistant'
+                  ? <AgentMessageContent content={message.content} />
+                  : <Text selectable>{message.content}</Text>}
               </View>
               {message.cards.map((card, index) => (
                 <AgentDataCard

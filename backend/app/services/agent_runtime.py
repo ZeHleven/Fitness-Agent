@@ -109,6 +109,14 @@ from app.services.agent_trace import (
 )
 from app.services.agent_tools import TOOL_ID_BY_LANGCHAIN_NAME, build_read_tools
 from app.services.ai_client import AIServiceError
+from app.services.agent_response_style import (
+    RESPONSE_STYLE_PROMPT,
+    INTENT_UNAVAILABLE_REPLY,
+    WRITE_UNAVAILABLE_REPLY,
+    PROPOSAL_PENDING_REPLY,
+    PROPOSAL_DECISION_UNCLEAR_REPLY,
+    clarification_field_labels,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -129,12 +137,12 @@ SYSTEM_PROMPT = """你是 Fitness Agent，一位中文健身对话助手。
 - 不进行医疗诊断、处方或治疗承诺。
 - 出现胸痛、呼吸困难、晕厥、严重或急性疼痛等红旗信息时，优先建议停止训练并及时寻求专业医疗帮助。
 - 有疼痛或伤病时，不建议盲目加量；先说明训练边界和不确定性。
-"""
+""" + RESPONSE_STYLE_PROMPT
 
 
 _PROPOSAL_NOT_CREATED_REPLY = (
-    "我已完成本轮评估，但没有生成可确认的训练计划调整提案，"
-    "当前计划未作修改。你可以补充希望调整的具体范围后重新发起请求。"
+    "这次没有生成可确认的调整提案，当前计划未作修改。"
+    "你希望调整哪一部分？可以说明具体项目和目标值。"
 )
 _PROPOSAL_REJECTED_SAFE_ANSWER_REASON = (
     "proposal_creation_rejected_safe_answer"
@@ -146,12 +154,37 @@ _CURRENT_PROPOSAL_REFERENCE_PATTERN = re.compile(
     r"(?:提案|方案|记录).{0,8}(?:待确认|等待确认))"
 )
 _UNPERSISTED_PROPOSAL_STATE_PATTERN = re.compile(
-    r"(?:(?:待确认|等待确认|尚待确认).{0,8}(?:提案|方案|记录)|"
-    r"(?:提案|方案|记录).{0,8}(?:待确认|等待确认|尚待确认))"
+    # Require an assertion about an actual object, not the generic term
+    # '待确认提案' in an explanation of how confirmation works.
+    r"(?:(?:这是|这里是|以上是|以下是|已有|当前有|现在有|有一[份个条]|"
+    r"已(?:经)?(?:为你)?(?:生成|创建|准备)|刚(?:刚)?(?:生成|创建))"
+    r"[^。！？!?；;\n]{0,24}?(?:待确认|等待确认|尚待确认)"
+    r"[^。！？!?；;\n]{0,8}?(?:提案|方案|记录)|"
+    r"(?:(?:这|该|当前|上述|刚才|本)(?:份|个|次)?(?:提案|方案|记录)|"
+    r"(?:提案|方案|记录)(?:已(?:经)?(?:生成|创建)))"
+    r"[^。！？!?；;\n]{0,12}?(?:待确认|等待确认|尚待确认)|"
+    r"(?:提案|方案|记录)(?:仍然?|正|目前|现在|尚)?(?:处于)?"
+    r"(?:待确认|等待确认|尚待确认)|"
+    r"已(?:经)?(?:为你)?(?:生成|创建)[^。！？!?；;\n]{0,16}?"
+    r"(?:提案|方案|记录)[^。！？!?；;\n]{0,12}?(?:待确认|等待确认|尚待确认))"
 )
+_PENDING_PROPOSAL_HEADING_PATTERN = re.compile(
+    r"[ \t#*]*(?:(?:待确认|等待确认|尚待确认).{0,8}?(?:提案|方案|记录)|"
+    r"(?:训练|计划|饮食|调整|健康|资料|体重){0,4}(?:提案|方案|记录)"
+    r"[ \t（(：:·-]*(?:待确认|等待确认|尚待确认)[）)]?)"
+    r"[ \t*：:。]*"
+)
+_QUOTED_REPLY_TEXT_PATTERN = re.compile(
+    r'“[^”\n]*”|‘[^’\n]*’|"[^"\n]*"|\'[^\'\n]*\'|`[^`\n]*`'
+)
+_PROPOSAL_DEFINITION_PREFIX_PATTERN = re.compile(
+    r"(?:意思|含义|定义)(?:通常|一般)?(?:是|指)[^，,。！？!?；;\n]*$"
+)
+_CONFIRMATION_ACTION = r"(?<!待)(?:确认|提交|应用|执行)(?!后|前|之后|之前)"
 _CONFIRMATION_INVITATION_PATTERN = re.compile(
-    r"(?:(?:需要|请|是否|可以|要不要|如果.{0,8}?需要).{0,20}?"
-    r"(?:确认|提交|应用|执行)|(?:确认|提交|应用|执行).{0,12}?(?:吗|[？?]|后))"
+    r"(?:(?:需要|请|可以|要不要).{0,20}?" + _CONFIRMATION_ACTION
+    + r"|是否(?:需要|要)?[ \t]*" + _CONFIRMATION_ACTION
+    + r"|" + _CONFIRMATION_ACTION + r".{0,12}?(?:吗|[？?]))"
 )
 _SUPPORTED_PLAN_MUTATION_FIELDS = frozenset({
     "schedule.duration_weeks",
@@ -176,7 +209,7 @@ def _explicit_proposal_created_reply(
     after_weeks: int,
 ) -> str:
     return (
-        f"已按你的明确要求生成待确认提案：计划周期将从{before_weeks}周"
+        f"待确认提案已准备好：计划周期将从{before_weeks}周"
         f"调整为{after_weeks}周，其他内容保持不变。当前计划尚未修改，"
         "请查看详情后确认。"
     )
@@ -203,7 +236,7 @@ def _mutation_proposal_created_reply(built: Any) -> str:
         )
         summary = f"将调整{exercise.exercise_name}的训练目标"
     return (
-        f"已按你的要求生成待确认提案：{summary}。当前计划尚未修改，"
+        f"待确认提案已准备好：{summary}。当前计划尚未修改，"
         "请查看详情后确认。"
     )
 
@@ -306,6 +339,46 @@ def _proposal_reference_from_model(proposal: Any) -> AgentProposalReference:
     )
 
 
+def _exposes_unpersisted_proposal(reply: str) -> bool:
+    """Presentation check only; never supplies decision/write authority.
+
+    References and invitations must belong to the same sentence. Quoted
+    examples cannot themselves assert state or invite a decision, but quoting
+    the object in an actual assertion/invitation must not hide that assertion.
+    Keep offsets so '已生成“待确认提案”' and '请确认“这个提案”' still fail.
+    """
+    unquoted = _QUOTED_REPLY_TEXT_PATTERN.sub(lambda match: " " * len(match[0]), reply)
+    for claim in _UNPERSISTED_PROPOSAL_STATE_PATTERN.finditer(reply):
+        if not unquoted[claim.start():claim.start() + 1].strip():
+            continue
+        # A definition's complement describes the term, not current state.
+        # Scope ends at the next clause; a subsequent claim must still fail.
+        # First-person/for-you assertions remain claims even in that scope.
+        clause_start = max((reply.rfind(char, 0, claim.start()) for char in "，,。！？!?；;\n"), default=-1) + 1
+        prefix = reply[clause_start:claim.start()]
+        definition = _PROPOSAL_DEFINITION_PREFIX_PATTERN.search(prefix)
+        personal_claim = re.search(r"我|为你|帮你", prefix + claim[0])
+        if not definition or personal_claim:
+            return True
+    for line in reply.splitlines():
+        heading = _PENDING_PROPOSAL_HEADING_PATTERN.fullmatch(line)
+        if heading:
+            return True
+    # Split using unquoted punctuation so punctuation inside a label cannot
+    # join an unrelated earlier reference with a later confirmation condition.
+    for sentence in re.finditer(r"[^。！？!?；;\n]+[。！？!?；;\n]?", unquoted):
+        original = reply[sentence.start():sentence.end()]
+        for invitation in _CONFIRMATION_INVITATION_PATTERN.finditer(sentence[0]):
+            if _CURRENT_PROPOSAL_REFERENCE_PATTERN.search(sentence[0]):
+                return True
+            # A quoted object immediately following the invitation is still
+            # its target. A quoted label earlier in a definition is not.
+            target = original[invitation.start():invitation.end() + 16]
+            if _CURRENT_PROPOSAL_REFERENCE_PATTERN.search(target):
+                return True
+    return False
+
+
 def _normalize_unpersisted_proposal_result(
     *,
     reply: str,
@@ -320,13 +393,7 @@ def _normalize_unpersisted_proposal_result(
     if proposal_reference is not None:
         return reply, execution_trace
 
-    exposes_phantom_proposal = bool(
-        _UNPERSISTED_PROPOSAL_STATE_PATTERN.search(reply)
-        or (
-            _CURRENT_PROPOSAL_REFERENCE_PATTERN.search(reply)
-            and _CONFIRMATION_INVITATION_PATTERN.search(reply)
-        )
-    )
+    exposes_phantom_proposal = _exposes_unpersisted_proposal(reply)
     if (
         execution_trace.terminal_action != "proposal"
         and not proposal_expected
@@ -337,18 +404,18 @@ def _normalize_unpersisted_proposal_result(
     if request_kind in {"query", "assessment"}:
         if intent_domain == "nutrition":
             safe_reply = (
-                "以上内容仅作为饮食建议，尚未创建可确认的饮食记录提案。"
-                "如需记录，请明确餐次、食品和克数。"
+                "这次还没有生成可确认的饮食记录提案，数据没有改动。"
+                "要记录一餐，请补充餐次、食品和克数。"
             )
         elif intent_domain == "workout_plan":
             safe_reply = (
-                "以上内容仅作为训练建议，尚未创建可确认的训练计划提案。"
-                "如需修改，请明确要调整的项目和目标值。"
+                "这次还没有生成可确认的训练计划提案，计划没有改动。"
+                "要修改计划，请补充要调整的项目和目标值。"
             )
         else:
             safe_reply = (
-                "以上内容仅作为建议，尚未创建可确认的数据变更提案。"
-                "如需写入，请明确要修改的数据和目标值。"
+                "这条回复没有对应的待确认提案，数据没有改动。"
+                "需要处理提案时，请以实际的提案卡片和详情为准。"
             )
     else:
         safe_reply = _PROPOSAL_NOT_CREATED_REPLY
@@ -714,9 +781,9 @@ def _clarification_reply(resolution: IntentResolution) -> str:
     if resolution.clarification_question:
         return resolution.clarification_question
     if resolution.missing_slots:
-        fields = "、".join(resolution.missing_slots)
-        return f"为了准确回答，我还需要确认：{fields}。请补充后我再继续。"
-    return "为了准确理解你的目标，请再补充一下你希望我查询或比较的具体内容。"
+        fields = "、".join(clarification_field_labels(resolution.missing_slots))
+        return f"还需要补充：{fields}。你可以直接回复这些信息。"
+    return "你想了解哪方面？可以先说说训练、饮食，或你遇到的具体问题。"
 
 
 def _mutation_missing_slots(resolution: IntentResolution) -> list[str]:
@@ -1673,10 +1740,7 @@ async def execute_agent_run(
             )
 
         if intent_outcome.understanding_failed:
-            reply = (
-                "意图理解服务暂时未能可靠完成，请稍后重试。"
-                "本次没有读取你的业务数据，也没有修改任何数据。"
-            )
+            reply = INTENT_UNAVAILABLE_REPLY
             run.error_code = "intent_understanding_unavailable"
             run.error_message = reply
             return await complete_semantic_short_circuit(
@@ -1698,10 +1762,7 @@ async def execute_agent_run(
             and resolution.clarification_required
         )
         if write_structure_unavailable and not persisted_partial_mutation:
-            reply = (
-                "我暂时无法可靠解析这次修改，请稍后重试或换一种说法。"
-                "本次没有修改任何数据。"
-            )
+            reply = WRITE_UNAVAILABLE_REPLY
             run.error_code = "intent_structure_unavailable"
             run.error_message = reply
             return await complete_semantic_short_circuit(
@@ -1779,7 +1840,7 @@ async def execute_agent_run(
                 f"{HIGH_RISK_REPLY}\n\n我也已把你明确要求记录的健康资料整理成待确认提案；"
                 "当前档案尚未修改，请核对后确认。"
                 if high_risk_health_record
-                else "已根据你的明确请求生成待确认提案。当前数据尚未修改，请核对前后对比后确认。"
+                else PROPOSAL_PENDING_REPLY
             )
             return await complete_semantic_short_circuit(
                 reply,
@@ -1925,9 +1986,7 @@ async def execute_agent_run(
             # against this turn's original message before any proposal handler.
             if parse_explicit_proposal_decision(user_message) != action:
                 return await complete_semantic_short_circuit(
-                    "这条消息没有明确授权确认或拒绝提案，当前提案和业务数据均未修改。"
-                    "如需处理，请核对提案后明确说“确认这个提案”或“拒绝这个提案”，"
-                    "也可以在提案详情中操作。",
+                    PROPOSAL_DECISION_UNCLEAR_REPLY,
                     terminal_action="clarify",
                     termination_reason="proposal_decision_not_explicit",
                     missing_slots=["明确的提案确认或拒绝"],
@@ -1952,8 +2011,8 @@ async def execute_agent_run(
                     and conversation_action_state[
                         "active_daily_meal_artifact_count"
                     ] == 1
-                    else "当前会话没有可确认的待处理提案。只有消息下方出现“待你确认”"
-                    "提案卡片后，才能在对话中确认。"
+                    else "这个对话里还没有待确认提案。看到“待你确认”卡片后，"
+                    "就可以打开详情核对，再决定是否应用。"
                     if not pending
                     else "当前会话有多个待确认提案，请打开提案详情选择要处理的那一个。"
                 )

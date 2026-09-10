@@ -450,6 +450,11 @@ _PROPOSAL_DECISION_PATTERN = re.compile(
     r"(?:提案|方案|调整|改动|变更|记录))?"
     r"[。.!！]*"
 )
+_NOMINAL_RECORD_PATTERN = re.compile(
+    # A locative/attributive suffix makes 记录 a noun, not a write command.
+    # Keep bare 记录 and verbal objects such as 记录中午... / 记录里程... .
+    r"记录(?=(?:[里内中](?:面)?(?:的|[ \t:：，,。；;！？!?])|的))"
+)
 _PLAN_DOMAIN_PATTERN = re.compile(
     r"(?:训练计划|当前计划|我的计划|计划周期|训练频率|训练天数|"
     r"每周.{0,6}(?:天|次)|\d{1,2}组|组数|每组|次数|休息|重量|公斤|kg)"
@@ -816,6 +821,7 @@ def _infer_request_semantics(
     # legacy consistency evidence, never permission to bypass model routing
     # or to execute a write: mixed positive requests still need a Proposal.
     mutation_text = _NEGATED_MUTATION_PATTERN.sub(" ", normalized)
+    mutation_text = _NOMINAL_RECORD_PATTERN.sub("  ", mutation_text)
     mutation_requested = bool(_MUTATION_VERB_PATTERN.search(mutation_text))
     if (
         "记录" in normalized

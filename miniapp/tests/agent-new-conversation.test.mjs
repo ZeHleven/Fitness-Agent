@@ -2,6 +2,9 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import ts from 'typescript'
+import { runtime } from './helpers/page-runtime.mjs'
+
+const messageComponent = runtime('../../src/components/AgentMessageContent.tsx').exports
 
 // Exercise the real page's event handlers and async continuations. Platform
 // dependencies and hook storage are isolated; no backend or native UI is used.
@@ -95,6 +98,7 @@ function createPage ({ savedId = 'old-conversation', pending = null, api = {}, c
       useDidHide: callback => { onHide = callback }
     },
     '../../core/build-info': { miniappBuildLabel: () => 'test-build' },
+    '../../components/AgentMessageContent': messageComponent,
     '../../core/proposal-reference': { proposalReferenceFromUnknown: () => null },
     '../../core/proposal-interaction': {},
     '../../core/request': { errorMessage: error => error.message || error.errMsg },
@@ -112,7 +116,13 @@ function createPage ({ savedId = 'old-conversation', pending = null, api = {}, c
 
   function render () {
     cursor = 0
-    tree = loaded.exports.default()
+    const expand = node => {
+      if (Array.isArray(node)) return node.map(expand)
+      if (!node || typeof node !== 'object') return node
+      if (typeof node.type === 'function') return expand(node.type(node.props))
+      return { ...node, props: { ...node.props, children: expand(node.props?.children) } }
+    }
+    tree = expand(loaded.exports.default())
   }
   function allNodes (node) {
     if (Array.isArray(node)) return node.flatMap(item => allNodes(item))
@@ -143,6 +153,33 @@ function createPage ({ savedId = 'old-conversation', pending = null, api = {}, c
     }
   }
 }
+
+test('restored assistant history is formatted while user input and saved messages stay literal', async () => {
+  const messages = [
+    { id: 'u', role: 'user', content: '**我的原文**', content_data: {} },
+    { id: 'a', role: 'assistant', content: '## 今天\n\n做 **卧推**。', content_data: {} }
+  ]
+  const snapshot = JSON.stringify(messages)
+  const page = createPage({ api: { messages: async () => messages } })
+  page.mount(); await page.flush()
+  assert.ok(page.find('agent-text-heading'))
+  assert.equal(page.find('agent-text-bold').props.children, '卧推')
+  assert.match(page.text(), /\*\*我的原文\*\*/)
+  assert.doesNotMatch(page.text(), /## 今天|\*\*卧推\*\*/)
+  assert.equal(JSON.stringify(messages), snapshot)
+})
+
+test('a recovered completed run uses the same formatter as history, without submitting again', async () => {
+  const page = createPage({
+    pending: { client_request_id: 'p', message: '旧问题', run_id: 'r', conversation_id: 'old-conversation' },
+    api: { run: async () => ({ id: 'r', status: 'completed', reply: '### 恢复回答\n- **重点**', cards: [] }) }
+  })
+  page.mount(); await page.flush()
+  assert.ok(page.find('agent-text-heading'))
+  assert.equal(page.find('agent-text-bold').props.children, '重点')
+  assert.equal(page.state.submissions.length, 0)
+  assert.equal(page.state.pending, null)
+})
 
 test('returning to the same conversation resumes an interrupted run', async () => {
   let calls = 0

@@ -558,7 +558,7 @@ async def test_chat_creates_and_confirms_one_meal_proposal_once(
     assert confirmed.status_code == 200
     assert "已确认并应用提案" in confirmed.json()["reply"]
     assert replay.status_code == 200
-    assert "没有可确认的待处理提案" in replay.json()["reply"]
+    assert "还没有待确认提案" in replay.json()["reply"]
     meals = list((await db_session.execute(
         select(MealLog).where(MealLog.user_id == user.id)
     )).scalars().all())
@@ -748,8 +748,8 @@ async def test_chat_model_failure_does_not_persist_rule_extracted_write_slots(
 
     assert response.status_code == 200
     assert response.json()["reply"] == (
-        "意图理解服务暂时未能可靠完成，请稍后重试。"
-        "本次没有读取你的业务数据，也没有修改任何数据。"
+        "这次暂时没能处理好你的请求，请稍后重试。"
+        "本次没有读取或修改你的业务数据。"
     )
     assert "proposal" not in response.json()
     run = await db_session.get(AgentRun, response.json()["run_id"])
