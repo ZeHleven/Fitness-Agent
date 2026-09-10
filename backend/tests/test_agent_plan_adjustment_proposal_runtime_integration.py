@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+from langchain_core.messages import AIMessage
 from sqlalchemy import delete, func, select
 
 from app.config import settings
@@ -39,6 +42,7 @@ from app.services.agent_intent import (
 from app.services.agent_plan_adjustment_proposal_persistence import (
     persist_optional_plan_adjustment_proposal,
 )
+from app.services.agent_intent_model import IntentRouteDecision
 
 
 _USER_MESSAGE = (
@@ -48,6 +52,12 @@ _EXPLICIT_DURATION_PROPOSAL_MESSAGE = (
     "请把当前训练计划周期从6周延长到8周，其他内容保持不变，"
     "并生成待确认提案。"
 )
+
+_noise_rng = random.Random(539)
+_SEEDED_NOISE = [
+    ''.join(_noise_rng.choices('abcxyz0123?？🙂~，。', k=24))
+    for _ in range(12)
+]
 
 
 def _structured_plan_update(
@@ -772,7 +782,7 @@ async def test_explicit_single_read_adjustment_uses_planned_and_persists_proposa
     assert response.status_code == 200
     reference = response.json()["proposal"]
     assert response.json()["reply"] == (
-        "已按你的明确要求生成待确认提案：计划周期将从6周调整为8周，"
+        "待确认提案已准备好：计划周期将从6周调整为8周，"
         "其他内容保持不变。当前计划尚未修改，请查看详情后确认。"
     )
     invoke_direct.assert_not_awaited()
@@ -977,8 +987,8 @@ async def test_explicit_adjustment_never_returns_fake_text_only_proposal(
     body = response.json()
     assert "proposal" not in body
     assert body["reply"] == (
-        "我已完成本轮评估，但没有生成可确认的训练计划调整提案，"
-        "当前计划未作修改。你可以补充希望调整的具体范围后重新发起请求。"
+        "这次没有生成可确认的调整提案，当前计划未作修改。"
+        "你希望调整哪一部分？可以说明具体项目和目标值。"
     )
     assert "卡片中确认" not in body["reply"]
 
@@ -1037,8 +1047,8 @@ async def test_flag_on_invalid_draft_normalizes_to_safe_answer_without_proposal(
     body = response.json()
     assert "proposal" not in body
     assert body["reply"] == (
-        "以上内容仅作为训练建议，尚未创建可确认的训练计划提案。"
-        "如需修改，请明确要调整的项目和目标值。"
+        "这次还没有生成可确认的训练计划提案，计划没有改动。"
+        "要修改计划，请补充要调整的项目和目标值。"
     )
     assert "待确认" not in body["reply"]
     assert "需要你确认" not in body["reply"]
@@ -1287,7 +1297,7 @@ async def test_chat_proposal_decision_without_candidate_is_write_free(client):
     )
 
     assert response.status_code == 200
-    assert "没有可确认的待处理提案" in response.json()["reply"]
+    assert "还没有待确认提案" in response.json()["reply"]
     assert "训练计划" not in response.json()["reply"]
     assert "proposal" not in response.json()
 
@@ -1302,7 +1312,12 @@ async def test_chat_proposal_decision_without_candidate_is_write_free(client):
     ("不要拒绝这个提案", "reject"),
     ("确认这个提案", "reject"),
     ("拒绝这个提案", "confirm"),
-])
+    ("‘拒绝这个提案’是什么意思？", "reject"),
+    ("“确认这个提案”这句话是什么意思？我没让你执行。", "confirm"),
+    ("请解释‘确认这个提案’，不是叫你确认。", "confirm"),
+    ("？？……", "confirm"),
+    ("谢谢啦🙏", "confirm"),
+] + [(message, "confirm") for message in _SEEDED_NOISE])
 async def test_chat_non_consent_cannot_execute_an_existing_proposal(
     client, db_session, message, untrusted_action,
 ):
@@ -1349,6 +1364,41 @@ async def test_chat_non_consent_cannot_execute_an_existing_proposal(
         AgentToolCall.run_id == result_run.id
     )) == 0
     assert "proposal" not in response.json()
+
+
+@pytest.mark.asyncio
+async def test_explaining_confirmation_preserves_an_existing_proposal(client, db_session):
+    seeded = await _create_executable_proposal(client, db_session, suffix="explain-pending")
+    proposal = await db_session.get(AgentProposal, seeded.proposal_id)
+    before_version = proposal.version
+    message = "“确认这个提案”是什么意思？只是解释，先别执行。"
+    answer = "“确认这个提案”表示同意修改；确认后系统才会应用。这里只解释，不执行操作。"
+    route = IntentRouteDecision(
+        intent_domain="general", request_kind="query", requested_effect="read",
+        requested_output="answer", read_targets=[], decision_action=None, artifact_action=None,
+        normalized_request=message, risk_level="low", confidence=0.99,
+    )
+    model = FakeMessagesListChatModel(responses=[AIMessage(content=answer)])
+    with (
+        patch.object(settings, "DEEPSEEK_API_KEY", "synthetic-explanation-key"),
+        patch.object(settings, "AGENT_INTENT_MODEL_ENABLED", True),
+        patch.object(settings, "AGENT_PLAN_ADJUSTMENT_PROPOSALS_ENABLED", True),
+        patch("app.services.agent_intent_model._invoke_model_route", new=AsyncMock(return_value=route)),
+        patch("app.services.agent_runtime._build_model", return_value=model),
+    ):
+        response = await client.post("/api/v1/agent/chat", headers=_headers(seeded.token), json={
+            "message": message, "conversation_id": seeded.conversation_id,
+        })
+    assert response.status_code == 200
+    assert response.json()["reply"] == answer
+    db_session.expire_all()
+    proposal = await db_session.get(AgentProposal, seeded.proposal_id)
+    assert proposal.status == "pending_confirmation" and proposal.version == before_version
+    assert proposal.result_plan_id is None
+    plans = list((await db_session.scalars(select(WorkoutPlan).where(WorkoutPlan.user_id == seeded.user_id))).all())
+    assert [plan.id for plan in plans] == [seeded.base_plan_id] and plans[0].is_active
+    assert await db_session.scalar(select(func.count()).select_from(AgentProposal).where(AgentProposal.user_id == seeded.user_id)) == 1
+    assert await db_session.scalar(select(func.count()).select_from(AgentToolCall).where(AgentToolCall.run_id == response.json()["run_id"])) == 0
 
 
 @pytest.mark.asyncio

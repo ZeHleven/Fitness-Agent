@@ -17,6 +17,7 @@ from app.schemas.agent_planning import (
     ProposalFinalizationDecision,
 )
 from app.services.agent_tools import TOOL_ID_BY_LANGCHAIN_NAME
+from app.services.agent_response_style import RESPONSE_STYLE_PROMPT
 from app.services.ai_client import AIServiceError
 from app.services.agent_structured_errors import (
     safe_error_category,
@@ -102,7 +103,7 @@ FINALIZER_SYSTEM_PROMPT = """你是 Fitness Agent 的最终回答器。
 才选择 insufficient_evidence 并说明暂不调整。
 严格输出：{"outcome":"允许的语义结果之一","reply":"..."}。
 不要使用 action、response、content 等别名；只输出上述 JSON，不输出内部推理过程。
-"""
+""" + RESPONSE_STYLE_PROMPT
 
 
 PROPOSAL_DRAFT_SYSTEM_PROMPT = """

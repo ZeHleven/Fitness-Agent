@@ -18,6 +18,7 @@ export function runtime (relative, overrides = {}, globals = {}) {
   const effects = []
   const imports = {
     react: {
+      memo: component => component,
       useState: initial => {
         const i = cursor++
         if (!(i in slots)) slots[i] = typeof initial === 'function' ? initial() : initial
@@ -80,7 +81,7 @@ export function runtime (relative, overrides = {}, globals = {}) {
     if (typeof node.type === 'function') return expand(node.type(node.props))
     return { ...node, props: { ...node.props, children: expand(node.props?.children) } }
   }
-  const render = () => { cursor = 0; tree = expand(exports.default()); while (effects.length) effects.shift()() }
+  const render = (props = {}) => { cursor = 0; tree = expand(exports.default(props)); while (effects.length) effects.shift()() }
   return {
     exports, hooks, find, findAll, render,
     text: () => JSON.stringify(tree),

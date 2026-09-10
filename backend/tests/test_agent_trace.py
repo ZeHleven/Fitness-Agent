@@ -73,8 +73,8 @@ def test_direct_nutrition_answer_cannot_invite_confirmation_without_proposal():
     )
 
     assert reply == (
-        "以上内容仅作为饮食建议，尚未创建可确认的饮食记录提案。"
-        "如需记录，请明确餐次、食品和克数。"
+        "这次还没有生成可确认的饮食记录提案，数据没有改动。"
+        "要记录一餐，请补充餐次、食品和克数。"
     )
     assert normalized.terminal_action == "answer"
     assert "proposal_creation_rejected_safe_answer" in normalized.mode_reasons
@@ -102,7 +102,8 @@ def test_direct_answer_cannot_claim_a_pending_proposal_without_reference():
         request_kind="assessment",
     )
 
-    assert "仅作为饮食建议" in reply
+    assert "还没有生成可确认的饮食记录提案" in reply
+    assert "数据没有改动" in reply
     assert normalized.terminal_action == "answer"
 
 
@@ -128,7 +129,8 @@ def test_proposal_terminal_action_is_downgraded_even_when_feature_is_off():
         request_kind="assessment",
     )
 
-    assert "仅作为训练建议" in reply
+    assert "还没有生成可确认的训练计划提案" in reply
+    assert "计划没有改动" in reply
     assert normalized.terminal_action == "answer"
 
 

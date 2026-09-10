@@ -469,7 +469,7 @@ async def test_untrusted_intent_fallback_stops_before_tools_or_private_reads(
         )
 
     assert response.status_code == 200
-    assert "没有读取你的业务数据" in response.json()["reply"]
+    assert "没有读取或修改你的业务数据" in response.json()["reply"]
     run = await client.get(
         f"/api/v1/agent/runs/{response.json()['run_id']}",
         headers={"Authorization": f"Bearer {token}"},
