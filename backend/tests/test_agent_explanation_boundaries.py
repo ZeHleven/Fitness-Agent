@@ -24,6 +24,13 @@ EXPLANATION_MESSAGES = [
     "饮食记录里的 kcal 代表啥？",
     "请解释体重记录的单位。",
     "记录内的单位看不懂，给我讲讲。",
+    "请分五条说明如何用训练记录回顾一周训练",
+    "请分五条说明如何用训练记录回顾一周训练，每条两三句话。只给说明，不修改任何数据。",
+    "请用训练记录回顾这一周的方法做个说明。",
+    "请解释怎样根据饮食记录了解一周的摄入。",
+    "请说说体重记录能说明哪些变化。",
+    "请讲讲餐次记录有什么用。",
+    "请解释运动记录与健康记录的区别。",
 ]
 MIXED_MESSAGES = [
     "记录里的 kg 是啥？顺便帮我记录体重75公斤。",
@@ -31,6 +38,10 @@ MIXED_MESSAGES = [
     "帮我记录体重75公斤，再解释记录里的单位。",
     "记录里的 kcal 代表啥？保存今天午餐鸡蛋100克。",
     "记录里的 kg 代表啥？记录今天体重75公斤。",
+    "请用训练记录回顾一周，再帮我记录体重75公斤。",
+    "请解释训练记录，再把周三卧推休息改为180秒。",
+    "请根据饮食记录说明摄入，再保存今天午餐鸡蛋100克。",
+    "请说明训练记录的作用，并新增一条饮食记录。",
 ]
 EXPLANATION_REPLIES = [
     "“确认这个提案”的意思是：同意提案里的修改。确认后系统才会应用；这里只解释含义，没有执行。",
@@ -118,20 +129,24 @@ async def test_explanation_does_not_hide_a_separate_write(message):
 
 @pytest.mark.parametrize("message", [
     "帮我记录中午的饮食", "记录里程5公里", "记录体重75公斤", "请记录一下今天的午餐",
+    "请把今天的训练记录下来", "请将今天饮食记录为燕麦120克",
+    "请帮我把体重记录到档案里", "请把运动记录一下",
+    "请记录训练：卧推3组8次", "请把今天的训练记录保存下来",
 ])
 def test_verbal_recording_is_not_mistaken_for_a_locative_noun(message):
     assert resolve_intent(message).request_kind == "mutation"
 
 
+@pytest.mark.parametrize("message", [EXPLANATION_MESSAGES[0], EXPLANATION_MESSAGES[5]])
 @pytest.mark.parametrize("failure", ["disabled", "unconfigured", "timeout"])
 @pytest.mark.asyncio
-async def test_explanation_cannot_bypass_an_unavailable_intent_model(failure):
+async def test_explanation_cannot_bypass_an_unavailable_intent_model(failure, message):
     with (
         patch.object(settings, "DEEPSEEK_API_KEY", "" if failure == "unconfigured" else "synthetic-key"),
         patch("app.services.agent_intent_model._invoke_model_route",
               new=AsyncMock(side_effect=TimeoutError)) as route,
     ):
-        result = await resolve_intent_with_fallback(EXPLANATION_MESSAGES[0], use_model=failure != "disabled")
+        result = await resolve_intent_with_fallback(message, use_model=failure != "disabled")
     assert result.understanding_failed
     assert route_tools(result.resolution) == []
     if failure != "timeout":
@@ -173,6 +188,8 @@ def test_explanation_never_hides_a_failed_proposal_creation(guard):
 @pytest.mark.parametrize(("message", "answer"), [
     (EXPLANATION_MESSAGES[0], "3 * 8 通常表示3组、每组8次；kg是千克。C#可能是编程语言名，要看上下文。"),
     ("“确认这个提案”这句话是什么意思？我没让你执行。", EXPLANATION_REPLIES[0]),
+    (EXPLANATION_MESSAGES[5], "可以先核对训练日期，再比较动作和每组记录。这里只说明回顾方法，没有读取你的实际记录。"),
+    (EXPLANATION_MESSAGES[6], "1. 核对训练日期。\n2. 按动作整理组数与次数。\n3. 查看每组重量。\n4. 留意休息记录。\n5. 结合实际感受回顾。"),
 ])
 @pytest.mark.asyncio
 async def test_explanation_survives_real_handlers_and_history_without_writes(

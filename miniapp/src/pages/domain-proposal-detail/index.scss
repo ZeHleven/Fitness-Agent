@@ -30,3 +30,7 @@
 .decision-actions button { flex: 1; }
 .refresh-button { margin-top: 18rpx; background: transparent; color: #567064; font-size: 25rpx; }
 .terminal-copy { display: block; color: #52645a; line-height: 1.6; }
+.inline-confirmation-panel { margin-top: 24rpx; padding: 24rpx; border: 2rpx solid #e3cf91; border-radius: 18rpx; background: #fff8e6; }
+.pending-note { margin-top: 18rpx; color: #725d29; font-size: 25rpx; line-height: 1.6; }
+.domain-proposal-page .decision-actions button { min-width: 0; white-space: normal; }
+.domain-proposal-page .value-label, .domain-proposal-page .value-text, .domain-proposal-page .detail-line { overflow-wrap: anywhere; }
