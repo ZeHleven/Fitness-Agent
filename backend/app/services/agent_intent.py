@@ -453,7 +453,12 @@ _PROPOSAL_DECISION_PATTERN = re.compile(
 _NOMINAL_RECORD_PATTERN = re.compile(
     # A locative/attributive suffix makes 记录 a noun, not a write command.
     # Keep bare 记录 and verbal objects such as 记录中午... / 记录里程... .
-    r"记录(?=(?:[里内中](?:面)?(?:的|[ \t:：，,。；;！？!?])|的))"
+    r"记录(?=(?:[里内中](?:面)?(?:的|[ \t:：，,。；;！？!?])|的))|"
+    # Compound nouns remain nouns before a verb: 用训练记录回顾... . Only
+    # mask this occurrence, not its clause or any separate write request.
+    # Preserve verbal complements in 把训练记录下来 / 将饮食记录为... .
+    r"(?<=训练|饮食|体重|餐次|运动|健康)记录"
+    r"(?!下|上|到|进|为|成|在|好|完|过|了(?!解)|一(?:下|笔|条|次|组|份|餐))"
 )
 _PLAN_DOMAIN_PATTERN = re.compile(
     r"(?:训练计划|当前计划|我的计划|计划周期|训练频率|训练天数|"

@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { Button, Text, View } from '@tarojs/components'
-import Taro, { useDidShow, useLoad } from '@tarojs/taro'
+import { useDidHide, useDidShow, useLoad, useUnload } from '@tarojs/taro'
 
 import { errorMessage } from '../../core/request'
 import { planManagementApi } from '../../services/plan-management'
@@ -20,29 +20,90 @@ const labels: Record<string, string> = {
   name: '名称', goal: '目标'
 }
 
+type DecisionAction = 'confirm' | 'reject'
+interface ConfirmationTarget {
+  action: DecisionAction
+  id: string
+  version: number
+  fingerprint: string
+  revision: number
+}
+const internalItemFields = new Set(['id', 'food_id', 'custom_food_id', 'custom_food_version'])
+const mealItemFieldOrder = ['food_name', 'amount_g', 'calories', 'carbs_g', 'protein_g', 'fat_g']
+const mealItemUnits: Record<string, string> = {
+  amount_g: 'g', calories: 'kcal', carbs_g: 'g', protein_g: 'g', fat_g: 'g'
+}
+
 export default function DomainProposalDetailPage () {
   const [proposalId, setProposalId] = useState('')
   const [proposal, setProposal] = useState<GenericProposalReadResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [reviewed, setReviewed] = useState(false)
-  const [deciding, setDeciding] = useState(false)
+  const [deciding, setDeciding] = useState<DecisionAction | ''>('')
   const [error, setError] = useState('')
+  const [refreshing, setRefreshing] = useState(false)
+  const [notice, setNotice] = useState('')
+  const [verified, setVerified] = useState(false)
+  const [inlineConfirmation, setInlineConfirmation] = useState<ConfirmationTarget | null>(null)
+  const currentProposal = useRef<GenericProposalReadResponse | null>(null)
+  const currentId = useRef('')
+  const active = useRef(true)
+  const reviewedRef = useRef(false)
+  const verifiedRef = useRef(false)
+  const interactionLock = useRef(false)
+  const confirmationRevision = useRef(0)
+  const inlineTarget = useRef<ConfirmationTarget | null>(null)
+  const readSequence = useRef(0)
+  const reading = useRef(false)
+  const refreshOnReturn = useRef(false)
 
-  const load = async (id: string) => {
+  const clearConfirmation = () => {
+    confirmationRevision.current += 1
+    inlineTarget.current = null
+    setInlineConfirmation(null)
+    reviewedRef.current = false
+    setReviewed(false)
+  }
+
+  const load = async (id: string, refresh = false, reconcile = false) => {
+    if (!id || !active.current || (interactionLock.current && !reconcile)) return null
+    const sequence = ++readSequence.current
+    reading.current = true
+    refreshOnReturn.current = false
+    clearConfirmation()
+    verifiedRef.current = false
+    setVerified(false)
+    if (refresh) setRefreshing(true)
+    else setLoading(true)
     setError('')
     try {
       const value = await planManagementApi.proposal(id)
+      if (!active.current || sequence !== readSequence.current || id !== currentId.current) return null
+      if (value.id !== id) throw new Error('提案标识不一致，请重新打开详情')
+      currentProposal.current = value
       setProposal(value)
-      if (value.status !== 'pending_confirmation') setReviewed(false)
+      verifiedRef.current = true
+      setVerified(true)
+      return value
     } catch (requestError) {
-      setError(errorMessage(requestError, '提案读取失败'))
+      if (active.current && sequence === readSequence.current) setError(errorMessage(requestError, '提案读取失败'))
+      return null
     } finally {
-      setLoading(false)
+      if (sequence === readSequence.current) {
+        reading.current = false
+        setLoading(false)
+        setRefreshing(false)
+      }
     }
   }
 
   useLoad(options => {
-    const id = typeof options.id === 'string' ? decodeURIComponent(options.id) : ''
+    let id = ''
+    try { id = typeof options.id === 'string' ? decodeURIComponent(options.id) : '' } catch { /* invalid reference */ }
+    active.current = true
+    currentId.current = id
+    currentProposal.current = null
+    setProposal(null)
     setProposalId(id)
     if (!id) {
       setError('缺少提案标识')
@@ -52,42 +113,107 @@ export default function DomainProposalDetailPage () {
     void load(id)
   })
 
-  useDidShow(() => { if (proposalId && proposal) void load(proposalId) })
+  useDidShow(() => {
+    active.current = true
+    if (interactionLock.current) refreshOnReturn.current = true
+    else if (currentId.current && !reading.current) void load(currentId.current, true)
+  })
 
-  const decide = async (action: 'confirm' | 'reject') => {
-    if (!proposal || !reviewed || deciding) return
-    const confirmed = await Taro.showModal({
-      title: action === 'confirm' ? '确认执行这项变更？' : '拒绝这份提案？',
-      content: action === 'confirm'
-        ? '系统会再次校验数据版本和安全条件，成功后才会写入。'
-        : '拒绝后不会修改任何数据。',
-      confirmText: action === 'confirm' ? '确认执行' : '确认拒绝',
-      confirmColor: action === 'confirm' ? '#1d6b49' : '#a13d31'
-    })
-    if (!confirmed.confirm) return
-    setDeciding(true)
+  const leavePage = () => {
+    active.current = false
+    readSequence.current += 1
+    reading.current = false
+    verifiedRef.current = false
+    setVerified(false)
+    setRefreshing(false)
+    clearConfirmation()
+  }
+  useDidHide(leavePage)
+  useUnload(leavePage)
+
+  const targetIsCurrent = (target: ConfirmationTarget) => {
+    const current = currentProposal.current
+    return Boolean(active.current && current && currentId.current === target.id &&
+      verifiedRef.current && reviewedRef.current && target.revision === confirmationRevision.current &&
+      current.id === target.id && current.version === target.version &&
+      current.payload_fingerprint === target.fingerprint && current.status === 'pending_confirmation' &&
+      current.allowed_actions.includes(target.action) && Date.parse(current.expires_at) > Date.now())
+  }
+
+  const decide = (action: DecisionAction) => {
+    const current = currentProposal.current
+    if (!current || interactionLock.current || inlineTarget.current) return
+    const target = { action, id: current.id, version: current.version,
+      fingerprint: current.payload_fingerprint, revision: confirmationRevision.current }
+    if (!targetIsCurrent(target)) return
     setError('')
+    setNotice('')
+    inlineTarget.current = target
+    setInlineConfirmation(target)
+  }
+
+  const acceptInlineConfirmation = async (target: ConfirmationTarget) => {
+    if (inlineTarget.current !== target || interactionLock.current || !targetIsCurrent(target)) return
+    interactionLock.current = true
+    readSequence.current += 1
+    inlineTarget.current = null
+    setInlineConfirmation(null)
+    verifiedRef.current = false
+    setVerified(false)
+    setDeciding(target.action)
+    setError('')
+    setNotice('')
     try {
-      const response = await planManagementApi[action](proposal.id, proposal.version)
-      await Taro.showToast({
-        title: response.status === 'applied' ? '变更已应用' : '提案已拒绝',
-        icon: 'success'
-      })
-      await load(proposal.id)
+      const response = await planManagementApi[target.action](target.id, target.version)
+      if (!active.current || currentId.current !== target.id) return
+      if (response.id !== target.id || !['applied', 'rejected'].includes(response.status)) {
+        throw new Error('提案操作结果尚未确定')
+      }
+      // Store authoritative status without depending on toast/modal success.
+      const updated = { ...currentProposal.current!, status: response.status, version: response.version,
+        payload_fingerprint: response.payload_fingerprint, allowed_actions: [], result: response.result_data }
+      currentProposal.current = updated
+      setProposal(updated)
+      verifiedRef.current = true
+      setVerified(true)
+      clearConfirmation()
+      setNotice('已收到服务端处理结果，无需重复提交。')
+      refreshOnReturn.current = false
     } catch (requestError) {
-      setError(`${errorMessage(requestError, '提案操作结果尚未确定')}。请刷新后核对状态。`)
-      await load(proposal.id)
+      if (!active.current || currentId.current !== target.id) return
+      const refreshed = await load(target.id, true, true)
+      if (!active.current || currentId.current !== target.id) return
+      if (refreshed && ['applied', 'rejected'].includes(refreshed.status)) {
+        setNotice('已从服务端核实提案结果，请以当前状态为准，无需重复提交。')
+      } else {
+        setError(`${errorMessage(requestError, '提案操作结果尚未确定')}。${refreshed ? '已刷新状态；如仍待确认，请重新核对后手动提交。' : '暂未核实结果，请先刷新服务端状态，不要重复提交。'}`)
+      }
     } finally {
-      setDeciding(false)
+      interactionLock.current = false
+      setDeciding('')
+      if (active.current && refreshOnReturn.current) void load(currentId.current, true)
     }
   }
 
+  const toggleReviewed = () => {
+    if (interactionLock.current || inlineTarget.current || !verifiedRef.current) return
+    reviewedRef.current = !reviewedRef.current
+    setReviewed(reviewedRef.current)
+  }
+  const cancelInlineConfirmation = () => { if (!interactionLock.current) clearConfirmation() }
+
   if (loading) return <View className='loading-state'>正在读取提案…</View>
-  if (!proposal) return <View className='page domain-proposal-page'>{error && <View className='error-banner'>{error}</View>}</View>
+  if (!proposal) return <View className='page domain-proposal-page'>
+    {error && <View className='error-banner'>{error}</View>}
+    <Button className='refresh-button' disabled={!proposalId || refreshing} onClick={() => load(proposalId, true)}>刷新提案</Button>
+  </View>
   const payload = proposal.payload
   const before = objectValue(payload.before)
   const after = objectValue(payload.after)
   const pending = proposal.status === 'pending_confirmation'
+  const locallyExpired = !(Date.parse(proposal.expires_at) > Date.now())
+  const decisionDisabled = (action: DecisionAction) => !reviewed || !verified || locallyExpired ||
+    !proposal.allowed_actions.includes(action) || Boolean(deciding) || Boolean(inlineConfirmation)
   const safetyNotes = Array.isArray(payload.safety_notes) ? payload.safety_notes.map(String) : []
 
   return (
@@ -97,6 +223,7 @@ export default function DomainProposalDetailPage () {
       <Text className='proposal-title'>请核对变更前后内容</Text>
       <Text className='proposal-note'>有效期至 {formatTime(proposal.expires_at)}</Text>
       {error && <View className='error-banner'>{error}</View>}
+      {notice && <View className='pending-note'>{notice}</View>}
 
       {before && <ProposalSection title='变更前' value={before} type={proposal.proposal_type} />}
       {after && <ProposalSection title='变更后' value={after} type={proposal.proposal_type} />}
@@ -112,17 +239,31 @@ export default function DomainProposalDetailPage () {
       <View className='decision-panel'>
         {pending ? (
           <>
-            <View className={`review-row ${reviewed ? 'selected' : ''}`} onClick={() => !deciding && setReviewed(value => !value)}>
+            <View className={`review-row ${reviewed ? 'selected' : ''}`} onClick={toggleReviewed}>
               <View className='check-box'>{reviewed ? '✓' : ''}</View>
               <Text>我已核对变更前后内容</Text>
             </View>
+            {locallyExpired && <View className='pending-note'>提案有效期已到或无法核实，请先刷新服务端状态。</View>}
+            {planManagementApi.pendingDecision(proposal.id) && <View className='pending-note'>上次操作结果尚未完全核实，请先刷新状态。再次明确提交会复用同一请求标识。</View>}
             <View className='decision-actions'>
-              <Button className='secondary-button' disabled={!reviewed || deciding} onClick={() => decide('reject')}>拒绝</Button>
-              <Button className='primary-button' disabled={!reviewed || deciding} onClick={() => decide('confirm')}>{deciding ? '提交中…' : '确认并执行'}</Button>
+              <Button className='secondary-button' disabled={decisionDisabled('reject')} onClick={() => decide('reject')}>{deciding === 'reject' ? '处理中…' : '拒绝'}</Button>
+              <Button className='primary-button' disabled={decisionDisabled('confirm')} onClick={() => decide('confirm')}>{deciding === 'confirm' ? '提交中…' : '确认并执行'}</Button>
             </View>
+            {inlineConfirmation && <View className='inline-confirmation-panel'>
+              <Text className='section-title'>请再次确认本次操作</Text>
+              <Text className='detail-line'>{inlineConfirmation.action === 'reject'
+                ? '拒绝这份提案后，不会修改已有业务数据。'
+                : after ? '确认后将执行上方展示的变更；服务端仍会校验版本与安全条件。'
+                  : '确认后将删除上方记录，请再次核对删除对象；其他数据不会静默修改。'}</Text>
+              <Text className='detail-line'>当前尚未提交这次操作；取消不会执行。</Text>
+              <View className='decision-actions'>
+                <Button className='secondary-button cancel-inline-confirmation' onClick={cancelInlineConfirmation}>取消</Button>
+                <Button className='primary-button accept-inline-confirmation' onClick={() => acceptInlineConfirmation(inlineConfirmation)}>{inlineConfirmation.action === 'confirm' ? '确认执行' : '确认拒绝'}</Button>
+              </View>
+            </View>}
           </>
         ) : <Text className='terminal-copy'>{terminalCopy(proposal.status)}</Text>}
-        <Button className='refresh-button' disabled={deciding} onClick={() => load(proposal.id)}>刷新状态</Button>
+        <Button className='refresh-button' disabled={Boolean(deciding) || refreshing} onClick={() => load(proposal.id, true)}>{refreshing ? '刷新中…' : '刷新状态'}</Button>
       </View>
     </View>
   )
@@ -198,20 +339,26 @@ function MealProposalItem ({ meal }: { meal: Record<string, unknown> }) {
 }
 
 function NestedItem ({ value }: { value: Record<string, unknown> }) {
+  const fields = [
+    ...mealItemFieldOrder.filter(key => Object.prototype.hasOwnProperty.call(value, key)),
+    ...Object.keys(value).filter(key => !internalItemFields.has(key) && !mealItemFieldOrder.includes(key))
+  ]
   return (
     <View className='nested-item'>
-      {Object.entries(value).filter(([key]) => key !== 'id' && key !== 'food_id').map(([key, item]) => (
-        <ValueRow key={key} label={labels[key] || key} value={item} />
+      {fields.map(key => (
+        <ValueRow key={key} label={labels[key] || key} value={value[key]} unit={mealItemUnits[key]} />
       ))}
     </View>
   )
 }
 
-function ValueRow ({ label, value }: { label: string, value: unknown }) {
+function ValueRow ({ label, value, unit }: { label: string, value: unknown, unit?: string }) {
+  const numeric = (typeof value === 'number' || (typeof value === 'string' && value.trim() !== '')) && Number.isFinite(Number(value))
+  const text = unit && numeric ? `${display(value)} ${unit}` : display(value)
   return (
     <View className='value-row'>
       <Text className='value-label'>{label}</Text>
-      <Text className='value-text'>{display(value)}</Text>
+      <Text className='value-text'>{text}</Text>
     </View>
   )
 }
