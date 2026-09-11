@@ -9,3 +9,5 @@ node_modules/
 .env.production
 project.config.json
 project.private.config.json
+# Generated local loading measurements, screenshots and H5 QA bundles.
+/qa/

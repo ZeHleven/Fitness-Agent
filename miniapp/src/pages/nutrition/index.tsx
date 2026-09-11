@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { trainingTimeLabel } from '../../core/exercise-energy'
 import { Button, Input, Picker, Text, View } from '@tarojs/components'
-import Taro, { useDidShow } from '@tarojs/taro'
+import Taro, { useDidHide, useDidShow } from '@tarojs/taro'
+import { peekCached, readCached, readCacheDay } from '../../core/read-cache'
+import LoadingFeedback from '../../components/LoadingFeedback'
 import { errorMessage } from '../../core/request'
 import { changeMealAmount, changeMealNutrition, existingMealDraft, foodMealDraft, mealDraftCandidate, nutrientKeys, nutrientLimit, parseMealNumber } from '../../core/meal-draft'
 import type { MealDraftItem, NutrientKey } from '../../core/meal-draft'
@@ -17,8 +19,10 @@ type EditorAction = { kind: 'new' | 'close' } | { kind: 'edit', meal: MealLog }
 type CustomAction = { kind: 'clear' } | { kind: 'edit', food: Food }
 
 export default function NutritionPage () {
-  const [today, setToday] = useState<DailyNutritionSummary | null>(null)
-  const [history, setHistory] = useState<DailyNutritionSummary[]>([])
+  const [today, setToday] = useState<DailyNutritionSummary | null>(() => peekCached<DailyNutritionSummary>('nutrition-today') || null)
+  const [history, setHistory] = useState<DailyNutritionSummary[]>(() => peekCached<DailyNutritionSummary[]>('nutrition-history') || [])
+  const [visible, setVisible] = useState(true)
+  const shownDay = useRef(readCacheDay())
   const [foods, setFoods] = useState<Food[]>([])
   const [search, setSearch] = useState('')
   const [portion, setPortion] = useState('100')
@@ -61,28 +65,39 @@ export default function NutritionPage () {
   const dirty = editorOpen && signature(items, loggedAt, mealType, custom) !== editorSeed.current
   const nextKey = () => `meal-item-${++itemSequence.current}`
 
-  const refreshToday = async () => {
+  const refreshToday = async (force = true) => {
     const generation = ++todayGeneration.current
+    if (shownDay.current !== readCacheDay()) { shownDay.current = readCacheDay(); setToday(null) }
     setTodayLoading(true); setTodayError('')
     try {
-      const value = await nutritionApi.today()
+      const value = await readCached('nutrition-today', nutritionApi.today, force)
       if (generation === todayGeneration.current) setToday(value)
     } catch (e) {
       if (generation === todayGeneration.current) setTodayError(errorMessage(e, '今日记录加载失败'))
     } finally { if (generation === todayGeneration.current) setTodayLoading(false) }
   }
-  const refreshHistory = async () => {
+  const refreshHistory = async (force = true) => {
     const generation = ++historyGeneration.current
     setHistoryLoading(true); setHistoryError('')
     try {
-      const value = await nutritionApi.history()
+      const value = await readCached('nutrition-history', nutritionApi.history, force)
       if (generation === historyGeneration.current) setHistory(value)
     } catch (e) {
       if (generation === historyGeneration.current) setHistoryError(errorMessage(e, '历史记录加载失败'))
     } finally { if (generation === historyGeneration.current) setHistoryLoading(false) }
   }
-  const load = () => Promise.all([refreshToday(), refreshHistory()])
-  useDidShow(() => { void load() })
+  const load = (force = true) => Promise.all([refreshToday(force), refreshHistory(force)])
+  useDidShow(() => {
+    setVisible(true)
+    if (shownDay.current !== readCacheDay()) {
+      // Never label yesterday's energy as today's; leave the meal draft untouched.
+      shownDay.current = readCacheDay(); setToday(null)
+    }
+    void load(false)
+  })
+  useDidHide(() => {
+    setVisible(false); todayGeneration.current++; historyGeneration.current++; editorScrollGeneration.current++
+  })
   useEffect(() => () => {
     todayGeneration.current++; historyGeneration.current++; searchGeneration.current++
   }, [])
@@ -271,8 +286,8 @@ export default function NutritionPage () {
   return (
     <View className='page nutrition-page'>
       <Text className='nutrition-eyebrow'>今天吃得怎么样</Text><Text className='nutrition-title'>饮食记录</Text>
-      {todayError && <View className='error-banner'>{todayError}<Button className='secondary-button today-retry' onClick={refreshToday}>重试今日记录</Button></View>}
-      {todayLoading && !today && <View className='loading-state'>正在加载今日饮食…</View>}
+      {todayError && <View className='error-banner'>{todayError}<Button className='secondary-button today-retry' onClick={() => refreshToday()}>重试今日记录</Button></View>}
+      <LoadingFeedback loading={todayLoading} hasContent={Boolean(today)} visible={visible} text='正在加载今日饮食…' refreshingText='正在更新今日饮食…' />
       {today && <View className='card daily-card'>
         <View className='daily-overview'>
           <View className='daily-intake'><Text className='daily-label'>今日摄入</Text><Text className='daily-calories'>{formatNumber(today.total_calories)}<Text className='daily-unit'>kcal</Text></Text></View>
@@ -310,7 +325,7 @@ export default function NutritionPage () {
           <Text>依据：Mifflin–St Jeor（1990）、2024 Compendium of Physical Activities；活动系数与中断阈值是本版粗估假设，不构成医疗处方。</Text>
         </View>}
       </View>}
-      <View className='section-heading-row'><Text className='history-heading'>今天已记录</Text><Button className='refresh-meals' size='mini' onClick={load}>刷新记录</Button></View>
+      <View className='section-heading-row'><Text className='history-heading'>今天已记录</Text><Button className='refresh-meals' size='mini' onClick={() => load()}>刷新记录</Button></View>
       {today && <View className='card today-meals'>{today.meals.length ? mealRows(today.meals) : <Text className='empty-copy'>今天还没有记录。可以记录一餐，也可以请 Agent 帮你制定方案。</Text>}</View>}
       <Button className='primary-button start-meal' disabled={saving} onClick={() => requestEditorAction({ kind: 'new' })}>记录一餐</Button>
       {discardAction && <View className='card inline-confirm discard-prompt'>
@@ -371,7 +386,7 @@ export default function NutritionPage () {
       </View>}
       <Text className='history-heading'>过去 29 天</Text>
       {historyLoading && !history.length && <Text className='loading-state'>正在加载历史记录…</Text>}
-      {historyError && <View className='error-banner'>{historyError}<Button className='secondary-button history-retry' onClick={refreshHistory}>重试历史记录</Button></View>}
+      {historyError && <View className='error-banner'>{historyError}<Button className='secondary-button history-retry' onClick={() => refreshHistory()}>重试历史记录</Button></View>}
       {!historyLoading && !historyError && !history.some(day => day.date < localDate()) && <View className='card empty-state'>过去 29 天还没有饮食记录。</View>}
       {history.filter(day => day.date < localDate()).map(day => <View className='card history-day' key={day.date}><View className='history-day-heading'><Text className='history-date'>{day.date}</Text><Text className='history-total'>{formatNumber(day.total_calories)} kcal</Text></View>{mealRows(day.meals)}</View>)}
     </View>

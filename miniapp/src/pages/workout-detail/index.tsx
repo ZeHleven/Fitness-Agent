@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { Button, Text, View } from '@tarojs/components'
 import Taro, { useDidHide, useDidShow, useLoad } from '@tarojs/taro'
+import { peekCached, readCached } from '../../core/read-cache'
+import LoadingFeedback from '../../components/LoadingFeedback'
 import { workoutApi } from '../../services/workouts'
 import { errorMessage } from '../../core/request'
 import { inlineSetRest, plannedExerciseSummary, proposalStatusLabel } from '../../core/workout-presentation'
@@ -18,30 +20,33 @@ export default function WorkoutDetailPage () {
   const mounted = useRef(true)
   const [visible, setVisible] = useState(true)
   const [layoutVersion, setLayoutVersion] = useState(0)
-  useDidShow(() => setVisible(true))
-  useDidHide(() => setVisible(false))
+  useDidShow(() => { setVisible(true); if (id.current) void load(false) })
+  useDidHide(() => { setVisible(false); generation.current++ })
   useEffect(() => {
     mounted.current = true
     const resize = () => setLayoutVersion(value => value + 1)
     Taro.onWindowResize?.(resize)
     return () => { mounted.current = false; generation.current++; Taro.offWindowResize?.(resize) }
   }, [])
-  const load = async () => {
+  const load = async (force = true) => {
     const ticket = ++generation.current
     if (!id.current) { setError('缺少训练记录标识，请从训练历史重新打开'); return }
+    const cached = peekCached<WorkoutSession>(`workout-detail:${id.current}`)
+    if (cached && !session) setSession(cached)
     setLoading(true); setError('')
     try {
-      const data = await workoutApi.detail(id.current)
+      const sessionId = id.current
+      const data = await readCached(`workout-detail:${sessionId}`, () => workoutApi.detail(sessionId), force)
       if (mounted.current && ticket === generation.current) setSession(data)
     } catch (e) { if (mounted.current && ticket === generation.current) setError(errorMessage(e, '训练记录加载失败')) }
     finally { if (mounted.current && ticket === generation.current) setLoading(false) }
   }
-  useLoad(options => { id.current = options.id || ''; void load() })
+  useLoad(options => { id.current = options.id || ''; void load(false) })
   const trained = session?.exercises.filter(exercise => exercise.sets_data.length > 0) || []
   const untrained = session?.exercises.filter(exercise => exercise.sets_data.length === 0) || []
   return <View className='page workout-detail-page'>
-    {error && <View className='error-banner'>{error}<Button className='secondary-button detail-retry' onClick={load}>重试</Button></View>}
-    {loading && <View className='loading-state'>正在加载本次训练…</View>}
+    {error && <View className='error-banner'>{error}<Button className='secondary-button detail-retry' onClick={() => load()}>重试</Button></View>}
+    <LoadingFeedback loading={loading} hasContent={Boolean(session)} visible={visible} text='正在加载本次训练…' refreshingText='正在更新本次训练…' />
     {session && <>
       <View className='card detail-heading'>
         <Text className='detail-state'>{session.status === 'completed' ? '已完成' : session.status === 'ended_early' ? '提前结束 · 已保留记录' : '进行中'}</Text>

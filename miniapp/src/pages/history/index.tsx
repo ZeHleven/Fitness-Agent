@@ -1,6 +1,8 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Button, Text, View } from '@tarojs/components'
-import Taro, { useDidShow } from '@tarojs/taro'
+import Taro, { useDidHide, useDidShow } from '@tarojs/taro'
+import { peekCached, readCached } from '../../core/read-cache'
+import LoadingFeedback from '../../components/LoadingFeedback'
 
 import { errorMessage } from '../../core/request'
 import { historyExerciseSummary, proposalStatusLabel, workoutClock } from '../../core/workout-presentation'
@@ -9,8 +11,10 @@ import type { WorkoutProgress, WorkoutSession } from '../../types/api'
 import './index.scss'
 
 export default function HistoryPage () {
-  const [history, setHistory] = useState<WorkoutSession[]>([])
-  const [progress, setProgress] = useState<WorkoutProgress | null>(null)
+  const [history, setHistory] = useState<WorkoutSession[]>(() =>
+    (peekCached<WorkoutSession[]>('workout-history') || []).filter(item => item.status === 'completed' || item.status === 'ended_early'))
+  const [progress, setProgress] = useState<WorkoutProgress | null>(() => peekCached<WorkoutProgress>('progress:8') || null)
+  const [visible, setVisible] = useState(true)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [weekProgress, setWeekProgress] = useState<WorkoutProgress | null>(null)
@@ -19,19 +23,19 @@ export default function HistoryPage () {
   const selectedWeekRef = useRef<string | null>(null)
   const loadGeneration = useRef(0)
 
-  const load = async () => {
+  const load = async (force = true) => {
     const generation = ++loadGeneration.current
     setLoading(true)
     setError('')
     try {
       const [historyData, progressData] = await Promise.all([
-        workoutApi.history(),
-        workoutApi.progress()
+        readCached('workout-history', workoutApi.history, force),
+        readCached('progress:8', workoutApi.progress, force)
       ])
       if (loadGeneration.current !== generation) return
       setHistory(historyData.filter(item => item.status === 'completed' || item.status === 'ended_early'))
       setProgress(progressData)
-      if (selectedWeekRef.current) void selectWeek(selectedWeekRef.current)
+      if (selectedWeekRef.current) void selectWeek(selectedWeekRef.current, force)
     } catch (requestError) {
       if (loadGeneration.current === generation) setError(errorMessage(requestError, '训练历史加载失败，已显示的记录会保留'))
     } finally {
@@ -40,15 +44,18 @@ export default function HistoryPage () {
   }
 
   useDidShow(() => {
-    void load()
+    setVisible(true); void load(false)
   })
+  useDidHide(() => { setVisible(false); loadGeneration.current++; weekGeneration.current++ })
+  useEffect(() => () => { loadGeneration.current++; weekGeneration.current++ }, [])
 
-  const selectWeek = async (week: string) => {
+  const selectWeek = async (week: string, force = false) => {
     selectedWeekRef.current = week
     const ticket = ++weekGeneration.current
     setWeekLoading(true); setError('')
     try {
-      const data = await workoutApi.progress(progress?.weeks || 8, week)
+      const weeks = progress?.weeks || 8
+      const data = await readCached(`progress:${weeks}:${week}`, () => workoutApi.progress(weeks, week), force)
       if (ticket === weekGeneration.current) setWeekProgress(data)
     } catch (e) { if (ticket === weekGeneration.current) setError(errorMessage(e, '当周数据加载失败，请重试')) }
     finally { if (ticket === weekGeneration.current) setWeekLoading(false) }
@@ -68,8 +75,8 @@ export default function HistoryPage () {
       <Text className='history-eyebrow'>长期进步来自每一次完成</Text>
       <Text className='history-title'>训练历史</Text>
 
-      {error && <View className='error-banner'>{error}<Button className='secondary-button history-retry' onClick={load}>重新加载</Button></View>}
-      {loading && <View className='loading-state'>正在整理训练记录…</View>}
+      {error && <View className='error-banner'>{error}<Button className='secondary-button history-retry' onClick={() => load()}>重新加载</Button></View>}
+      <LoadingFeedback loading={loading} hasContent={Boolean(progress)} visible={visible} text='正在整理训练记录…' refreshingText='正在更新训练记录…' />
 
       {progress && (
         <View className='card trend-card'>

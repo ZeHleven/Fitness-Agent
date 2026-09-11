@@ -28,7 +28,7 @@ async function createPage (overrides = {}, platform = {}) {
   const page = runtime('../../src/pages/nutrition/index.tsx', {
     '../../services/nutrition': { nutritionApi: api }, '../../core/request': { errorMessage: e => e.message },
     '../../services/profile': { profileApi: { update: async data => { activityWrites.push(data) } } },
-    '@tarojs/taro': { __esModule: true, useDidShow: callback => { hooks.useDidShow = callback }, default: {
+    '@tarojs/taro': { __esModule: true, useDidShow: callback => { hooks.useDidShow = callback }, useDidHide: callback => { hooks.useDidHide = callback }, default: {
       showToast: async () => {}, nextTick: callback => { nextTicks.push(callback) },
       navigateTo: options => platform.navigateTo ? platform.navigateTo(options) : Promise.resolve(),
       pageScrollTo: options => { scrolls.push(options); return platform.pageScrollTo ? platform.pageScrollTo(options) : Promise.resolve() }
@@ -62,7 +62,10 @@ test('classification correction return refreshes energy, labels and reasons whil
   assert.equal(page.find('energy-workout-detail').props.children, '补充分类')
   await page.click('energy-workout-detail')
   assert.deepEqual(navigations, [{ url: '/pages/workout-detail/index?id=session%2Fspecial' }])
-  corrected = true; page.hooks.useDidShow(); await page.flush()
+  corrected = true
+  // This test substitutes the service; model the invalidation performed by the real PUT transport.
+  page.loadSource('../../src/core/read-cache.ts').invalidateReadCache()
+  page.hooks.useDidShow(); await page.flush()
   assert.equal(page.findAll('energy-label')[1].props.children, '全天消耗')
   assert.equal(page.find('energy-warning'), undefined)
   assert.equal(page.find('selected-amount-input').props.value, '150')

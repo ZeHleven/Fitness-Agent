@@ -84,6 +84,7 @@ export function runtime (relative, overrides = {}, globals = {}) {
   const render = (props = {}) => { cursor = 0; tree = expand(exports.default(props)); while (effects.length) effects.shift()() }
   return {
     exports, hooks, find, findAll, render,
+    loadSource: relative => load(fileURLToPath(new URL(relative, import.meta.url))),
     text: () => JSON.stringify(tree),
     click: cls => { assert.ok(find(cls), `Missing ${cls}`); return find(cls).props.onClick() },
     input: (cls, value, index = 0) => {

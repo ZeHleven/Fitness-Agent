@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process'
-import { readFile, writeFile } from 'node:fs/promises'
+import { copyFile, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -60,6 +60,8 @@ const build = spawnSync(
 )
 if (build.error) throw build.error
 if (build.status !== 0) process.exit(build.status ?? 1)
+
+await copyFile(path.join(miniappRoot, 'THIRD-PARTY-NOTICES.md'), path.join(miniappRoot, 'dist', 'THIRD-PARTY-NOTICES.txt'))
 
 await writeFile(
   path.join(miniappRoot, 'dist', 'build-info.json'),

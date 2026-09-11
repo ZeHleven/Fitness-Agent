@@ -1,4 +1,5 @@
 import Taro from '@tarojs/taro'
+import { invalidateReadCache, readCacheSession } from './read-cache'
 
 import {
   clearTokens,
@@ -78,6 +79,7 @@ interface CloudContainerClient {
 }
 
 let refreshPromise: Promise<string> | null = null
+let refreshSession = -1
 let cloudInitialized = false
 
 function withQuery(path: string, query?: RequestOptions['query']): string {
@@ -144,6 +146,9 @@ async function refreshAccessToken(): Promise<string> {
     { refresh_token: refreshToken },
     { 'Content-Type': 'application/json' }
   )
+  if (getRefreshToken() !== refreshToken) {
+    throw new Error('登录状态已改变，请在当前账号下重新操作')
+  }
 
   if (response.statusCode < 200 || response.statusCode >= 300) {
     const payload = response.data as ApiErrorPayload
@@ -164,25 +169,28 @@ async function refreshAccessToken(): Promise<string> {
   if (getRefreshToken() !== refreshToken) {
     throw new Error('登录状态已改变，请在当前账号下重新操作')
   }
-  saveTokens(tokens.access_token, tokens.refresh_token)
+  saveTokens(tokens.access_token, tokens.refresh_token, true)
   return tokens.access_token
 }
 
 async function getFreshAccessToken(): Promise<string> {
-  if (!refreshPromise) {
-    refreshPromise = refreshAccessToken().finally(() => {
-      refreshPromise = null
+  if (!refreshPromise || refreshSession !== readCacheSession()) {
+    refreshSession = readCacheSession()
+    const current = refreshAccessToken().finally(() => {
+      if (refreshPromise === current) refreshPromise = null
     })
+    refreshPromise = current
   }
   return refreshPromise
 }
 
-export async function apiRequest<T>(
+async function requestWithAuth<T>(
   path: string,
   options: RequestOptions = {},
   allowRefresh = true
 ): Promise<T> {
   const authenticated = options.authenticated !== false
+  const account = readCacheSession()
   const accessToken = authenticated ? getAccessToken() : ''
   const requestRefreshToken = authenticated ? getRefreshToken() : ''
   const response = await transportRequest<T | ApiErrorPayload>(
@@ -195,6 +203,9 @@ export async function apiRequest<T>(
     },
     options.timeout
   )
+  if (authenticated && account !== readCacheSession()) {
+    throw new Error('登录状态已改变，请在当前账号下重新操作')
+  }
 
   if (
     response.statusCode === 401 &&
@@ -204,7 +215,8 @@ export async function apiRequest<T>(
   ) {
     try {
       await getFreshAccessToken()
-      return apiRequest<T>(path, options, false)
+      if (account !== readCacheSession()) throw new Error('登录状态已改变，请在当前账号下重新操作')
+      return requestWithAuth<T>(path, options, false)
     } catch (error) {
       // Only the refresh endpoint's explicit invalid-credential response is
       // grounds to discard credentials and the user's recovery journals.
@@ -229,6 +241,15 @@ export async function apiRequest<T>(
   }
 
   return response.data as T
+}
+
+export async function apiRequest<T>(path: string, options: RequestOptions = {}, allowRefresh = true): Promise<T> {
+  const write = options.authenticated !== false && Boolean(options.method && options.method !== 'GET')
+  const account = readCacheSession()
+  // Both successful and uncertain writes invalidate. No write is cached/replayed here.
+  if (write) invalidateReadCache()
+  try { return await requestWithAuth<T>(path, options, allowRefresh) }
+  finally { if (write && account === readCacheSession()) invalidateReadCache() }
 }
 
 function apiErrorPayloadMessage (
