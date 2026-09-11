@@ -1,7 +1,7 @@
 .history-page {
   padding-bottom: 60px;
 }
-.adaptive-proposal-link, .history-retry { margin-top: 18px; font-size: 25px; }
+.history-retry { margin-top: 18px; font-size: 25px; }
 
 .history-eyebrow,
 .history-title,
@@ -100,11 +100,14 @@
 
 .history-card-heading {
   align-items: flex-start;
+  gap: 16px;
 }
+.history-card-heading > view:first-child { flex: 1; min-width: 0; }
 
 .history-plan {
   font-size: 31px;
   font-weight: 800;
+  overflow-wrap: anywhere;
 }
 
 .history-date {
@@ -120,6 +123,7 @@
   color: #765c08;
   font-size: 20px;
   font-weight: 750;
+  white-space: nowrap;
 }
 
 .history-tags {
@@ -139,22 +143,30 @@
 }
 
 .session-metrics {
-  display: grid;
-  margin: 24px 0 16px;
-  padding: 18px 12px;
-  border-radius: 18px;
-  background: #f3f7f2;
-  color: #42564a;
-  font-size: 22px;
-  grid-template-columns: repeat(4, 1fr);
-  text-align: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px 28px;
+  margin: 18px 0 12px;
+  padding-bottom: 22px;
+  border-bottom: 1px solid #e0e8df;
+  color: #6c7c72;
+  font-size: 24px;
 }
 
 .exercise-line {
-  padding: 14px 0;
-  border-top: 1px solid #edf1ed;
-  font-size: 24px;
+  padding: 10px 0;
+  gap: 20px;
+  font-size: 26px;
 }
+.exercise-line > text:first-child { min-width: 0; overflow-wrap: anywhere; }
+.exercise-line .muted { white-space: nowrap; }
+.history-summary-count { display: block; color: #6c7c72; font-size: 24px; margin: 12px 0 20px; }
+.history-card-actions { display: flex; flex-wrap: wrap; align-items: stretch; gap: 16px; padding-top: 18px; border-top: 1px solid #e0e8df; }
+.history-page .workout-detail-link { flex: 1; min-height: 84px; margin: 0; padding: 12px 0; display: flex; align-items: center; justify-content: flex-start; background: transparent; color: #1d6b49; font-size: 26px; font-weight: 600; line-height: 1.5; }
+.history-page .adaptive-proposal-link { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 10px; min-height: 84px; margin: 0; padding: 16px 20px; border-radius: 16px; background: #f4f7f3; color: #52695b; font-size: 24px; line-height: 1.5; }
+.history-page .proposal-pending { background: #e6f1e9; color: #1d6b49; }
+.history-proposal-status { font-size: 21px; }
+.history-card-actions > button { width: auto; }
 
 .history-adjustments {
   margin-top: 18px;
@@ -182,4 +194,4 @@
 }
 .trend-hint { display: block; color: #637168; font-size: 24px; margin-top: 12px; }
 .day-volume { color: #1d6b49; font-size: 22px; }
-.show-all-weeks, .workout-detail-link { margin-top: 16px; }
+.show-all-weeks { margin-top: 16px; }

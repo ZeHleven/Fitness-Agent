@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
-import { Button, Input, Slider, Text, Textarea, View } from '@tarojs/components'
-import Taro, { useDidShow, useLoad } from '@tarojs/taro'
+import { Input, Slider, Text, Textarea, View } from '@tarojs/components'
+import Taro, { useDidHide, useDidShow, useLoad } from '@tarojs/taro'
+
+import Button from '../../components/FeedbackButton'
+import { useInteractionMotion } from '../../core/use-interaction-motion'
+import { motionTiming } from '../../core/interaction-motion'
 
 import { errorMessage } from '../../core/request'
 import { workoutApi } from '../../services/workouts'
@@ -27,7 +31,9 @@ export default function ActiveWorkoutPage () {
   const restNotified = useRef(false)
   const restRef = useRef<RestJournal | null>(null)
   const busy = useRef(false)
-  const [endingEarly, setEndingEarly] = useState(false)
+  const motion = useInteractionMotion()
+  const [exitedRest, setExitedRest] = useState<RestJournal | null>(null)
+  const restTimer = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const load = async () => {
     setLoading(true)
@@ -63,6 +69,7 @@ export default function ActiveWorkoutPage () {
   })
 
   const syncRest = () => {
+    if (!motion.isVisible()) return
     const currentRest = restRef.current
     if (!currentRest) return
     const nextRemaining = Math.max(0, Math.ceil((currentRest.endsAt - (currentRest.endedAt ?? Date.now())) / 1000))
@@ -73,25 +80,36 @@ export default function ActiveWorkoutPage () {
     }
   }
 
-  useDidShow(syncRest)
+  useDidShow(() => { motion.show(); syncRest() })
+  useDidHide(() => {
+    motion.hide()
+    if (restTimer.current != null) clearInterval(restTimer.current)
+    restTimer.current = null
+  })
 
   useEffect(() => {
     restRef.current = rest
-    if (!rest) return undefined
+    if (!rest || !motion.visible) return undefined
     syncRest()
     const timer = setInterval(syncRest, 1000)
-    return () => clearInterval(timer)
-  }, [rest])
+    restTimer.current = timer
+    return () => {
+      clearInterval(timer)
+      if (restTimer.current === timer) restTimer.current = null
+    }
+  }, [rest, motion.visible])
 
   const persistRest = async (reason: 'next_set' | 'workout_ended') => {
     const current = restRef.current
     if (!current) return
+    const token = motion.capture()
     const ended = endRest(current, reason)
     saveRest(ended)
     restRef.current = ended; setRest(ended)
     const updated = await workoutApi.recordRest(ended.sessionId, ended.exerciseId, ended.setNumber, restPayload(ended))
     clearRest(ended.sessionId)
     restRef.current = null; setRest(null); setSession(updated)
+    if (reason === 'next_set' && motion.pulse('rest-exit', token, motionTiming.state)) setExitedRest(ended)
   }
 
   const finishRest = async () => {
@@ -122,6 +140,8 @@ export default function ActiveWorkoutPage () {
     busy.current = true
     setSaving(true)
     setError('')
+    const token = motion.capture()
+    motion.cancel('rest-exit')
     try {
       let journal: RestJournal | null = null
       if (!existing) {
@@ -137,13 +157,15 @@ export default function ActiveWorkoutPage () {
         journal ? new Date(journal.startedAt).toISOString() : undefined
       )
       setSession(updated)
+      motion.pulse(`set:${exercise.id}:${setNumber}`, token)
       if (journal) {
         restNotified.current = false
         restRef.current = journal; setRest(journal)
+        motion.pulse('rest-enter', token, motionTiming.enter)
       }
       const updatedExercise = updated.exercises.find(item => item.id === exercise.id)
       const savedSet = updatedExercise ? setAt(updatedExercise.sets_data, setNumber) : null
-      if (savedSet && savedSet.is_personal_record) {
+      if (savedSet && savedSet.is_personal_record && motion.isVisible() && token === motion.capture()) {
         void Taro.showToast({
           title: `🏆 新个人纪录：${performanceLabel(savedSet)}`,
           icon: 'none',
@@ -204,19 +226,6 @@ export default function ActiveWorkoutPage () {
     }
   }
 
-  const finishEarly = async () => {
-    if (!session || busy.current) return
-    busy.current = true; setSaving(true)
-    try {
-      const ended = await workoutApi.finishEarly(session.id)
-      clearRest(session.id); restRef.current = null; setRest(null)
-      setSession(ended)
-      setEndingEarly(false)
-      await Taro.redirectTo({ url: `/pages/workout-detail/index?id=${encodeURIComponent(ended.id)}` })
-    } catch (e) { setError(errorMessage(e, '结束失败，已有记录不会删除')) }
-    finally { busy.current = false; setSaving(false) }
-  }
-
   if (loading) return <View className='loading-state'>正在恢复训练…</View>
 
   if (!session) {
@@ -241,7 +250,7 @@ export default function ActiveWorkoutPage () {
   const elapsedMinutes = Math.max(1, Math.floor((Date.now() - new Date(session.started_at).getTime()) / 60000))
 
   return (
-    <View className='page active-page'>
+    <View className={`page active-page ${motion.className}`}>
       <View className='session-card card'>
         <View>
           <Text className='session-kicker'>进行中 · {elapsedMinutes} 分钟</Text>
@@ -261,10 +270,7 @@ export default function ActiveWorkoutPage () {
         </View>
       )}
 
-      {session.orphaned && <View className='active-safety-warning'>原计划已删除，已记录组数仍保留。可在下方保留记录并结束，解除旧训练占用。</View>}
-      <View className='card early-end-card'>
-        {endingEarly ? <View><Text>保留已记录组数，提前结束本次训练，不标记本周训练日完成。</Text><Button className='secondary-button cancel-early-end' disabled={saving} onClick={() => setEndingEarly(false)}>继续训练</Button><Button className='secondary-button confirm-early-end' disabled={saving} onClick={finishEarly}>保留记录并结束</Button></View> : <Button className='secondary-button open-early-end' disabled={saving} onClick={() => setEndingEarly(true)}>保留记录并提前结束</Button>}
-      </View>
+      {session.orphaned && <View className='active-safety-warning'>原计划已删除，已记录组数仍保留。可继续记录，并通过“完成训练”保存本次训练。没有记录时，可点击“放弃”退出。</View>}
 
       {session.exercises.map(exercise => (
         <ExerciseCard
@@ -272,11 +278,13 @@ export default function ActiveWorkoutPage () {
           exercise={exercise}
           disabled={saving || Boolean(rest)}
           onSave={(setNumber, reps, weightKg) => recordSet(exercise, setNumber, reps, weightKg)}
+          emphasizedSets={motion.enabled ? motion.active : []}
+          onEdit={setNumber => motion.cancel(`set:${exercise.id}:${setNumber}`)}
         />
       ))}
 
       {rest && (
-        <View className={`rest-bar ${remaining === 0 ? 'rest-finished' : ''}`}>
+        <View className={`rest-bar ${remaining === 0 ? 'rest-finished' : ''} ${motion.has('rest-enter') ? 'rest-entering' : ''}`}>
           <View className='rest-main'>
             <View>
               <Text className='rest-time'>{rest.endedAt != null ? '休息已结束，待保存' : remaining === 0 ? '目标休息时间已到' : `组间休息 ${formatTime(remaining)}`}</Text>
@@ -290,7 +298,7 @@ export default function ActiveWorkoutPage () {
                 const next = { ...current, endsAt: Math.max(current.endsAt, Date.now()) + 30000, totalSeconds: current.totalSeconds + 30 }
                 saveRest(next); restRef.current = next; setRest(next)
               }}>+30秒</Button>
-              <Button className='end-rest' size='mini' disabled={saving} onClick={finishRest}>{rest.endedAt != null ? '重试保存休息' : '结束休息，开始下一组'}</Button>
+              <Button className='end-rest' size='mini' busy={saving} onClick={finishRest}>{rest.endedAt != null ? '重试保存休息' : '结束休息，开始下一组'}</Button>
             </View>
           </View>
           <View className='rest-track'>
@@ -299,6 +307,13 @@ export default function ActiveWorkoutPage () {
               style={{ width: `${Math.min(100, Math.max(0, (1 - remaining / rest.totalSeconds) * 100))}%` }}
             />
           </View>
+        </View>
+      )}
+
+      {!rest && exitedRest && motion.has('rest-exit') && (
+        <View className='rest-exit-feedback'>
+          <Text>休息已记录</Text>
+          <Text className='rest-exercise'>{exitedRest.exerciseName}</Text>
         </View>
       )}
 
@@ -327,11 +342,15 @@ export default function ActiveWorkoutPage () {
 function ExerciseCard ({
   exercise,
   disabled,
-  onSave
+  onSave,
+  emphasizedSets,
+  onEdit
 }: {
   exercise: SessionExercise
   disabled: boolean
   onSave: (setNumber: number, reps: number, weightKg: number | null) => Promise<void>
+  emphasizedSets: string[]
+  onEdit: (setNumber: number) => void
 }) {
   const count = Math.max(1, exercise.target_sets || 1)
   return (
@@ -364,6 +383,8 @@ function ExerciseCard ({
             targetReps={exercise.target_reps}
             disabled={disabled}
             onSave={onSave}
+            emphasized={emphasizedSets.includes(`set:${exercise.id}:${setNumber}`)}
+            onEdit={() => onEdit(setNumber)}
           />
         )
       })}
@@ -378,7 +399,9 @@ function SetEditor ({
   targetWeight,
   targetReps,
   disabled,
-  onSave
+  onSave,
+  emphasized,
+  onEdit
 }: {
   setNumber: number
   existing: WorkoutSetRecord | null
@@ -387,6 +410,8 @@ function SetEditor ({
   targetReps?: string | null
   disabled: boolean
   onSave: (setNumber: number, reps: number, weightKg: number | null) => Promise<void>
+  emphasized: boolean
+  onEdit: () => void
 }) {
   const initialWeight = existing && existing.weight_kg != null
     ? existing.weight_kg
@@ -404,6 +429,8 @@ function SetEditor ({
   )
   const [dirty, setDirty] = useState(false)
   const [rowSaving, setRowSaving] = useState(false)
+  const rowBusy = useRef(false)
+  const editRevision = useRef(0)
 
   useEffect(() => {
     if (!existing || dirty) return
@@ -412,48 +439,54 @@ function SetEditor ({
   }, [existing ? existing.reps : undefined, existing ? existing.weight_kg : undefined])
 
   const save = async () => {
+    if (rowBusy.current || disabled) return
     const parsedReps = Number.parseInt(reps, 10)
     const parsedWeight = weight.trim() === '' ? null : Number.parseFloat(weight)
     if (!Number.isInteger(parsedReps) || parsedReps < 1 || (parsedWeight != null && (!Number.isFinite(parsedWeight) || parsedWeight < 0))) {
       await Taro.showToast({ title: '请填写有效的重量和次数', icon: 'none' })
       return
     }
+    rowBusy.current = true
+    const revision = editRevision.current
     setRowSaving(true)
     try {
       await onSave(setNumber, parsedReps, parsedWeight)
-      setDirty(false)
+      if (editRevision.current === revision) setDirty(false)
+      else onEdit()
     } catch (_) {
       // 页面级错误栏已显示请求错误，保留输入便于重试。
     } finally {
       setRowSaving(false)
+      rowBusy.current = false
     }
   }
 
   const saved = Boolean(existing) && !dirty
   return (
-    <View className='set-row'>
+    <View className={`set-row ${emphasized && saved && !rowSaving ? 'is-just-saved' : ''}`}>
       <Text className='set-number'>{setNumber}</Text>
       <Input
         className='set-input'
         type='digit'
         value={weight}
         placeholder='0'
-        onInput={event => { setWeight(event.detail.value); setDirty(true) }}
+        onInput={event => { editRevision.current++; setWeight(event.detail.value); setDirty(true); onEdit() }}
       />
       <Input
         className='set-input'
         type='number'
         value={reps}
         placeholder='次数'
-        onInput={event => { setReps(event.detail.value); setDirty(true) }}
+        onInput={event => { editRevision.current++; setReps(event.detail.value); setDirty(true); onEdit() }}
       />
       <Button
         className={`set-save ${saved ? 'is-saved' : ''}`}
         size='mini'
-        disabled={disabled || rowSaving}
+        disabled={disabled}
+        busy={rowSaving}
         onClick={save}
       >
-        {rowSaving ? '…' : existing && existing.is_personal_record && saved ? '🏆' : saved ? '✓' : '保存'}
+        {existing && existing.is_personal_record && saved ? '🏆' : saved ? '已保存' : '保存'}
       </Button>
       {!existing && targetWeight != null
         ? <Text className='previous-hint'>系统建议 {weightText(targetWeight)} kg · 已按上次表现调整</Text>

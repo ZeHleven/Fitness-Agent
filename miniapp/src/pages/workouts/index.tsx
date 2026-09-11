@@ -21,7 +21,6 @@ export default function WorkoutsPage () {
   const [deletingPlanId, setDeletingPlanId] = useState('')
   const [error, setError] = useState('')
   const [removeTarget, setRemoveTarget] = useState<string | null>(null)
-  const [endActive, setEndActive] = useState(false)
   const busy = useRef(false)
   const generation = useRef(0)
 
@@ -92,17 +91,6 @@ export default function WorkoutsPage () {
     finally { busy.current = false; setDeletingPlanId('') }
   }
 
-  const finishActive = async () => {
-    if (!active || busy.current) return
-    busy.current = true
-    try {
-      await workoutApi.finishEarly(active.id)
-      setEndActive(false)
-      await load()
-    } catch (requestError) { setError(errorMessage(requestError, '暂时无法结束训练，已记录组数不会删除')) }
-    finally { busy.current = false }
-  }
-
   const proposeDeletion = async (planId: string) => {
     const answer = await Taro.showModal({
       title: '删除当前训练计划？',
@@ -161,12 +149,6 @@ export default function WorkoutsPage () {
         </View>
       )}
 
-      {active && <View className='active-recovery card'>
-            {active.orphaned && <Text>原计划已删除，旧训练记录仍保留。结束旧训练后即可开始新计划。</Text>}
-            {endActive
-              ? <View><Text>保留所有已记录组数并提前结束，不标记本周训练日已完成。</Text><Button className='secondary-button keep-active' onClick={() => setEndActive(false)}>继续训练</Button><Button className='secondary-button finish-active' onClick={finishActive}>保留记录并结束</Button></View>
-              : <Button className='secondary-button show-end-active' onClick={() => setEndActive(true)}>保留记录并结束旧训练</Button>}
-      </View>}
       {progress && (
         <View className='progress-card card'>
           <View className='section-row'>

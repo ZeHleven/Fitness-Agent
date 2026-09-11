@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { runtime, deferred } from './helpers/page-runtime.mjs'
+import { manualClock } from './helpers/interaction-runtime.mjs'
 
 const stats = { weeks: 8, total_sessions: 1, total_sets: 1, total_reps: 8, total_volume_kg: 200, weekly: [{ week_start: '2026-09-07', sessions: 1, sets: 1, reps: 8, volume_kg: 200 }, { week_start: '2026-08-31', sessions: 0, sets: 0, reps: 0, volume_kg: 0 }] }
 const exercise = { id: 'sx', exercise_id: 'e', exercise_name: '测试动作', day_of_week: 1, sets_data: [], previous_sets_data: [], target_sets: 2, target_reps: '8', rest_seconds: 90 }
@@ -10,7 +11,7 @@ const plan = { id: 'p', name: '旧计划', display_name: '训练计划', is_acti
 function platform () {
   const hooks = {}, navigations = [], storage = new Map()
   return { hooks, navigations, storage, module: { __esModule: true,
-    useDidShow: fn => { hooks.show = fn }, useLoad: fn => { hooks.load = fn },
+    useDidShow: fn => { hooks.show = fn }, useLoad: fn => { hooks.load = fn }, useDidHide: fn => { hooks.hide = fn },
     default: { navigateTo: async value => { navigations.push(value) }, navigateBack: async () => {}, redirectTo: async value => { navigations.push(value) }, showToast: async () => {}, enableAlertBeforeUnload: () => {},
       getStorageSync: key => storage.get(key), setStorageSync: (key, value) => storage.set(key, value), removeStorageSync: key => storage.delete(key),
       showModal: () => { throw new Error('Unexpected modal') } }
@@ -40,10 +41,10 @@ for (const isActive of [true, false]) {
   })
 }
 
-test('archive delete and orphan release require inline choice, preserve state on failure', async () => {
-  const p = platform(); let removed = 0, ended = 0, failed = true
-  const api = { plans: async () => removed ? [] : [{ ...plan, is_active: false }], active: async () => ended ? null : { ...session, status: 'in_progress', orphaned: true }, progress: async () => stats,
-    removeArchived: async () => { if (failed) throw new Error('连接失败'); removed++ }, finishEarly: async () => { ended++ } }
+test('archive deletion still requires inline choice and preserves state on failure', async () => {
+  const p = platform(); let removed = 0, failed = true
+  const api = { plans: async () => removed ? [] : [{ ...plan, is_active: false }], active: async () => null, progress: async () => stats,
+    removeArchived: async () => { if (failed) throw new Error('连接失败'); removed++ } }
   const page = runtime('../../src/pages/workouts/index.tsx', {
     '@tarojs/taro': p.module, '../../core/request': { errorMessage: e => e.message }, '../../services/profile': { profileApi: { get: async () => ({ onboarding_completed: true }) } },
     '../../services/plan-management': { planManagementApi: {} }, '../../services/workouts': { workoutApi: api }
@@ -66,9 +67,34 @@ test('archive delete and orphan release require inline choice, preserve state on
   page.click('delete-archive'); await page.flush()
   await page.click('confirm-archive-delete'); await page.flush(); assert.ok(page.find('archive-confirm')); assert.equal(removed, 0)
   failed = false; await page.click('confirm-archive-delete'); await page.flush(); assert.equal(removed, 1)
-  page.click('show-end-active'); await page.flush(); assert.equal(ended, 0)
-  await page.click('finish-active'); await page.flush(); assert.equal(ended, 1); assert.equal(page.find('active-card'), undefined)
 })
+
+for (const orphaned of [false, true]) {
+  for (const totalSets of [0, 1]) {
+    test(`home keeps only the continue card for active workouts (orphaned=${orphaned}, sets=${totalSets})`, async () => {
+      const p = platform(); let writes = 0
+      const api = {
+        plans: async () => orphaned ? [] : [plan],
+        active: async () => ({ ...session, status: 'in_progress', orphaned, total_sets: totalSets }), progress: async () => stats,
+        finishEarly: async () => { writes++ }, complete: async () => { writes++ }, abandon: async () => { writes++ }
+      }
+      const page = runtime('../../src/pages/workouts/index.tsx', {
+        '@tarojs/taro': p.module, '../../core/request': { errorMessage: e => e.message },
+        '../../services/profile': { profileApi: { get: async () => ({ onboarding_completed: true }) } },
+        '../../services/plan-management': { planManagementApi: {} }, '../../services/workouts': { workoutApi: api }
+      })
+      page.render(); p.hooks.show(); await page.flush()
+      assert.equal(page.find('active-recovery'), undefined)
+      assert.equal(page.find('show-end-active'), undefined); assert.equal(page.find('finish-active'), undefined)
+      assert.doesNotMatch(page.text(), /保留记录并结束旧训练|保留记录并结束/)
+      assert.ok(page.find('active-card')); assert.match(page.text(), /继续 →/)
+      await page.click('active-card')
+      assert.deepEqual(p.navigations, [{ url: '/pages/workout-active/index' }]); assert.equal(writes, 0)
+      p.hooks.show(); await page.flush()
+      assert.ok(page.find('active-card')); assert.equal(page.find('active-recovery'), undefined); assert.equal(writes, 0)
+    })
+  }
+}
 
 test('week selection changes seven bars, metrics and records; old late response cannot replace newer choice', async () => {
   const p = platform(), one = deferred(), two = deferred()
@@ -98,15 +124,15 @@ test('workout detail shows per-set actual and unknown rest without any writes', 
   })
   page.render(); p.hooks.load({ id: 's' }); await page.flush()
   assert.equal(reads, 1); assert.equal(page.findAll('detail-set').length, 2)
-  assert.match(page.text(), /17 秒/); assert.match(page.text(), /未记录/); assert.match(page.text(), /22.5 kg/)
+  assert.match(page.text(), /组间歇17秒/); assert.match(page.text(), /组间歇未记录/); assert.match(page.text(), /22.5kg/)
 })
 
 test('custom creation permits unknown metadata with inline notice only and keeps errors in the form', async () => {
-  const p = platform(); let posted, added = 0, denied = true
+  const p = platform(), clock = manualClock(); let posted, added = 0, denied = true
   const page = runtime('../../src/components/CustomExerciseEntry.tsx', {
     '@tarojs/taro': p.module, '../core/request': { errorMessage: e => e.message },
     '../services/exercises': { exerciseApi: { custom: async () => [], createCustom: async body => { posted = body; if (denied) throw new Error('已知冲突，不能添加'); return { exercise_id: 'custom', exercise_name: body.name } } } }
-  })
+  }, clock.globals)
   // This component is normally rendered by either plan page.
   const component = page.exports.default
   page.exports.default = () => component({ onAdd: () => { added++ } })
@@ -119,7 +145,12 @@ test('custom creation permits unknown metadata with inline notice only and keeps
   assert.equal(page.find('custom-exercise-muscles').props.value, '背部、手臂')
   await page.click('create-custom-exercise'); await page.flush(); assert.equal(added, 0); assert.match(page.text(), /已知冲突/)
   denied = false; await page.click('create-custom-exercise'); await page.flush()
-  assert.equal(added, 1); assert.deepEqual(posted.contraindications, []); assert.deepEqual(posted.muscles, ['背部', '手臂']); assert.equal(page.find('custom-exercise-form'), undefined)
+  assert.equal(added, 1); assert.deepEqual(posted.contraindications, []); assert.deepEqual(posted.muscles, ['背部', '手臂'])
+  assert.ok(page.find('exercise-sheet-closing'))
+  clock.advance(260); await page.flush()
+  assert.equal(page.find('exercise-sheet-layer').props.style.display, 'none')
+  assert.equal(page.find('custom-exercise-name').props.value, '')
+  assert.equal(clock.count(), 0)
 })
 
 test('rest duration survives background time, early stop, retry and set-save recovery', () => {
@@ -160,7 +191,7 @@ test('active page captures end time before network and reuses it after failed re
 
 for (const target of ['plan-editor', 'plan-builder']) {
   test(`${target} accepts a private exercise and submits its ID without auto-confirming a proposal`, async () => {
-    const p = platform(); const sent = []
+    const p = platform(), clock = manualClock(); const sent = []
     const original = { exercise_id: 'e', exercise_name: '公共动作', category: '力量', day_of_week: 1, sets: 2, reps: '8', rest_seconds: 90, order_index: 0 }
     const preview = { name: '训练计划', goal: 'general_fitness', duration_weeks: 4, days_per_week: 1, session_duration_min: 45, exercises: [original], exercise_options: [{ ...original, difficulty: '初级', equipment: [] }], rationale: [], safety_notes: [] }
     const context = { proposals_enabled: true, active_session: false, base_plan_fingerprint: 'a'.repeat(64), base_plan: { ...preview, training_days: [1], exercises: [{ ...original, item_key: 'planned:original', recommended_weight_kg: null }] }, exercise_options: preview.exercise_options }
@@ -172,13 +203,16 @@ for (const target of ['plan-editor', 'plan-builder']) {
       '../../services/workouts': { workoutApi: { previewPersonalizedPlan: async () => preview, confirmPersonalizedPlan: async data => { sent.push(data); return plan } } },
       '../../services/plan-management': { planManagementApi: { editContext: async () => context, createAdjustment: async (_id, _fp, data) => { sent.push(data); return { id: 'proposal' } } } },
       '../services/exercises': { exerciseApi: { custom: async () => [], createCustom: async () => ({ exercise_id: 'private', exercise_name: '全新自定义动作', category: '力量', difficulty: '未知', equipment: [], safety_notice: '本平台仅提供记录与计划管理，请自行核对动作方法、训练负荷及身体适用性；如有疑问，请咨询专业人士。' }) } }
-    })
+    }, clock.globals)
     page.render(); p.hooks.load({ id: 'p' }); await page.flush()
     await page.click('open-custom-exercise'); await page.flush()
     page.input('custom-exercise-name', '全新自定义动作'); page.input('custom-exercise-description', '方法'); await page.flush()
     await page.click('create-custom-exercise'); await page.flush()
     assert.equal(sent.length, 0)
-    assert.equal(page.find('custom-exercise-form'), undefined)
+    assert.ok(page.find('exercise-sheet-closing'))
+    clock.advance(260); await page.flush()
+    assert.equal(page.find('exercise-sheet-layer').props.style.display, 'none')
+    assert.equal(clock.count(), 0)
     assert.ok(page.find('custom-safety-notice'))
     await page.click(target === 'plan-editor' ? 'save-proposal' : 'save-button')
     assert.equal(sent.length, 1)

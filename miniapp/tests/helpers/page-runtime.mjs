@@ -41,7 +41,7 @@ export function runtime (relative, overrides = {}, globals = {}) {
       jsx: (type, props, key) => ({ type, props, key }),
       jsxs: (type, props, key) => ({ type, props, key })
     },
-    '@tarojs/components': Object.fromEntries(['View', 'Text', 'Button', 'Input', 'Picker', 'Textarea', 'ScrollView'].map(x => [x, x])),
+    '@tarojs/components': Object.fromEntries(['View', 'Text', 'Button', 'Input', 'Picker', 'Textarea', 'ScrollView', 'PageMeta', 'RootPortal', 'NavigationBar'].map(x => [x, x])),
     '@tarojs/taro': {
       __esModule: true,
       default: { pageScrollTo: async () => {}, showToast: async () => {}, nextTick: callback => { queueMicrotask(callback) } },

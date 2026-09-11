@@ -141,7 +141,8 @@
   font-size: 20px;
 }
 
-.rest-bar {
+.rest-bar,
+.rest-exit-feedback {
   position: fixed;
   z-index: 10;
   right: 20px;
@@ -505,3 +506,28 @@
 .early-end-card { padding: 20px; margin-bottom: 22px; }
 .rest-actions button { font-size: 22px; padding: 0 14px; }
 .custom-safety-notice { display: block; font-size: 24px; color: #637168; line-height: 1.65; margin-top: 10px; }
+
+.micro-motion-enabled .set-row { transition: background-color 180ms ease-out; }
+.set-row.is-just-saved { background: #eef6e9; }
+.micro-motion-enabled .rest-entering { animation: rest-enter 240ms cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.rest-exit-feedback {
+  padding: 18px 22px;
+  color: #173226;
+  font-size: 25px;
+  pointer-events: none;
+  animation: rest-exit 180ms ease-out both;
+}
+.micro-motion-static .rest-progress { transition: none; }
+@keyframes rest-enter {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes rest-exit {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(8px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .micro-motion-enabled .set-row, .rest-progress { transition: none; }
+  .micro-motion-enabled .rest-entering { animation: none; }
+  .rest-exit-feedback { display: none; animation: none; }
+}

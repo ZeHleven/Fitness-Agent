@@ -20,7 +20,7 @@ for (const status of ['pending_confirmation', 'applied', 'rejected', 'expired', 
     page.render(); show(); await page.flush()
     await page.click('adaptive-proposal-link')
     assert.deepEqual(navigations, [{ url: '/pages/plan-proposal-detail/index?id=p' }])
-    assert.match(page.text(), status === 'pending_confirmation' ? /查看调整提案/ : /查看提案结果/)
+    assert.match(page.text(), status === 'pending_confirmation' ? /调整提案/ : /提案结果/)
     current = 'applied'; show(); await page.flush(); assert.match(page.text(), /已应用/)
     failed = true; show(); await page.flush()
     assert.ok(page.find('history-card')); assert.ok(page.find('history-retry'))

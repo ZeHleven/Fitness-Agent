@@ -7,6 +7,7 @@ import { nextTrainingDay } from '../../core/workout-schedule'
 import { profileApi } from '../../services/profile'
 import { workoutApi } from '../../services/workouts'
 import CustomExerciseEntry from '../../components/CustomExerciseEntry'
+import PlanPageMeta from '../../components/PlanPageMeta'
 import type { PersonalizedExerciseOption } from '../../types/api'
 import type {
   PersonalizedPlanExercise,
@@ -24,6 +25,7 @@ export default function PlanBuilderPage () {
   const [generating, setGenerating] = useState(false)
   const [savingMode, setSavingMode] = useState<'save' | 'start' | ''>('')
   const [error, setError] = useState('')
+  const [sheetOpen, setSheetOpen] = useState(false)
   const busy = useRef(false)
   const daysPerWeek = trainingDays.length
   const needsRegeneration = Boolean(preview && (
@@ -207,10 +209,11 @@ export default function PlanBuilderPage () {
     }
   }
 
-  if (loading) return <View className='loading-state'>正在读取档案并编排训练…</View>
+  if (loading) return <View className='loading-state'><PlanPageMeta title='我的训练计划' /><Text>正在读取档案并编排训练…</Text></View>
 
   return (
     <View className='page plan-builder-page'>
+      <PlanPageMeta title='我的训练计划' scrollLocked={sheetOpen} />
       <View className='builder-heading'>
         <Text className='builder-kicker'>你的首份个性化方案</Text>
         <Text className='builder-title'>{(preview && preview.name) || '训练计划'}</Text>
@@ -331,7 +334,7 @@ export default function PlanBuilderPage () {
                 </View>
               ))}
               <Picker range={preview.exercise_options.map(item => item.exercise_name)} onChange={event => addExercise(day, preview.exercise_options[Number(event.detail.value)])}><View className='replace-action'>＋ 添加已筛选动作</View></Picker>
-              <CustomExerciseEntry disabled={Boolean(savingMode) || generating} onAdd={option => addExercise(day, option)} />
+              <CustomExerciseEntry dayLabel={`周${weekday(day)}`} onOpenChange={setSheetOpen} disabled={Boolean(savingMode) || generating} onAdd={option => addExercise(day, option)} />
             </View>
           ))}
 

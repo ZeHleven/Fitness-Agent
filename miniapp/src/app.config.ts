@@ -1,3 +1,5 @@
+import { navigationTheme } from './core/navigation-theme'
+
 export default defineAppConfig({
   pages: [
     'pages/index/index',
@@ -35,8 +37,8 @@ export default defineAppConfig({
   window: {
     backgroundTextStyle: 'dark',
     backgroundColor: '#f5f7f2',
-    navigationBarBackgroundColor: '#163d2b',
+    navigationBarBackgroundColor: navigationTheme.backgroundColor,
     navigationBarTitleText: '训练搭子',
-    navigationBarTextStyle: 'white'
+    navigationBarTextStyle: navigationTheme.textStyle
   }
 })
