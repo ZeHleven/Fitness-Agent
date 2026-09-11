@@ -3,6 +3,7 @@ import { Button, Text, View } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
 
 import { errorMessage } from '../../core/request'
+import { historyExerciseSummary, proposalStatusLabel, workoutClock } from '../../core/workout-presentation'
 import { workoutApi } from '../../services/workouts'
 import type { WorkoutProgress, WorkoutSession } from '../../types/api'
 import './index.scss'
@@ -107,6 +108,8 @@ export default function HistoryPage () {
       )}
 
       {shownHistory.map(session => {
+        const summary = historyExerciseSummary(session)
+        const time = workoutClock(session.started_at)
         const records = session.exercises.reduce(
           (total, exercise) => total + exercise.sets_data.filter(set => set.is_personal_record).length,
           0
@@ -116,31 +119,27 @@ export default function HistoryPage () {
             <View className='history-card-heading'>
               <View>
                 <Text className='history-plan'>{session.plan_name || '自由训练'}</Text>
-                <Text className='history-date'>{formatDate(session.trained_at)}</Text>
-                {session.status === 'ended_early' && <Text className='history-date'>提前结束 · 已保留实际训练</Text>}
+                <Text className='history-date'>{session.trained_at}{time ? ` · ${time}` : ''} · {session.status === 'ended_early' ? '提前结束' : '已完成'}</Text>
               </View>
               <View className='history-tags'>
-                {records > 0 && <Text className='record-tag'>🏆 {records} 个纪录</Text>}
-                {session.adjustments.length > 0 && (
-                  <Text className='adjusted-tag'>{adaptiveStatusLabel(session)}</Text>
-                )}
+                {records > 0 && <Text className='record-tag'>{records} 项新纪录</Text>}
               </View>
             </View>
             <View className='session-metrics'>
               <Text>{session.duration_min || 0} 分钟</Text>
-              <Text>{session.total_sets} 组</Text>
-              <Text>{session.total_reps} 次</Text>
+              <Text>{session.total_sets} 组 · {session.total_reps} 次</Text>
               <Text>{Math.round(session.total_volume_kg)} kg</Text>
             </View>
             <View className='exercise-list'>
-              {session.exercises.map(exercise => (
+              {summary.shown.map(exercise => (
                 <View className='exercise-line' key={exercise.id}>
                   <Text>{exercise.exercise_name || '未命名动作'}</Text>
-                  <Text className='muted'>{exercise.sets_data.length} 组</Text>
+                  <Text className='muted'>{exercise.sets_data.length} 组 · {Math.round(exercise.sets_data.reduce((sum, set) => sum + set.reps * (set.weight_kg || 0), 0))} kg</Text>
                 </View>
               ))}
             </View>
-            {session.adjustments.length > 0 && (
+            <Text className='history-summary-count'>{summary.label}</Text>
+            {session.adjustments.length > 0 && !session.adaptive_adjustment_proposal && (
               <View className='history-adjustments'>
                 <Text className='history-adjustment-title'>下一练建议 · {adaptiveStatusLabel(session)}</Text>
                 {session.adjustments.slice(0, 3).map((item, index) => (
@@ -150,17 +149,19 @@ export default function HistoryPage () {
                 ))}
               </View>
             )}
+            <View className='history-card-actions'>
+            <Button className='workout-detail-link' onClick={() => Taro.navigateTo({ url: `/pages/workout-detail/index?id=${encodeURIComponent(session.id)}` })}>查看本次训练</Button>
             {session.adaptive_adjustment_proposal && (
               <Button
-                className='secondary-button adaptive-proposal-link'
+                className={`adaptive-proposal-link ${session.adaptive_adjustment_status === 'pending_confirmation' ? 'proposal-pending' : ''}`}
                 onClick={() => Taro.navigateTo({
                   url: `/pages/plan-proposal-detail/index?id=${encodeURIComponent(session.adaptive_adjustment_proposal!.id)}`
                 })}
               >
-                {session.adaptive_adjustment_status === 'pending_confirmation' ? '查看调整提案' : '查看提案结果'}
+                <Text>{session.adaptive_adjustment_status === 'pending_confirmation' ? '调整提案' : '提案结果'}</Text><Text className='history-proposal-status'>{proposalStatusLabel(session)}</Text>
               </Button>
             )}
-            <Button className='secondary-button workout-detail-link' onClick={() => Taro.navigateTo({ url: `/pages/workout-detail/index?id=${encodeURIComponent(session.id)}` })}>查看本次训练</Button>
+            </View>
           </View>
         )
       })}
@@ -180,11 +181,6 @@ function Summary ({ value, label }: { value: number, label: string }) {
 function shortDate (value: string): string {
   const [, month, day] = value.split('-')
   return `${Number(month)}/${Number(day)}`
-}
-
-function formatDate (value: string): string {
-  const [year, month, day] = value.split('-')
-  return `${year}年${Number(month)}月${Number(day)}日`
 }
 
 function adaptiveStatusLabel (session: WorkoutSession): string {

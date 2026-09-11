@@ -124,7 +124,7 @@ test('workout detail shows per-set actual and unknown rest without any writes', 
   })
   page.render(); p.hooks.load({ id: 's' }); await page.flush()
   assert.equal(reads, 1); assert.equal(page.findAll('detail-set').length, 2)
-  assert.match(page.text(), /17 秒/); assert.match(page.text(), /未记录/); assert.match(page.text(), /22.5 kg/)
+  assert.match(page.text(), /组间歇17秒/); assert.match(page.text(), /组间歇未记录/); assert.match(page.text(), /22.5kg/)
 })
 
 test('custom creation permits unknown metadata with inline notice only and keeps errors in the form', async () => {
