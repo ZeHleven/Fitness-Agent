@@ -72,3 +72,17 @@ test('archive delete uses the delete-plan danger palette without changing chip g
     assert.equal(label[key], undefined, `delete color must not override shared ${key}`)
   }
 })
+
+test('exercise sheet reuses the app palette and isolates scrolling between fixed controls', () => {
+  const file = '../src/components/custom-exercise.scss', app = '../src/app.scss'
+  const panel = declarations(file, '.exercise-sheet-panel')
+  assert.equal(panel.background, declarations(app, 'page').background)
+  assert.equal(panel.color, declarations(app, 'page').color)
+  assert.equal(panel['border-radius'], '28px 28px 0 0')
+  assert.equal(panel.overflow, 'hidden')
+  assert.equal(declarations(file, '.exercise-sheet-scroll')['min-height'], '0')
+  for (const cls of ['.exercise-sheet-header', '.exercise-sheet-footer']) assert.equal(declarations(file, cls)['flex-shrink'], '0')
+  assert.equal(declarations(file, '.exercise-sheet-panel .custom-exercise-input').background, declarations(app, '.card').background)
+  assert.match(panel.transition, /^transform /, 'do not animate layout height or all properties')
+  assert.match(declarations(file, '.exercise-sheet-backdrop').transition, /^opacity /)
+})

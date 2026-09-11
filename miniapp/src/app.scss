@@ -1,7 +1,9 @@
+@use './styles/theme' as theme;
+
 page {
   min-height: 100%;
-  background: #f5f7f2;
-  color: #173226;
+  background: theme.$canvas;
+  color: theme.$text;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
 
@@ -18,10 +20,10 @@ button::after {
 .card {
   margin-bottom: 24px;
   padding: 28px;
-  border: 1px solid #e0e8df;
+  border: 1px solid theme.$border;
   border-radius: 28px;
-  background: #ffffff;
-  box-shadow: 0 8px 30px rgba(28, 65, 47, 0.06);
+  background: theme.$surface;
+  box-shadow: 0 8px 30px rgba(theme.$shadow, 0.06);
 }
 
 .primary-button,
@@ -38,18 +40,18 @@ button::after {
 }
 
 .primary-button {
-  background: #1d6b49;
-  color: #ffffff;
+  background: theme.$primary;
+  color: theme.$surface;
 }
 
 .secondary-button {
-  background: #e6f1e9;
-  color: #1d6b49;
+  background: theme.$secondary;
+  color: theme.$primary;
 }
 
 .danger-button {
-  background: #fff0ed;
-  color: #9d382b;
+  background: theme.$danger-surface;
+  color: theme.$danger;
 }
 
 .primary-button[disabled],
@@ -59,26 +61,26 @@ button::after {
 }
 
 .muted {
-  color: #6c7c72;
+  color: theme.$muted;
 }
 
 .error-banner {
   margin-bottom: 22px;
   padding: 20px 24px;
   border-radius: 18px;
-  background: #fff0ed;
-  color: #9d382b;
+  background: theme.$danger-surface;
+  color: theme.$danger;
   font-size: 26px;
 }
 
 .empty-state {
   padding: 80px 30px;
   text-align: center;
-  color: #6c7c72;
+  color: theme.$muted;
 }
 
 .loading-state {
   padding: 120px 30px;
   text-align: center;
-  color: #6c7c72;
+  color: theme.$muted;
 }
