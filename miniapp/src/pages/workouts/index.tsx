@@ -1,6 +1,10 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { capsuleNavigation } from '../../core/capsule-platform'
 import { Button, Text, View } from '@tarojs/components'
-import Taro, { useDidShow } from '@tarojs/taro'
+import EdgeScrollView from '../../components/EdgeScrollView'
+import Taro, { useDidHide, useDidShow } from '@tarojs/taro'
+import { peekCached, readCached } from '../../core/read-cache'
+import LoadingFeedback from '../../components/LoadingFeedback'
 
 import { errorMessage } from '../../core/request'
 import { workoutApi } from '../../services/workouts'
@@ -13,9 +17,11 @@ import './index.scss'
 const dayLabel = (day: number) => ['一', '二', '三', '四', '五', '六', '日'][day - 1] || day
 
 export default function WorkoutsPage () {
-  const [plans, setPlans] = useState<WorkoutPlan[]>([])
-  const [active, setActive] = useState<WorkoutSession | null>(null)
-  const [progress, setProgress] = useState<WorkoutProgress | null>(null)
+  const [plans, setPlans] = useState<WorkoutPlan[]>(() => peekCached<WorkoutPlan[]>('plans') || [])
+  const [active, setActive] = useState<WorkoutSession | null>(() => peekCached<WorkoutSession | null>('active') || null)
+  const [progress, setProgress] = useState<WorkoutProgress | null>(() => peekCached<WorkoutProgress>('progress:8') || null)
+  const [loaded, setLoaded] = useState(() => peekCached('plans') !== undefined && peekCached('progress:8') !== undefined)
+  const [visible, setVisible] = useState(true)
   const [loading, setLoading] = useState(true)
   const [startingKey, setStartingKey] = useState('')
   const [deletingPlanId, setDeletingPlanId] = useState('')
@@ -24,25 +30,33 @@ export default function WorkoutsPage () {
   const busy = useRef(false)
   const generation = useRef(0)
 
-  const load = async () => {
+  const load = async (force = true) => {
     const ticket = ++generation.current
     setLoading(true)
     setError('')
     try {
-      const userProfile = await profileApi.get()
+      // Start independent reads together, but still gate display on onboarding.
+      // Capture both outcomes so an early profile redirect cannot leak a rejection.
+      const profileRead = readCached('profile', profileApi.get, force)
+      const trainingRead = Promise.all([
+        readCached('plans', workoutApi.plans, force),
+        readCached('active', workoutApi.active, force),
+        readCached('progress:8', workoutApi.progress, force)
+      ]).then(data => ({ data, error: null }), error => ({ data: null, error }))
+      const userProfile = await profileRead
+      if (ticket !== generation.current) return
       if (!userProfile.onboarding_completed) {
         await Taro.reLaunch({ url: '/pages/onboarding/index' })
         return
       }
-      const [planData, activeData, progressData] = await Promise.all([
-        workoutApi.plans(),
-        workoutApi.active(),
-        workoutApi.progress()
-      ])
+      const result = await trainingRead
+      if (result.error) throw result.error
+      const [planData, activeData, progressData] = result.data!
       if (ticket !== generation.current) return
       setPlans(planData)
       setActive(activeData)
       setProgress(progressData)
+      setLoaded(true)
     } catch (requestError) {
       if (ticket === generation.current) setError(errorMessage(requestError, '训练数据加载失败'))
     } finally {
@@ -51,8 +65,11 @@ export default function WorkoutsPage () {
   }
 
   useDidShow(() => {
-    void load()
+    capsuleNavigation.show(0)
+    setVisible(true); void load(false)
   })
+  useDidHide(() => { setVisible(false); generation.current++ })
+  useEffect(() => () => { generation.current++ }, [])
 
   const start = async (planId: string, day: number) => {
     if (busy.current) return
@@ -116,6 +133,7 @@ export default function WorkoutsPage () {
   }
 
   return (
+    <EdgeScrollView className='workouts-scroll' contentSelector='.workouts-page' visible={visible} scrollY>
     <View className='page workouts-page'>
       <View className='page-heading'>
         <View>
@@ -124,7 +142,7 @@ export default function WorkoutsPage () {
         </View>
       </View>
 
-      {error && <View className='error-banner'>{error}</View>}
+      {error && <View className='error-banner'>{error}<Button className='secondary-button workouts-retry' onClick={() => load()}>重新加载</Button></View>}
 
       <View
         className='agent-entry card'
@@ -164,8 +182,8 @@ export default function WorkoutsPage () {
       )}
 
       <Text className='section-heading'>我的计划</Text>
-      {loading && <View className='loading-state'>正在加载训练计划…</View>}
-      {!loading && !activePlan && (
+      <LoadingFeedback loading={loading} hasContent={loaded} visible={visible} text='正在加载训练计划…' refreshingText='正在更新训练计划…' />
+      {loaded && !activePlan && (
         <View className='card empty-state plan-empty'>
           <Text>当前没有活动训练计划，先生成一份个性化计划再开始记录。</Text>
           <Button
@@ -176,7 +194,7 @@ export default function WorkoutsPage () {
           </Button>
         </View>
       )}
-      {!loading && plans.map(plan => {
+      {plans.map(plan => {
         const days = [...new Set(plan.exercises.map(item => item.day_of_week))].sort()
         return (
           <View className='plan-card card' key={plan.id}>
@@ -285,6 +303,7 @@ export default function WorkoutsPage () {
         )
       })}
     </View>
+    </EdgeScrollView>
   )
 }
 

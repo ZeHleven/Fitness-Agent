@@ -1,4 +1,5 @@
 import { apiRequest } from '../core/request'
+import { invalidateReadCache } from '../core/read-cache'
 import type {
   AgentArtifactAction,
   AgentClarificationAction,
@@ -29,7 +30,12 @@ export const agentApi = {
       }
     }
   ),
-  run: (runId: string) => apiRequest<AgentRunStatus>(`/agent/runs/${runId}`),
+  run: async (runId: string) => {
+    const result = await apiRequest<AgentRunStatus>(`/agent/runs/${runId}`)
+    // A conversation can confirm a proposal asynchronously after submission.
+    if (result.status === 'completed' || result.status === 'failed') invalidateReadCache()
+    return result
+  },
   messages: (conversationId: string) => apiRequest<AgentMessage[]>(
     `/agent/conversations/${conversationId}/messages`,
     { query: { limit: 100 } }

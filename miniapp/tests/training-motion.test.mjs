@@ -157,7 +157,7 @@ for (const offline of [false, true]) {
   test(`profile does not expose or access the removed motion setting (offline=${offline})`, async () => {
     const hooks = {}; let reads = 0, storageReads = 0, storageWrites = 0
     const page = interactionRuntime('../../src/pages/me/index.tsx', {
-      '@tarojs/taro': { __esModule: true, useDidShow: fn => { hooks.show = fn }, default: {
+      '@tarojs/taro': { __esModule: true, useDidShow: fn => { hooks.show = fn }, useDidHide: fn => { hooks.hide = fn }, default: {
         getStorageSync: () => { storageReads++; return true }, setStorageSync: () => { storageWrites++ } } },
       '../../core/request': { errorMessage: e => e.message },
       '../../services/profile': { profileApi: { get: async () => { reads++; if (offline) throw new Error('断网'); return { injuries: [], chronic_conditions: [], weight_kg: 70 } }, weightHistory: async () => [] } }

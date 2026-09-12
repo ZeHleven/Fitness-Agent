@@ -7,7 +7,7 @@ for (const status of ['pending_confirmation', 'applied', 'rejected', 'expired', 
     let current = status, failed = false, show
     const navigations = []
     const page = runtime('../../src/pages/history/index.tsx', {
-      '@tarojs/taro': { __esModule: true, useDidShow: fn => { show = fn }, default: { navigateTo: async value => { navigations.push(value) } } },
+      '@tarojs/taro': { __esModule: true, useDidShow: fn => { show = fn }, useDidHide: () => {}, default: { navigateTo: async value => { navigations.push(value) } } },
       '../../services/workouts': { workoutApi: {
         history: async () => {
           if (failed) throw new Error('刷新失败')
@@ -21,8 +21,13 @@ for (const status of ['pending_confirmation', 'applied', 'rejected', 'expired', 
     await page.click('adaptive-proposal-link')
     assert.deepEqual(navigations, [{ url: '/pages/plan-proposal-detail/index?id=p' }])
     assert.match(page.text(), status === 'pending_confirmation' ? /调整提案/ : /提案结果/)
-    current = 'applied'; show(); await page.flush(); assert.match(page.text(), /已应用/)
-    failed = true; show(); await page.flush()
+    current = 'applied'
+    // The service is substituted here; real proposal writes invalidate in apiRequest.
+    page.loadSource('../../src/core/read-cache.ts').invalidateReadCache()
+    show(); await page.flush(); assert.match(page.text(), /已应用/)
+    failed = true
+    page.loadSource('../../src/core/read-cache.ts').invalidateReadCache()
+    show(); await page.flush()
     assert.ok(page.find('history-card')); assert.ok(page.find('history-retry'))
   })
 }

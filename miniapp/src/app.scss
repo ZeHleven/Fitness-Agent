@@ -1,4 +1,10 @@
 @use './styles/theme' as theme;
+@use './styles/capsule-layout' as capsule;
+
+// Custom tabBar overlays the viewport; reserve its capsule and native safe area.
+.page.me-page {
+  padding-bottom: calc(#{capsule.$reserved} + env(safe-area-inset-bottom));
+}
 
 page {
   min-height: 100%;

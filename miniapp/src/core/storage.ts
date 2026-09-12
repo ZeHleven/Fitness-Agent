@@ -1,4 +1,5 @@
 import Taro from '@tarojs/taro'
+import { resetReadCacheSession } from './read-cache'
 
 import { isPendingProposalDecision } from './proposal-interaction'
 import type { PendingPlanAdjustmentProposalDecision } from '../types/plan-adjustment-proposal'
@@ -54,12 +55,14 @@ export function getRefreshToken(): string {
   return Taro.getStorageSync<string>(REFRESH_TOKEN_KEY) || ''
 }
 
-export function saveTokens(accessToken: string, refreshToken: string): void {
+export function saveTokens(accessToken: string, refreshToken: string, renewal = false): void {
+  if (!renewal) resetReadCacheSession()
   Taro.setStorageSync(ACCESS_TOKEN_KEY, accessToken)
   Taro.setStorageSync(REFRESH_TOKEN_KEY, refreshToken)
 }
 
 export function clearTokens(): void {
+  resetReadCacheSession()
   Taro.removeStorageSync(ACCESS_TOKEN_KEY)
   Taro.removeStorageSync(REFRESH_TOKEN_KEY)
   Taro.removeStorageSync(AGENT_CONVERSATION_KEY)

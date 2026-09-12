@@ -1,6 +1,9 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { capsuleNavigation } from '../../core/capsule-platform'
 import { Button, Text, View } from '@tarojs/components'
-import Taro, { useDidShow } from '@tarojs/taro'
+import Taro, { useDidHide, useDidShow } from '@tarojs/taro'
+import { peekCached, readCached } from '../../core/read-cache'
+import LoadingFeedback from '../../components/LoadingFeedback'
 
 import { errorMessage } from '../../core/request'
 import { clearTokens } from '../../core/storage'
@@ -9,29 +12,38 @@ import type { UserProfile, WeightLog } from '../../types/api'
 import './index.scss'
 
 export default function MePage () {
-  const [profile, setProfile] = useState<UserProfile | null>(null)
-  const [weights, setWeights] = useState<WeightLog[]>([])
+  // A profile may have been cached by the training tab before weights were read.
+  // Only restore a complete summary; missing weight history must not look like zero.
+  const [profile, setProfile] = useState<UserProfile | null>(() =>
+    peekCached<WeightLog[]>('weights') === undefined ? null : peekCached<UserProfile>('profile') || null)
+  const [weights, setWeights] = useState<WeightLog[]>(() => peekCached<WeightLog[]>('weights') || [])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [visible, setVisible] = useState(true)
+  const generation = useRef(0)
 
-  const load = async () => {
+  const load = async (force = true) => {
+    const ticket = ++generation.current
     setLoading(true)
     setError('')
     try {
       const [nextProfile, nextWeights] = await Promise.all([
-        profileApi.get(),
-        profileApi.weightHistory()
+        readCached('profile', profileApi.get, force),
+        readCached('weights', profileApi.weightHistory, force)
       ])
+      if (ticket !== generation.current) return
       setProfile(nextProfile)
       setWeights(nextWeights)
     } catch (requestError) {
-      setError(errorMessage(requestError, '个人资料加载失败'))
+      if (ticket === generation.current) setError(errorMessage(requestError, '个人资料加载失败'))
     } finally {
-      setLoading(false)
+      if (ticket === generation.current) setLoading(false)
     }
   }
 
-  useDidShow(() => { void load() })
+  useDidShow(() => { capsuleNavigation.show(3); setVisible(true); void load(false) })
+  useDidHide(() => { setVisible(false); generation.current++ })
+  useEffect(() => () => { generation.current++ }, [])
 
   const logout = async () => {
     const result = await Taro.showModal({
@@ -47,9 +59,9 @@ export default function MePage () {
     <View className='page me-page'>
       <Text className='me-eyebrow'>训练资料中心</Text>
       <Text className='me-title'>我的</Text>
-      {error && <View className='error-banner'>{error}</View>}
-      {loading && <View className='loading-state'>正在加载个人资料…</View>}
-      {!loading && profile && (
+      {error && <View className='error-banner'>{error}<Button className='secondary-button me-retry' onClick={() => load()}>重新加载</Button></View>}
+      <LoadingFeedback loading={loading} hasContent={Boolean(profile)} visible={visible} text='正在加载个人资料…' refreshingText='正在更新个人资料…' />
+      {profile && (
         <>
           <View className='card profile-summary'>
             <View className='profile-mark'>我</View>

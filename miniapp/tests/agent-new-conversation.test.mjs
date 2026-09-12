@@ -98,6 +98,9 @@ function createPage ({ savedId = 'old-conversation', pending = null, api = {}, c
       useDidHide: callback => { onHide = callback }
     },
     '../../core/build-info': { miniappBuildLabel: () => 'test-build' },
+    // Native navigation is outside this conversation-I/O harness; its real controller
+    // and platform integration are covered by capsule-navigation tests and H5 QA.
+    '../../core/capsule-platform': {capsuleNavigation:{show:()=>{},keyboard:()=>{}},useCapsuleState:()=>({keyboard:false})},
     '../../components/AgentMessageContent': messageComponent,
     '../../core/proposal-reference': { proposalReferenceFromUnknown: () => null },
     '../../core/proposal-interaction': {},

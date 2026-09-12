@@ -1,5 +1,8 @@
-.workouts-page {
-  padding-bottom: 60px;
+@use '../../styles/capsule-layout' as capsule;
+.workouts-scroll { @include capsule.scroll-viewport; }
+.page.workouts-page {
+  min-height: 100%;
+  padding-bottom: 28px;
 }
 
 .page-heading,

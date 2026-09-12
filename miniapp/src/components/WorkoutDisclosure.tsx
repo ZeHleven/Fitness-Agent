@@ -13,9 +13,10 @@ interface Props {
   layoutVersion: number
   contentKey: unknown
   children: ReactNode
+  headerOnly?: boolean
 }
 
-export default function WorkoutDisclosure ({ title, summary, className = '', visible, layoutVersion, contentKey, children }: Props) {
+export default function WorkoutDisclosure ({ title, summary, className = '', visible, layoutVersion, contentKey, children, headerOnly = false }: Props) {
   const [id] = useState(() => `workout-disclosure-${++nextId}`)
   const [state, setState] = useState<DisclosureSnapshot>({ expanded: false, height: 0, opacity: 0, duration: 350 })
   const controller = useRef<ReturnType<typeof createWorkoutDisclosure> | null>(null)
@@ -49,10 +50,13 @@ export default function WorkoutDisclosure ({ title, summary, className = '', vis
     const touch = event.touches?.[0], start = origin.current
     if (touch && start && (Math.abs(touch.clientX - start.x) > 8 || Math.abs(touch.clientY - start.y) > 8)) dragged.current = true
   }
-  return <View className={`workout-disclosure ${className}`} ariaRole='button' ariaLabel={`${title}，${summary}，${state.expanded ? '已展开' : '已收起'}`}
-    onTouchStart={touchStart} onTouchMove={touchMove} onTouchCancel={() => { dragged.current = true }}
-    onClick={() => { if (!dragged.current) scope.toggle() }}>
-    <View className='workout-disclosure-heading'>
+  const trigger = {
+    ariaRole: 'button' as const, ariaLabel: `${title}，${summary}，${state.expanded ? '已展开' : '已收起'}`,
+    onTouchStart: touchStart, onTouchMove: touchMove, onTouchCancel: () => { dragged.current = true },
+    onClick: () => { if (!dragged.current) scope.toggle() }
+  }
+  return <View className={`workout-disclosure ${className}`} {...(headerOnly ? {} : trigger)}>
+    <View className='workout-disclosure-heading' {...(headerOnly ? trigger : {})}>
       <Text className='workout-disclosure-title'>{title}</Text><Text className='workout-disclosure-summary'>{summary}</Text>
     </View>
     <View className='workout-disclosure-body' aria-hidden={!state.expanded} style={{ height: state.height === 'auto' ? 'auto' : `${state.height}px`, opacity: state.opacity, transitionDuration: `${state.duration}ms`, pointerEvents: state.expanded ? 'auto' : 'none' }}>

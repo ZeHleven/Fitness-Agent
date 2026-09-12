@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { capsuleNavigation, useCapsuleState } from '../../core/capsule-platform'
 import { Button, ScrollView, Text, Textarea, View } from '@tarojs/components'
 import Taro, { useDidHide, useDidShow, useLoad } from '@tarojs/taro'
 
@@ -76,6 +77,7 @@ function createClientRequestId (): string {
 
 
 export default function AgentPage () {
+  const capsuleState = useCapsuleState()
   const [messages, setMessages] = useState<DisplayMessage[]>([welcomeMessage])
   const [conversationId, setConversationId] = useState('')
   const [input, setInput] = useState('')
@@ -145,7 +147,7 @@ export default function AgentPage () {
   }
 
   useLoad(() => { void enterPage() })
-  useDidShow(() => { void enterPage() })
+  useDidShow(() => { capsuleNavigation.show(2); void enterPage() })
   useDidHide(() => {
     visible.current = false
     pollGeneration.current += 1
@@ -472,7 +474,7 @@ export default function AgentPage () {
         <View className='scroll-spacer' />
       </ScrollView>
 
-      <View className='composer'>
+      <View className={`composer ${capsuleState.keyboard ? 'composer-keyboard' : ''}`}>
         <Textarea
           className='composer-input'
           value={input}
@@ -481,6 +483,8 @@ export default function AgentPage () {
           placeholder='问训练、健康、体重、饮食或让搭子制定方案…'
           disabled={sending || loading}
           onInput={event => setInput(event.detail.value)}
+          onFocus={() => capsuleNavigation.keyboard(1)}
+          onBlur={() => capsuleNavigation.keyboard(0)}
         />
         <Button
           className='send-button'

@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
+import { capsuleNavigation } from '../../core/capsule-platform'
 import { trainingTimeLabel } from '../../core/exercise-energy'
 import { Button, Input, Picker, Text, View } from '@tarojs/components'
-import Taro, { useDidShow } from '@tarojs/taro'
+import EdgeScrollView from '../../components/EdgeScrollView'
+import Taro, { useDidHide, useDidShow } from '@tarojs/taro'
+import { peekCached, readCached, readCacheDay } from '../../core/read-cache'
+import LoadingFeedback from '../../components/LoadingFeedback'
 import { errorMessage } from '../../core/request'
 import { changeMealAmount, changeMealNutrition, existingMealDraft, foodMealDraft, mealDraftCandidate, nutrientKeys, nutrientLimit, parseMealNumber } from '../../core/meal-draft'
 import type { MealDraftItem, NutrientKey } from '../../core/meal-draft'
@@ -17,8 +21,22 @@ type EditorAction = { kind: 'new' | 'close' } | { kind: 'edit', meal: MealLog }
 type CustomAction = { kind: 'clear' } | { kind: 'edit', food: Food }
 
 export default function NutritionPage () {
-  const [today, setToday] = useState<DailyNutritionSummary | null>(null)
-  const [history, setHistory] = useState<DailyNutritionSummary[]>([])
+  const [scrollTarget, setScrollTarget] = useState('')
+  const scrollRequest = useRef(0)
+  const scrollToSection = (selector: string) => {
+    const request = ++scrollRequest.current
+    setScrollTarget('')
+    try {
+      Taro.nextTick(() => {
+        if (request === scrollRequest.current) setScrollTarget(selector.replace(/^\./, ''))
+      })
+    } catch { /* Positioning is optional; never discard or save the meal draft. */ }
+  }
+  const scrollToMealEditor = () => scrollToSection('.meal-editor')
+  const [today, setToday] = useState<DailyNutritionSummary | null>(() => peekCached<DailyNutritionSummary>('nutrition-today') || null)
+  const [history, setHistory] = useState<DailyNutritionSummary[]>(() => peekCached<DailyNutritionSummary[]>('nutrition-history') || [])
+  const [visible, setVisible] = useState(true)
+  const shownDay = useRef(readCacheDay())
   const [foods, setFoods] = useState<Food[]>([])
   const [search, setSearch] = useState('')
   const [portion, setPortion] = useState('100')
@@ -61,29 +79,43 @@ export default function NutritionPage () {
   const dirty = editorOpen && signature(items, loggedAt, mealType, custom) !== editorSeed.current
   const nextKey = () => `meal-item-${++itemSequence.current}`
 
-  const refreshToday = async () => {
+  const refreshToday = async (force = true) => {
     const generation = ++todayGeneration.current
+    if (shownDay.current !== readCacheDay()) { shownDay.current = readCacheDay(); setToday(null) }
     setTodayLoading(true); setTodayError('')
     try {
-      const value = await nutritionApi.today()
+      const value = await readCached('nutrition-today', nutritionApi.today, force)
       if (generation === todayGeneration.current) setToday(value)
     } catch (e) {
       if (generation === todayGeneration.current) setTodayError(errorMessage(e, '今日记录加载失败'))
     } finally { if (generation === todayGeneration.current) setTodayLoading(false) }
   }
-  const refreshHistory = async () => {
+  const refreshHistory = async (force = true) => {
     const generation = ++historyGeneration.current
     setHistoryLoading(true); setHistoryError('')
     try {
-      const value = await nutritionApi.history()
+      const value = await readCached('nutrition-history', nutritionApi.history, force)
       if (generation === historyGeneration.current) setHistory(value)
     } catch (e) {
       if (generation === historyGeneration.current) setHistoryError(errorMessage(e, '历史记录加载失败'))
     } finally { if (generation === historyGeneration.current) setHistoryLoading(false) }
   }
-  const load = () => Promise.all([refreshToday(), refreshHistory()])
-  useDidShow(() => { void load() })
+  const load = (force = true) => Promise.all([refreshToday(force), refreshHistory(force)])
+  useDidShow(() => {
+    capsuleNavigation.show(1)
+    setVisible(true)
+    if (shownDay.current !== readCacheDay()) {
+      // Never label yesterday's energy as today's; leave the meal draft untouched.
+      shownDay.current = readCacheDay(); setToday(null)
+    }
+    void load(false)
+  })
+  useDidHide(() => {
+    scrollRequest.current++
+    setVisible(false); todayGeneration.current++; historyGeneration.current++; editorScrollGeneration.current++
+  })
   useEffect(() => () => {
+    scrollRequest.current++
     todayGeneration.current++; historyGeneration.current++; searchGeneration.current++
   }, [])
 
@@ -123,16 +155,16 @@ export default function NutritionPage () {
         // A native rendering/scroll failure must not discard the meal draft.
       }
     }
-    return () => { editorScrollGeneration.current++ }
+    return () => { editorScrollGeneration.current++; scrollRequest.current++ }
   }, [editorOpen, editingMealId, addedFoodRevision])
   useEffect(() => {
     const selector = discardAction ? '.discard-prompt' : deleteTarget ? '.delete-prompt' : error ? '.editor-error' : ''
-    if (selector) void Taro.pageScrollTo({ selector, duration: 200 }).catch(() => {})
+    if (selector) scrollToSection(selector)
   }, [discardAction, deleteTarget, error])
   const requestEditorAction = (action: EditorAction) => {
     if (savingLock.current) return
     if (action.kind === 'edit' && editorOpen && action.meal.id === editingMealId) {
-      void Taro.pageScrollTo({ selector: '.meal-editor', duration: 250 }).catch(() => {})
+      scrollToMealEditor()
       return
     }
     if (dirty) setDiscardAction(action)
@@ -184,7 +216,7 @@ export default function NutritionPage () {
     const basis = food?.basis
     setCustom(basis ? { name: basis.name, amount: String(basis.amount_g), calories: String(basis.calories), protein: String(basis.protein_g), carbs: String(basis.carbs_g), fat: String(basis.fat_g) } : emptyCustom())
     setCustomEditing(food); setCustomAction(null); setCustomOpen(true); customRequest.current = null
-    void Taro.pageScrollTo({ selector: '.custom-form', duration: 250 }).catch(() => {})
+    scrollToSection('.custom-form')
   }
   const requestCustomAction = (action: CustomAction) => {
     if (savingLock.current) return
@@ -269,10 +301,11 @@ export default function NutritionPage () {
   ))
 
   return (
+    <EdgeScrollView className='nutrition-scroll' contentSelector='.nutrition-page' visible={visible} scrollY scrollWithAnimation scrollIntoView={scrollTarget} scrollIntoViewAlignment='start'>
     <View className='page nutrition-page'>
       <Text className='nutrition-eyebrow'>今天吃得怎么样</Text><Text className='nutrition-title'>饮食记录</Text>
-      {todayError && <View className='error-banner'>{todayError}<Button className='secondary-button today-retry' onClick={refreshToday}>重试今日记录</Button></View>}
-      {todayLoading && !today && <View className='loading-state'>正在加载今日饮食…</View>}
+      {todayError && <View className='error-banner'>{todayError}<Button className='secondary-button today-retry' onClick={() => refreshToday()}>重试今日记录</Button></View>}
+      <LoadingFeedback loading={todayLoading} hasContent={Boolean(today)} visible={visible} text='正在加载今日饮食…' refreshingText='正在更新今日饮食…' />
       {today && <View className='card daily-card'>
         <View className='daily-overview'>
           <View className='daily-intake'><Text className='daily-label'>今日摄入</Text><Text className='daily-calories'>{formatNumber(today.total_calories)}<Text className='daily-unit'>kcal</Text></Text></View>
@@ -310,19 +343,19 @@ export default function NutritionPage () {
           <Text>依据：Mifflin–St Jeor（1990）、2024 Compendium of Physical Activities；活动系数与中断阈值是本版粗估假设，不构成医疗处方。</Text>
         </View>}
       </View>}
-      <View className='section-heading-row'><Text className='history-heading'>今天已记录</Text><Button className='refresh-meals' size='mini' onClick={load}>刷新记录</Button></View>
+      <View className='section-heading-row'><Text className='history-heading'>今天已记录</Text><Button className='refresh-meals' size='mini' onClick={() => load()}>刷新记录</Button></View>
       {today && <View className='card today-meals'>{today.meals.length ? mealRows(today.meals) : <Text className='empty-copy'>今天还没有记录。可以记录一餐，也可以请 Agent 帮你制定方案。</Text>}</View>}
       <Button className='primary-button start-meal' disabled={saving} onClick={() => requestEditorAction({ kind: 'new' })}>记录一餐</Button>
-      {discardAction && <View className='card inline-confirm discard-prompt'>
+      {discardAction && <View id='discard-prompt' className='card inline-confirm discard-prompt'>
         <Text>当前有未保存的修改。放弃后才能继续，已保存的餐次不会受影响。</Text>
         <View className='confirm-actions'><Button className='secondary-button keep-draft' onClick={() => setDiscardAction(null)}>继续编辑</Button><Button className='secondary-button discard-draft' onClick={() => applyEditorAction(discardAction)}>放弃修改并继续</Button></View>
       </View>}
-      {deleteTarget && <View className='card inline-confirm delete-prompt'>
+      {deleteTarget && <View id='delete-prompt' className='card inline-confirm delete-prompt'>
         <Text>删除{deleteTarget.logged_at}的{deleteTarget.meal_type}及全部食物明细？此操作无法撤销。若正在编辑此餐，草稿也会清除。</Text>
         <View className='confirm-actions'><Button className='secondary-button' disabled={saving} onClick={() => setDeleteTarget(null)}>保留记录</Button><Button className='secondary-button confirm-delete' disabled={saving} onClick={deleteMeal}>确认删除</Button></View>
       </View>}
-      {error && <View className='error-banner editor-error'>{error}</View>}
-      {editorOpen && <View className='card meal-editor'>
+      {error && <View id='editor-error' className='error-banner editor-error'>{error}</View>}
+      {editorOpen && <View id='meal-editor' className='card meal-editor'>
         <View className='editor-row'><Text className='editor-label'>{editingMealId ? '编辑餐次' : '记录餐次'}</Text>
           <Picker disabled={saving} mode='selector' range={mealTypes} value={mealTypes.indexOf(mealType)} onChange={e => setMealType(mealTypes[Number(e.detail.value)])}><View className='meal-picker'>{mealType} ⌄</View></Picker>
         </View>
@@ -360,7 +393,7 @@ export default function NutritionPage () {
         {deleteFoodTarget && <View className='inline-confirm food-delete-prompt'><Text>从我的食品库删除“{deleteFoodTarget.name_zh}”？旧餐次不变，当前草稿不会被自动修改。</Text><View className='confirm-actions'><Button disabled={saving} onClick={() => setDeleteFoodTarget(null)}>保留</Button><Button className='confirm-food-delete' disabled={saving} onClick={deleteFood}>确认删除食品</Button></View></View>}
         {customAction && <View className='inline-confirm custom-discard-prompt'><Text>自定义食品表单有未保存内容，放弃后再继续？餐次草稿会保留。</Text><View className='confirm-actions'><Button className='keep-custom' onClick={() => setCustomAction(null)}>继续填写</Button><Button className='discard-custom' onClick={() => applyCustomAction(customAction)}>放弃表单并继续</Button></View></View>}
         <Button className='secondary-button toggle-custom' disabled={saving} onClick={() => setCustomOpen(!customOpen)}>{customOpen ? '收起自定义食物' : '食品库没有？添加自定义食物'}</Button>
-        {customOpen && <View className='custom-form'>
+        {customOpen && <View id='custom-form' className='custom-form'>
           <Text className='custom-title'>{customEditing ? `编辑食品：${customEditing.name_zh}` : '保存自己的食品'}</Text>
           <Text className='nutrition-basis-note'>填写这份食物的克数，以及当前份量的营养总量（不是每 100 克）。</Text>
           <Input disabled={saving} className='custom-input wide' value={custom.name} maxlength={100} placeholder='食物名称' onInput={e => setCustom(current => ({ ...current, name: e.detail.value }))} />
@@ -371,16 +404,12 @@ export default function NutritionPage () {
       </View>}
       <Text className='history-heading'>过去 29 天</Text>
       {historyLoading && !history.length && <Text className='loading-state'>正在加载历史记录…</Text>}
-      {historyError && <View className='error-banner'>{historyError}<Button className='secondary-button history-retry' onClick={refreshHistory}>重试历史记录</Button></View>}
+      {historyError && <View className='error-banner'>{historyError}<Button className='secondary-button history-retry' onClick={() => refreshHistory()}>重试历史记录</Button></View>}
       {!historyLoading && !historyError && !history.some(day => day.date < localDate()) && <View className='card empty-state'>过去 29 天还没有饮食记录。</View>}
       {history.filter(day => day.date < localDate()).map(day => <View className='card history-day' key={day.date}><View className='history-day-heading'><Text className='history-date'>{day.date}</Text><Text className='history-total'>{formatNumber(day.total_calories)} kcal</Text></View>{mealRows(day.meals)}</View>)}
     </View>
+    </EdgeScrollView>
   )
-}
-
-async function scrollToMealEditor () {
-  try { await Taro.pageScrollTo({ selector: '.meal-editor', duration: 250 }) }
-  catch { /* Scrolling is optional; added food and the save action remain available. */ }
 }
 
 function EnergyMetric ({ label, value }: { label: string, value?: number | null }) {

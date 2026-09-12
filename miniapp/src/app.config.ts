@@ -1,6 +1,7 @@
 import { navigationTheme } from './core/navigation-theme'
 
 export default defineAppConfig({
+  usingComponents: {},
   pages: [
     'pages/index/index',
     'pages/login/index',
@@ -23,6 +24,7 @@ export default defineAppConfig({
     'pages/workout-detail/index'
   ],
   tabBar: {
+    custom: true,
     color: '#708077',
     selectedColor: '#1d6b49',
     backgroundColor: '#ffffff',
