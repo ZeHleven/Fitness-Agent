@@ -52,6 +52,7 @@ export function interactionRuntime (relative, overrides = {}, globals = {}) {
     new Function('require', 'exports', 'module', ...Object.keys(globals), code)(name => {
       if (name in imports) return imports[name]
       if (name.endsWith('.scss')) return {}
+      if (name.endsWith('.svg')) return name
       assert.ok(name.startsWith('.'), `Unexpected dependency: ${name}`)
       const base = path.resolve(path.dirname(filename), name)
       const target = ['.ts', '.tsx'].map(ext => base + ext).find(existsSync)

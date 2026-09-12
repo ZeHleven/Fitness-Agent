@@ -73,7 +73,7 @@ export default function WorkoutDetailPage () {
           {exercise.safety_notice && <Text className='detail-note'>{exercise.safety_notice}</Text>}
         </View>)}
       </WorkoutDisclosure>}
-      <SessionEnergyEditor key={session.id} session={session} onSaved={setSession} />
+      <SessionEnergyEditor key={session.id} session={session} onSaved={setSession} visible={visible} layoutVersion={layoutVersion} />
       {(session.feedback?.feedback_notes || session.notes) && <View className='card detail-notes'>{session.feedback?.feedback_notes && <Text>训练反馈：{session.feedback.feedback_notes}</Text>}{session.notes && <Text>备注：{session.notes}</Text>}</View>}
       {session.adaptive_adjustment_proposal && <Button className='secondary-button detail-proposal' onClick={() => Taro.navigateTo({ url: `/pages/plan-proposal-detail/index?id=${encodeURIComponent(session.adaptive_adjustment_proposal!.id)}` })}><Text>查看调整提案</Text><Text className='detail-proposal-status'>{proposalStatusLabel(session)}</Text></Button>}
     </>}
