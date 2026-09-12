@@ -29,9 +29,9 @@ async function createPage (overrides = {}, platform = {}) {
     '../../services/nutrition': { nutritionApi: api }, '../../core/request': { errorMessage: e => e.message },
     '../../services/profile': { profileApi: { update: async data => { activityWrites.push(data) } } },
     '@tarojs/taro': { __esModule: true, useDidShow: callback => { hooks.useDidShow = callback }, useDidHide: callback => { hooks.useDidHide = callback }, default: {
-      showToast: async () => {}, nextTick: callback => { nextTicks.push(callback) },
+      showToast: async () => {}, nextTick: callback => { if(platform.nextTick) return platform.nextTick(callback); nextTicks.push(callback) },
       navigateTo: options => platform.navigateTo ? platform.navigateTo(options) : Promise.resolve(),
-      pageScrollTo: options => { scrolls.push(options); return platform.pageScrollTo ? platform.pageScrollTo(options) : Promise.resolve() }
+      pageScrollTo: () => { throw Error('Nutrition must scroll its bounded viewport, not the native page') }
     } }
   })
   page.render(); hooks.useDidShow(); await page.flush()
@@ -40,8 +40,15 @@ async function createPage (overrides = {}, platform = {}) {
 
 async function renderAndScroll (page) {
   await page.flush()
-  page.nextTicks.splice(0).forEach(callback => callback())
-  await page.flush()
+  let ticks=0
+  while(page.nextTicks.length) {
+    assert.ok(++ticks<10,'scroll positioning must settle')
+    const before=page.find('nutrition-scroll').props.scrollIntoView
+    page.nextTicks.splice(0).forEach(callback => callback())
+    await page.flush()
+    const anchor=page.find('nutrition-scroll').props.scrollIntoView
+    if(anchor && anchor!==before)page.scrolls.push({anchor})
+  }
 }
 
 test('classification correction return refreshes energy, labels and reasons while preserving unsaved meal', async () => {
@@ -96,7 +103,7 @@ for (const source of ['standard', 'custom']) {
     page.click('food-add')
     assert.equal(page.scrolls.length, 0, 'wait for the updated editor layout')
     await renderAndScroll(page)
-    assert.deepEqual(page.scrolls, [{ selector: '.meal-editor', duration: 250 }])
+    assert.deepEqual(page.scrolls, [{ anchor: 'meal-editor' }])
     assert.equal(page.findAll('selected-row').length, 2)
     page.click('food-add'); await renderAndScroll(page)
     assert.equal(page.scrolls.length, 2)
@@ -113,14 +120,14 @@ test('invalid portions and full meals do not trigger a successful-add scroll', a
   page.click('start-meal'); await renderAndScroll(page); page.scrolls.length = 0
   page.input('portion-input', ''); await page.flush()
   page.click('food-add'); await renderAndScroll(page)
-  assert.equal(page.scrolls.filter(x => x.selector === '.meal-editor').length, 0)
+  assert.equal(page.scrolls.filter(x => x.anchor === 'meal-editor').length, 0)
   assert.equal(page.findAll('selected-row').length, 0)
   page.input('portion-input', '100'); await page.flush()
   for (let i = 0; i < 30; i++) { page.click('food-add'); await renderAndScroll(page) }
   page.scrolls.length = 0
   page.click('food-add'); await renderAndScroll(page)
   assert.equal(page.findAll('selected-row').length, 30)
-  assert.equal(page.scrolls.filter(x => x.selector === '.meal-editor').length, 0)
+  assert.equal(page.scrolls.filter(x => x.anchor === 'meal-editor').length, 0)
   assert.equal(page.writes.length, 0)
 })
 
@@ -140,16 +147,16 @@ test('new custom food scrolls only after creation succeeds; a slow library refre
   page.input('custom-input', '新食品'); page.input('small-input', '130', 1); await page.flush()
   page.scrolls.length = 0
   await page.click('custom-add'); await renderAndScroll(page)
-  assert.equal(page.scrolls.filter(x => x.selector === '.meal-editor').length, 0)
+  assert.equal(page.scrolls.filter(x => x.anchor === 'meal-editor').length, 0)
   assert.equal(page.find('custom-input').props.value, '新食品')
   fail = false
   const saving = page.click('custom-add'); await renderAndScroll(page)
-  assert.equal(page.scrolls.filter(x => x.selector === '.meal-editor').length, 0)
+  assert.equal(page.scrolls.filter(x => x.anchor === 'meal-editor').length, 0)
   gate.resolve(); await renderAndScroll(page)
   assert.equal(page.findAll('selected-row').length, 1)
-  assert.equal(page.scrolls.filter(x => x.selector === '.meal-editor').length, 1)
+  assert.equal(page.scrolls.filter(x => x.anchor === 'meal-editor').length, 1)
   refresh.resolve([food]); await saving; await renderAndScroll(page)
-  assert.equal(page.scrolls.filter(x => x.selector === '.meal-editor').length, 1)
+  assert.equal(page.scrolls.filter(x => x.anchor === 'meal-editor').length, 1)
   assert.equal(page.writes.length, 0)
 })
 
@@ -165,11 +172,11 @@ test('editing an existing library food does not scroll back to or change the mea
   assert.equal(page.writes.length, 0)
 })
 
-for (const failure of ['throw', 'rejection']) {
+for (const failure of ['throw', 'unavailable']) {
   test(`scroll ${failure} never discards the added food or prevents saving`, async () => {
-    const page = await createPage({}, { pageScrollTo: () => {
+    const page = await createPage({}, { nextTick: () => {
       if (failure === 'throw') throw new Error('scroll failed')
-      return Promise.reject(new Error('scroll failed'))
+      // Host never delivers the layout callback.
     } })
     page.click('start-meal'); await renderAndScroll(page)
     page.click('food-add'); await renderAndScroll(page)
@@ -190,7 +197,7 @@ test('closing the editor cancels a queued scroll from a previous addition', asyn
   page.click('discard-draft'); await page.flush()
   await renderAndScroll(page)
   assert.equal(page.find('meal-editor'), undefined)
-  assert.equal(page.scrolls.filter(x => x.selector === '.meal-editor').length, 0)
+  assert.equal(page.scrolls.filter(x => x.anchor === 'meal-editor').length, 0)
   assert.equal(page.writes.length, 0)
 })
 

@@ -1,3 +1,4 @@
 export default definePageConfig({
-  navigationBarTitleText: '训练'
+  navigationBarTitleText: '训练',
+  disableScroll: true
 })

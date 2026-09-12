@@ -1,4 +1,6 @@
-.nutrition-page { padding-bottom: 150px; }
+@use '../../styles/capsule-layout' as capsule;
+.nutrition-scroll { @include capsule.scroll-viewport; }
+.page.nutrition-page { min-height: 100%; padding-bottom: 28px; }
 .meal-editor { margin-top: 24px; }
 .section-heading-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .section-heading-row .history-heading { margin: 24px 0 16px; }

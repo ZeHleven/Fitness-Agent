@@ -57,3 +57,10 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+# Capsule navigation icons
+
+The navigation icons are generated from the Lucide React library used in the
+accepted isolated prototype: Dumbbell, Utensils, MessageCircle, UserRound.
+Source: https://lucide.dev/ . ISC license and copyright notice are preserved at
+`src/assets/navigation/LICENSE.txt`. Both color variants use the same original
+library geometry. No new runtime icon dependency is added to the miniapp.

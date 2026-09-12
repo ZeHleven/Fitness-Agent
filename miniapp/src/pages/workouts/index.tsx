@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
+import { capsuleNavigation } from '../../core/capsule-platform'
 import { Button, Text, View } from '@tarojs/components'
+import EdgeScrollView from '../../components/EdgeScrollView'
 import Taro, { useDidHide, useDidShow } from '@tarojs/taro'
 import { peekCached, readCached } from '../../core/read-cache'
 import LoadingFeedback from '../../components/LoadingFeedback'
@@ -63,6 +65,7 @@ export default function WorkoutsPage () {
   }
 
   useDidShow(() => {
+    capsuleNavigation.show(0)
     setVisible(true); void load(false)
   })
   useDidHide(() => { setVisible(false); generation.current++ })
@@ -130,6 +133,7 @@ export default function WorkoutsPage () {
   }
 
   return (
+    <EdgeScrollView className='workouts-scroll' contentSelector='.workouts-page' visible={visible} scrollY>
     <View className='page workouts-page'>
       <View className='page-heading'>
         <View>
@@ -299,6 +303,7 @@ export default function WorkoutsPage () {
         )
       })}
     </View>
+    </EdgeScrollView>
   )
 }
 

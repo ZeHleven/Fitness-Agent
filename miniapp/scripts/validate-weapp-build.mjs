@@ -3,6 +3,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { validateWeappArtifact } from './weapp-build-contract.mjs'
+import { validateNativeTabbar } from './native-tabbar-contract.mjs'
 
 const miniappRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const distRoot = path.join(miniappRoot, 'dist')
@@ -43,6 +44,8 @@ const errors = validateWeappArtifact({
   projectConfig: await readJson(path.join(distRoot, 'project.config.json'), false),
   buildManifest: await readJson(path.join(distRoot, 'build-info.json'), true)
 })
+
+errors.push(...validateNativeTabbar({ javascriptFiles, appConfig: await readJson(path.join(distRoot, 'app.json'), true) }))
 
 if (errors.length > 0) {
   for (const error of errors) console.error(`[${error.code}] ${error.message}`)

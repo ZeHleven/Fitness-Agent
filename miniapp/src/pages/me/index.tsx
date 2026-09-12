@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { capsuleNavigation } from '../../core/capsule-platform'
 import { Button, Text, View } from '@tarojs/components'
 import Taro, { useDidHide, useDidShow } from '@tarojs/taro'
 import { peekCached, readCached } from '../../core/read-cache'
@@ -40,7 +41,7 @@ export default function MePage () {
     }
   }
 
-  useDidShow(() => { setVisible(true); void load(false) })
+  useDidShow(() => { capsuleNavigation.show(3); setVisible(true); void load(false) })
   useDidHide(() => { setVisible(false); generation.current++ })
   useEffect(() => () => { generation.current++ }, [])
 
