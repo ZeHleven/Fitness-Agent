@@ -107,6 +107,9 @@ class PersonalizedPlanPreviewRequest(_PersonalizedSchedule):
 
 
 class PersonalizedExerciseOption(BaseModel):
+    body_parts: list[str] = Field(default_factory=list)
+    search_aliases: list[str] = Field(default_factory=list)
+    counting_note: str | None = None
     energy_category: Literal['resistance_training', 'bodyweight_resistance'] | None = None
     energy_category_version: int = 0
     exercise_id: str = Field(min_length=1, max_length=100)

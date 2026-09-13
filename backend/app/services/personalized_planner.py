@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.exercise import Exercise
 from app.models.profile import UserProfile
+from app.services.exercise_search import selection_metadata
 from app.schemas.workout import (
     PersonalizedExerciseOption,
     PersonalizedPlanExercise,
@@ -289,6 +290,7 @@ def build_personalized_plan_preview(
         exercises=planned,
         exercise_options=[
             PersonalizedExerciseOption(
+                **selection_metadata(item),
                 exercise_id=item.id,
                 exercise_name=item.name_zh,
                 category=item.category,

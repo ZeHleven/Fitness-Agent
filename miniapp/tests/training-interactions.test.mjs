@@ -198,6 +198,7 @@ for (const target of ['plan-editor', 'plan-builder']) {
     p.module.default.disableAlertBeforeUnload = () => {}
     p.module.default.reLaunch = async value => { p.navigations.push(value) }
     const page = runtime(`../../src/pages/${target}/index.tsx`, {
+      '../../components/ExercisePicker': { __esModule: true, default: () => null },
       '@tarojs/taro': p.module, '../../core/request': { errorMessage: e => e.message }, '../core/request': { errorMessage: e => e.message },
       '../../services/profile': { profileApi: { get: async () => ({ onboarding_completed: true, training_days_per_week: 1, session_duration_min: 45 }) } },
       '../../services/workouts': { workoutApi: { previewPersonalizedPlan: async () => preview, confirmPersonalizedPlan: async data => { sent.push(data); return plan } } },

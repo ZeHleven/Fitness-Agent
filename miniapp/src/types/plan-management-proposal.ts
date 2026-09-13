@@ -35,6 +35,9 @@ export interface PlanCandidateV2 {
 }
 
 export interface PlanExerciseOptionV2 {
+  body_parts?: string[]
+  search_aliases?: string[]
+  counting_note?: string | null
   exercise_id: string
   exercise_name: string
   category: string

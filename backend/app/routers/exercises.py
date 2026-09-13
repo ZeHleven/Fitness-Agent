@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from typing import Literal
 from app.database import get_db
 from app.schemas.exercise import ExerciseResponse, CustomExerciseCreate
 from app.services.exercise import query_exercise_library
@@ -13,12 +14,14 @@ from app.services.custom_exercises import safety_notice
 from app.services.personalized_planner import is_exercise_compatible
 from app.schemas.exercise_energy import EnergyCategoryUpdate
 from app.services.exercise_energy import update_library_category
+from app.services.exercise_search import selection_metadata, normalize_query
 
 router = APIRouter(prefix="/exercises", tags=["exercises"])
 
 
 def custom_option(exercise: Exercise) -> PersonalizedExerciseOption:
     return PersonalizedExerciseOption(
+        **selection_metadata(exercise),
         exercise_id=exercise.id, exercise_name=exercise.name_zh,
         category=exercise.category, difficulty=exercise.difficulty,
         equipment=exercise.equipment or [], safety_notice=safety_notice(exercise),
@@ -47,9 +50,12 @@ async def create_custom_exercise(body: CustomExerciseCreate, current_user: User 
         contraindications=body.contraindications, is_active=True,
         energy_category=body.energy_category, energy_category_version=1 if body.energy_category else 0,
     )
-    canonical = (await db.execute(select(Exercise).where(
-        Exercise.owner_id.is_(None), Exercise.is_active.is_(True), Exercise.name_zh == body.name,
+    public = (await db.execute(select(Exercise).where(
+        Exercise.owner_id.is_(None), Exercise.is_active.is_(True),
     ))).scalars().all()
+    canonical = [row for row in public if normalize_query(body.name) in {
+        normalize_query(value) for value in [row.name_zh, *selection_metadata(row)['search_aliases']]
+    }]
     if profile is not None and any(not is_exercise_compatible(profile, row) for row in canonical):
         raise HTTPException(409, '动作库中的同名动作与当前健康或训练条件存在冲突，不能通过自定义名称绕过')
     if profile is not None and not is_exercise_compatible(profile, exercise):
@@ -78,6 +84,8 @@ async def set_energy_category(exercise_id: str, body: EnergyCategoryUpdate,
 
 @router.get("", response_model=list[ExerciseResponse])
 async def list_exercises(
+    q: str | None = Query(None, max_length=100),
+    body_part: Literal['胸部', '背部', '肩部', '手臂', '臀部', '腿部', '核心'] | None = Query(None),
     muscle_group: str | None = Query(None),
     equipment: str | None = Query(None),
     difficulty: str | None = Query(None),
@@ -86,7 +94,7 @@ async def list_exercises(
     limit: int = Query(10, ge=1, le=50),
     db: AsyncSession = Depends(get_db),
 ):
-    return await query_exercise_library(
+    rows = await query_exercise_library(
         db,
         muscle_group=muscle_group,
         equipment=equipment,
@@ -94,4 +102,7 @@ async def list_exercises(
         movement_pattern=movement_pattern,
         category=category,
         limit=limit,
+        query=q,
+        body_part=body_part,
     )
+    return [ExerciseResponse.model_validate(row).model_copy(update=selection_metadata(row)) for row in rows]

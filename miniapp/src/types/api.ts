@@ -184,6 +184,9 @@ export interface EnergyEstimate {
 }
 
 export interface PersonalizedExerciseOption {
+  body_parts?: string[]
+  search_aliases?: string[]
+  counting_note?: string | null
   energy_category?: EnergyCategory | null
   energy_category_version?: number
   safety_notice?: string | null
