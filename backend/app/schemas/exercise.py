@@ -28,6 +28,9 @@ class CustomExerciseCreate(BaseModel):
 
 
 class ExerciseResponse(BaseModel):
+    body_parts: list[str] = Field(default_factory=list)
+    search_aliases: list[str] = Field(default_factory=list)
+    counting_note: str | None = None
     id: str
     name_zh: str
     name_en: str

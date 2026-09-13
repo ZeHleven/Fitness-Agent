@@ -11,6 +11,7 @@ const previewFor = (days = [1, 3, 5], duration = 45) => ({
 async function pageFor (overrides = {}) {
   const previews = [], writes = [], starts = [], hooks = {}
   const page = runtime('../../src/pages/plan-builder/index.tsx', {
+    '../../components/ExercisePicker': { __esModule: true, default: () => null },
     '../../components/CustomExerciseEntry': { __esModule: true, default: () => null },
     '../../core/request': { errorMessage: e => e.message },
     '../../services/profile': { profileApi: { get: async () => ({ onboarding_completed: true, training_days_per_week: 3, session_duration_min: 45 }) } },

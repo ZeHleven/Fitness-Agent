@@ -5,6 +5,7 @@ import Taro, { useLoad } from '@tarojs/taro'
 import { errorMessage } from '../../core/request'
 import { planManagementApi } from '../../services/plan-management'
 import CustomExerciseEntry from '../../components/CustomExerciseEntry'
+import ExercisePicker from '../../components/ExercisePicker'
 import PlanPageMeta from '../../components/PlanPageMeta'
 import { planDraftSignature } from '../../core/plan-editor-draft'
 import { usePlanLeaveGuard } from '../../core/use-plan-leave-guard'
@@ -122,6 +123,7 @@ export default function PlanEditorPage () {
   const replaceExercise = (item: PlanExerciseSnapshotV2, optionIndex: number) => {
     if (!context || saveFlight.current) return
     const option = context.exercise_options[optionIndex]
+    if (!option) return
     if (exercises.some(value => (
       value.item_key !== item.item_key &&
       value.day_of_week === item.day_of_week &&
@@ -229,7 +231,6 @@ export default function PlanEditorPage () {
                         <Text className='exercise-name'>{item.exercise_name}</Text>
                         <Text className='exercise-category'>{item.category}</Text>
                       </View>
-                      <Text className='remove-exercise' onClick={() => { if (!saveFlight.current) setExercises(current => normalizeOrder(current.filter(value => value.item_key !== item.item_key))) }}>删除</Text>
                     </View>
                     {(context.exercise_notices?.[item.exercise_id] || context.exercise_options.find(option => option.exercise_id === item.exercise_id)?.safety_notice) && <Text className='custom-safety-notice'>{context.exercise_notices?.[item.exercise_id] || context.exercise_options.find(option => option.exercise_id === item.exercise_id)?.safety_notice}</Text>}
 
@@ -239,10 +240,15 @@ export default function PlanEditorPage () {
                       <Picker mode='selector' range={trainingDays.map(value => `周${weekday(value)}`)} value={trainingDays.indexOf(item.day_of_week)} onChange={event => patchExercise(item.item_key, { day_of_week: trainingDays[Number(event.detail.value)], order_index: exercises.filter(value => value.day_of_week === trainingDays[Number(event.detail.value)]).length })}>
                         <View className='mini-picker'>移动到…</View>
                       </Picker>
-                      <Picker mode='selector' range={context.exercise_options.map(option => option.exercise_name)} onChange={event => replaceExercise(item, Number(event.detail.value))}>
-                        <View className='mini-picker'>替换动作</View>
-                      </Picker>
                     </View>
+                    <View className='catalog-draft-actions'>
+                      <ExercisePicker label='替换' dayLabel={`周${weekday(day)}`} currentId={item.exercise_id}
+                        options={context.exercise_options} selectedIds={dayExercises.map(value => value.exercise_id)}
+                        disabled={saving || !context.proposals_enabled} onOpenChange={setSheetOpen}
+                        onSelect={option => replaceExercise(item, context.exercise_options.findIndex(value => value.exercise_id === option.exercise_id))} />
+                      <Button className='catalog-delete remove-exercise' disabled={saving || !context.proposals_enabled} onClick={() => { if (!saveFlight.current) setExercises(current => normalizeOrder(current.filter(value => value.item_key !== item.item_key))) }}>删除</Button>
+                    </View>
+                    {context.exercise_options.find(option => option.exercise_id === item.exercise_id)?.counting_note && <Text className='catalog-counting-note'>{context.exercise_options.find(option => option.exercise_id === item.exercise_id)?.counting_note}</Text>}
 
                     <View className='target-grid'>
                       <Stepper label='组数' value={item.sets} min={1} max={8} onChange={value => patchExercise(item.item_key, { sets: value })} />
@@ -252,9 +258,10 @@ export default function PlanEditorPage () {
                     </View>
                   </View>
                 ))}
-                <Picker mode='selector' range={context.exercise_options.map(option => `${option.exercise_name} · ${option.category}`)} onChange={event => addExercise(day, Number(event.detail.value))}>
-                  <View className='add-exercise'>＋ 添加已筛选动作</View>
-                </Picker>
+                {!dayExercises.length && <Text className='catalog-draft-empty'>本日还没有动作，点击下方添加。</Text>}
+                <ExercisePicker label='＋ 添加动作' dayLabel={`周${weekday(day)}`} options={context.exercise_options}
+                  selectedIds={dayExercises.map(item => item.exercise_id)} disabled={saving || !context.proposals_enabled || exercises.length >= 50}
+                  onOpenChange={setSheetOpen} onSelect={option => addExercise(day, context.exercise_options.findIndex(item => item.exercise_id === option.exercise_id))} />
                 <CustomExerciseEntry dayLabel={`周${weekday(day)}`} disabled={saving || !context.proposals_enabled} onOpenChange={setSheetOpen}
                   onDraftChange={value => setCustomDrafts(current => current[day] === value ? current : { ...current, [day]: value })}
                   onAdd={option => addExercise(day, -1, option)} />

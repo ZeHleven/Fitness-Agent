@@ -34,6 +34,7 @@ from app.services.personalized_planner import is_exercise_compatible
 from app.services.custom_exercises import visible_exercise, safety_notice
 from app.services.training_lifecycle import lock_training_user
 from app.services.workout_queries import get_active_user_session
+from app.services.exercise_search import selection_metadata
 
 if TYPE_CHECKING:
     from app.services.adaptive_planner import AdaptiveAdjustmentProposal
@@ -249,6 +250,7 @@ async def build_plan_edit_context(
         base_plan_fingerprint=plan_snapshot_fingerprint(snapshot),
         health_context_fingerprint=health_context_fingerprint(profile),
         exercise_options=[{
+            **selection_metadata(item),
             "exercise_id": item.id,
             "exercise_name": item.name_zh,
             "category": item.category,

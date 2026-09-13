@@ -6,6 +6,7 @@ const base = { name: '计划', duration_weeks: 4, training_days: [2], exercises:
 async function fixture (api = {}) {
   const calls = [], hooks = {}, writes = []
   const page = interactionRuntime('../../src/pages/plan-editor/index.tsx', {
+    '../../components/ExercisePicker': { __esModule: true, default: () => null },
     '../../components/CustomExerciseEntry': { __esModule: true, default: props => ({ type: 'CustomEntry', props: { ...props, className: 'custom-entry-test' } }) },
     '../../core/request': { errorMessage: e => e.message },
     '../../services/plan-management': { planManagementApi: {

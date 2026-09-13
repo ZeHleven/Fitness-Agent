@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import { Button, Input, Picker, Slider, Text, View } from '@tarojs/components'
+import { Button, Input, Slider, Text, View } from '@tarojs/components'
 import Taro, { useLoad } from '@tarojs/taro'
 
 import { errorMessage } from '../../core/request'
@@ -7,6 +7,7 @@ import { nextTrainingDay } from '../../core/workout-schedule'
 import { profileApi } from '../../services/profile'
 import { workoutApi } from '../../services/workouts'
 import CustomExerciseEntry from '../../components/CustomExerciseEntry'
+import ExercisePicker from '../../components/ExercisePicker'
 import PlanPageMeta from '../../components/PlanPageMeta'
 import type { PersonalizedExerciseOption } from '../../types/api'
 import type {
@@ -20,6 +21,7 @@ const weekday = (day: number) => ['一', '二', '三', '四', '五', '六', '日
 export default function PlanBuilderPage () {
   const [preview, setPreview] = useState<PersonalizedPlanPreview | null>(null)
   const [trainingDays, setTrainingDays] = useState<number[]>([])
+  const [generatedDays, setGeneratedDays] = useState<number[]>([])
   const [sessionDuration, setSessionDuration] = useState(45)
   const [loading, setLoading] = useState(true)
   const [generating, setGenerating] = useState(false)
@@ -29,7 +31,7 @@ export default function PlanBuilderPage () {
   const busy = useRef(false)
   const daysPerWeek = trainingDays.length
   const needsRegeneration = Boolean(preview && (
-    !sameDays(trainingDays, previewDays(preview)) ||
+    !sameDays(trainingDays, generatedDays) ||
     sessionDuration !== preview.session_duration_min
   ))
   const cannotSave = !preview || !daysPerWeek || needsRegeneration || generating || Boolean(savingMode)
@@ -56,6 +58,7 @@ export default function PlanBuilderPage () {
       }
       setPreview(data)
       setTrainingDays(actualDays)
+      setGeneratedDays(actualDays)
       setSessionDuration(data.session_duration_min)
     } catch (requestError) {
       setError(errorMessage(requestError, '暂时无法生成训练计划'))
@@ -122,12 +125,6 @@ export default function PlanBuilderPage () {
 
   const removeExercise = async (index: number) => {
     if (!preview || busy.current) return
-    const target = preview.exercises[index]
-    const sameDay = preview.exercises.filter(item => item.day_of_week === target.day_of_week)
-    if (sameDay.length <= 1) {
-      await Taro.showToast({ title: '每个训练日至少保留一个动作', icon: 'none' })
-      return
-    }
     setPreview({
       ...preview,
       exercises: preview.exercises.filter((_, itemIndex) => itemIndex !== index)
@@ -146,7 +143,7 @@ export default function PlanBuilderPage () {
   }
 
   const confirm = async (startImmediately: boolean) => {
-    if (!preview || busy.current) return
+    if (!preview || busy.current || sheetOpen) return
     if (!daysPerWeek || needsRegeneration) {
       setError('请先按所选训练日和时长重新编排，再保存计划')
       return
@@ -277,7 +274,7 @@ export default function PlanBuilderPage () {
           </View>
 
           <Text className='plan-section-heading'>四周训练安排</Text>
-          {[...new Set(preview.exercises.map(item => item.day_of_week))].sort().map(day => (
+          {generatedDays.map(day => (
             <View className='card day-card' key={day}>
               <View className='day-heading'>
                 <View>
@@ -293,16 +290,16 @@ export default function PlanBuilderPage () {
                       <Text className='exercise-name'>{exercise.exercise_name}</Text>
                       <Text className='exercise-category'>{exercise.category}</Text>
                     </View>
-                    <View className='remove-action' onClick={() => removeExercise(index)}>移除</View>
                   </View>
                   {exercise.safety_notice && <Text className='custom-safety-notice'>{exercise.safety_notice}</Text>}
-                  <Picker
-                    mode='selector'
-                    range={preview.exercise_options.map(item => item.exercise_name)}
-                    onChange={event => replaceExercise(index, Number(event.detail.value))}
-                  >
-                    <View className='replace-action'>换一个已筛选动作 ›</View>
-                  </Picker>
+                  <View className='catalog-draft-actions'>
+                    <ExercisePicker label='替换' dayLabel={`周${weekday(day)}`} currentId={exercise.exercise_id}
+                      options={preview.exercise_options} selectedIds={preview.exercises.filter(item => item.day_of_week === day).map(item => item.exercise_id)}
+                      disabled={Boolean(savingMode) || generating} onOpenChange={setSheetOpen}
+                      onSelect={option => replaceExercise(index, preview.exercise_options.findIndex(item => item.exercise_id === option.exercise_id))} />
+                    <Button className='catalog-delete' disabled={Boolean(savingMode) || generating} onClick={() => removeExercise(index)}>删除</Button>
+                  </View>
+                  {preview.exercise_options.find(option => option.exercise_id === exercise.exercise_id)?.counting_note && <Text className='catalog-counting-note'>{preview.exercise_options.find(option => option.exercise_id === exercise.exercise_id)?.counting_note}</Text>}
 
                   <View className='prescription-grid'>
                     <View className='prescription-field'>
@@ -333,7 +330,11 @@ export default function PlanBuilderPage () {
                   </View>
                 </View>
               ))}
-              <Picker range={preview.exercise_options.map(item => item.exercise_name)} onChange={event => addExercise(day, preview.exercise_options[Number(event.detail.value)])}><View className='replace-action'>＋ 添加已筛选动作</View></Picker>
+              {!preview.exercises.some(item => item.day_of_week === day) && <Text className='catalog-draft-empty'>本日还没有动作，点击下方添加。</Text>}
+              <ExercisePicker label='＋ 添加动作' dayLabel={`周${weekday(day)}`} options={preview.exercise_options}
+                selectedIds={preview.exercises.filter(item => item.day_of_week === day).map(item => item.exercise_id)}
+                disabled={Boolean(savingMode) || generating || preview.exercises.length >= 50} onOpenChange={setSheetOpen}
+                onSelect={option => addExercise(day, option)} />
               <CustomExerciseEntry dayLabel={`周${weekday(day)}`} onOpenChange={setSheetOpen} disabled={Boolean(savingMode) || generating} onAdd={option => addExercise(day, option)} />
             </View>
           ))}
