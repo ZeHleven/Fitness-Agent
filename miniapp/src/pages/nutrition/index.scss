@@ -110,10 +110,7 @@
 .food-category-strip { display: inline-flex; gap: 10px; padding: 4px 0 12px; }
 .food-category { flex: none; margin: 0; padding: 10px 20px; min-height: 64px; border-radius: 36px; font-size: 22px; line-height: 44px; background: #f3f6ef; color: #657569; }
 .food-category.is-selected { background: #edf2b1; color: #295d3d; font-weight: 750; }
-.search-clear, .food-source { margin: 0; padding: 8px 12px; font-size: 20px; line-height: 40px; background: transparent; color: #527361; }
-.food-source { display: inline-block; padding-left: 0; }
-.food-source-info { padding: 22px; background: #f1f5eb; border-radius: 20px; font-size: 22px; line-height: 1.7; overflow-wrap: anywhere; }
-.food-source-info text { display: block; margin-bottom: 8px; }
+.search-clear { margin: 0; padding: 8px 12px; font-size: 20px; line-height: 40px; background: transparent; color: #527361; }
 .packaged-grid { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 24px 20px; margin-top: 22px; }
 .packaged-field { min-width: 0; font-size: 24px; }
 .packaged-input-unit { display: flex; align-items: center; gap: 8px; padding: 0 16px; border: 2px solid #dce5dd; border-radius: 18px; background: #f9fbf8; margin-top: 12px; min-width: 0; }

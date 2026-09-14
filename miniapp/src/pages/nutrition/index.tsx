@@ -43,7 +43,6 @@ export default function NutritionPage () {
   const [browseCategory, setBrowseCategory] = useState('')
   const [foodHasMore, setFoodHasMore] = useState(false)
   const [foodOffset, setFoodOffset] = useState(0)
-  const [sourceFood, setSourceFood] = useState<Food | null>(null)
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const resumeFoodSearch = useRef(false)
   const [portion, setPortion] = useState('100')
@@ -140,7 +139,7 @@ export default function NutritionPage () {
     const generation = ++searchGeneration.current
     const offset = append ? foodOffset : 0
     setFoodLoading(true); setFoodError('')
-    if (!append) { setFoods([]); setFoodOffset(0); setFoodHasMore(false); setSourceFood(null); foodLoaded.current = false }
+    if (!append) { setFoods([]); setFoodOffset(0); setFoodHasMore(false); foodLoaded.current = false }
     try {
       const value = await nutritionApi.foods(query, foodPageSize + 1, scope, scope === 'mine' ? '' : category, offset)
       if (generation !== searchGeneration.current) return
@@ -443,9 +442,8 @@ export default function NutritionPage () {
         {foodLoading && <LoadingFeedback text='正在找寻食品' loading visible={visible} hasContent={foods.length > 0} />}
         {foodError && <View className='error-banner'>{foodError}<Button className='secondary-button food-retry' onClick={() => searchFoods(search.trim(), libraryScope, browseCategory, foodHasMore && foods.length > 0)}>重试搜索</Button></View>}
         {!foodLoading && !foodError && !foods.length && <Text className='empty-copy'>{foodLoaded.current ? '未找到匹配食品，可以换个名称或添加自定义食物。' : '输入名称后点击搜索。'}</Text>}
-        <View className='food-results'>{foods.map(food => <View className='food-row' key={`${food.source || 'standard'}-${food.id}`}><View className='food-copy'><Text className='food-name'>{food.name_zh}{food.source === 'custom' ? ' · 我的食品' : ''}</Text><Text className='food-meta'>{formatNumber(food.calories_per_100g)} kcal / 100g · 蛋白 {formatNumber(food.protein_g)}g</Text>{food.source === 'custom' ? <View className='library-actions'><Button className='library-edit' disabled={saving} onClick={() => requestCustomAction({ kind: 'edit', food })}>编辑</Button><Button className='library-delete' disabled={saving} onClick={() => setDeleteFoodTarget(food)}>删除</Button></View> : <Button className='food-source' onClick={() => setSourceFood(sourceFood?.id === food.id ? null : food)}>查看依据</Button>}</View><Button className='food-add' size='mini' disabled={saving} onClick={() => addFood(food)}>添加</Button></View>)}</View>
+        <View className='food-results'>{foods.map(food => <View className='food-row' key={`${food.source || 'standard'}-${food.id}`}><View className='food-copy'><Text className='food-name'>{food.name_zh}{food.source === 'custom' ? ' · 我的食品' : ''}</Text><Text className='food-meta'>{formatNumber(food.calories_per_100g)} kcal / 100g · 蛋白 {formatNumber(food.protein_g)}g</Text>{food.source === 'custom' && <View className='library-actions'><Button className='library-edit' disabled={saving} onClick={() => requestCustomAction({ kind: 'edit', food })}>编辑</Button><Button className='library-delete' disabled={saving} onClick={() => setDeleteFoodTarget(food)}>删除</Button></View>}</View><Button className='food-add' size='mini' disabled={saving} onClick={() => addFood(food)}>添加</Button></View>)}</View>
         {foodHasMore && <Button className='secondary-button food-more' disabled={saving || foodLoading} onClick={() => searchFoods(search.trim(), libraryScope, browseCategory, true)}>加载更多</Button>}
-        {sourceFood && <View className='food-source-info'><Text>{sourceFood.name_zh} · 每100g可食部分</Text><Text>营养为同类食品参考值，实际会因品种和做法有所差异。</Text>{sourceFood.source_info ? <>{['provider', 'source_id', 'version', 'reference_name', 'note', 'attribution', 'license', 'license_url', 'limitations', 'regional_notice', 'changes', 'url'].map(key => { const value = sourceFood.source_info?.[key]; return value ? <Text key={key} selectable>{value}</Text> : null })}</> : <Text>沿用既有食品库定义；本轮未修改原营养值。生熟状态不明确时，请选择名称中已注明状态的食品或录入包装标签。</Text>}<Button className='secondary-button close-food-source' onClick={() => setSourceFood(null)}>收起依据</Button></View>}
         <Text className='nutrition-basis-note'>按可食部分称重，留意名称中的生熟状态。包装食品可按标签录入到我的食品。</Text>
         {deleteFoodTarget && <View className='inline-confirm food-delete-prompt'><Text>从我的食品库删除“{deleteFoodTarget.name_zh}”？旧餐次不变，当前草稿不会被自动修改。</Text><View className='confirm-actions'><Button disabled={saving} onClick={() => setDeleteFoodTarget(null)}>保留</Button><Button className='confirm-food-delete' disabled={saving} onClick={deleteFood}>确认删除食品</Button></View></View>}
         {customAction && <View className='inline-confirm custom-discard-prompt'><Text>自定义食品表单有未保存内容，放弃后再继续？餐次草稿会保留。</Text><View className='confirm-actions'><Button className='keep-custom' onClick={() => setCustomAction(null)}>继续填写</Button><Button className='discard-custom' onClick={() => applyCustomAction(customAction)}>放弃表单并继续</Button></View></View>}
