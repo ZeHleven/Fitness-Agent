@@ -18,6 +18,8 @@ class FoodResponse(BaseModel):
     diet_tags: Any
     is_common_in_china: bool
     is_active: bool
+    # Additive attribution; old filters, identity and nutrition fields are unchanged.
+    source_info: dict | None = None
 
     model_config = {"from_attributes": True}
 
@@ -56,6 +58,7 @@ class CustomFoodUpdate(CustomFoodValues):
 
 
 class LibraryFood(FoodResponse):
+    browse_category: str | None = None
     source: Literal['standard', 'custom'] = 'standard'
     version: int | None = None
     basis: CustomFoodValues | None = None

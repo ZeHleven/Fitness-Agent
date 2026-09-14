@@ -43,7 +43,7 @@ async def lifespan(_app: FastAPI):
                 await asyncio.gather(worker_task, return_exceptions=True)
 
 
-app = FastAPI(title="Fitness Agent API", version="0.5.44", lifespan=lifespan)
+app = FastAPI(title="Fitness Agent API", version="0.5.45", lifespan=lifespan)
 
 
 @app.exception_handler(AIServiceError)
@@ -84,7 +84,8 @@ async def ready():
                     "c.pending_clarification, p.origin, "
                     "p.creation_client_request_id, p.target_kind, "
                     "p.target_id, p.result_data, f.source_name, "
-                    "f.source_reference, fa.normalized_alias "
+                    "f.source_reference, f.browse_category, f.browse_aliases, "
+                    "f.source_info, fa.normalized_alias "
                     "FROM agent_runs AS r "
                     "CROSS JOIN agent_conversations AS c "
                     "CROSS JOIN agent_proposals AS p "

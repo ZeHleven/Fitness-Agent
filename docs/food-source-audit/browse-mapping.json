@@ -1,0 +1,544 @@
+[
+  {
+    "id": "N01",
+    "name": "白米饭（熟）",
+    "category": "主食薯类",
+    "aliases": []
+  },
+  {
+    "id": "N02",
+    "name": "白米（生）",
+    "category": "主食薯类",
+    "aliases": []
+  },
+  {
+    "id": "N03",
+    "name": "小麦面条（水煮熟）",
+    "category": "主食薯类",
+    "aliases": []
+  },
+  {
+    "id": "N04",
+    "name": "小麦面条（干）",
+    "category": "主食薯类",
+    "aliases": []
+  },
+  {
+    "id": "N05",
+    "name": "馒头（原味）",
+    "category": "主食薯类",
+    "aliases": []
+  },
+  {
+    "id": "N06",
+    "name": "小米（干）",
+    "category": "主食薯类",
+    "aliases": []
+  },
+  {
+    "id": "N07",
+    "name": "小米粥（无糖）",
+    "category": "主食薯类",
+    "aliases": []
+  },
+  {
+    "id": "N08",
+    "name": "甜玉米（水煮熟）",
+    "category": "主食薯类",
+    "aliases": []
+  },
+  {
+    "id": "N65",
+    "name": "土豆（生）",
+    "category": "主食薯类",
+    "aliases": [
+      "马铃薯"
+    ]
+  },
+  {
+    "id": "N09",
+    "name": "土豆（蒸熟）",
+    "category": "主食薯类",
+    "aliases": [
+      "马铃薯"
+    ]
+  },
+  {
+    "id": "N66",
+    "name": "紫薯（生）",
+    "category": "主食薯类",
+    "aliases": [
+      "紫心甘薯"
+    ]
+  },
+  {
+    "id": "N10",
+    "name": "紫薯（蒸熟）",
+    "category": "主食薯类",
+    "aliases": [
+      "紫心甘薯"
+    ]
+  },
+  {
+    "id": "N11",
+    "name": "猪里脊（生）",
+    "category": "肉蛋类",
+    "aliases": []
+  },
+  {
+    "id": "N12",
+    "name": "猪后腿瘦肉（生）",
+    "category": "肉蛋类",
+    "aliases": []
+  },
+  {
+    "id": "N13",
+    "name": "鸡腿肉（去皮，生）",
+    "category": "肉蛋类",
+    "aliases": []
+  },
+  {
+    "id": "N14",
+    "name": "鸡腿肉（带皮，生）",
+    "category": "肉蛋类",
+    "aliases": []
+  },
+  {
+    "id": "N15",
+    "name": "鸭胸肉（去皮，生）",
+    "category": "肉蛋类",
+    "aliases": []
+  },
+  {
+    "id": "N16",
+    "name": "牛腱（生）",
+    "category": "肉蛋类",
+    "aliases": []
+  },
+  {
+    "id": "N17",
+    "name": "鸡蛋清（生）",
+    "category": "肉蛋类",
+    "aliases": [
+      "蛋清"
+    ]
+  },
+  {
+    "id": "N18",
+    "name": "鸡蛋黄（生）",
+    "category": "肉蛋类",
+    "aliases": [
+      "蛋黄"
+    ]
+  },
+  {
+    "id": "N19",
+    "name": "虾仁（生）",
+    "category": "鱼虾水产",
+    "aliases": []
+  },
+  {
+    "id": "N20",
+    "name": "鲈鱼（生）",
+    "category": "鱼虾水产",
+    "aliases": []
+  },
+  {
+    "id": "N21",
+    "name": "带鱼（生）",
+    "category": "鱼虾水产",
+    "aliases": []
+  },
+  {
+    "id": "N22",
+    "name": "鲫鱼（生）",
+    "category": "鱼虾水产",
+    "aliases": []
+  },
+  {
+    "id": "N23",
+    "name": "金枪鱼（生）",
+    "category": "鱼虾水产",
+    "aliases": []
+  },
+  {
+    "id": "N24",
+    "name": "鱿鱼（生）",
+    "category": "鱼虾水产",
+    "aliases": []
+  },
+  {
+    "id": "N25",
+    "name": "鲭鱼（生）",
+    "category": "鱼虾水产",
+    "aliases": []
+  },
+  {
+    "id": "N26",
+    "name": "黄豆（干）",
+    "category": "豆类豆制品",
+    "aliases": [
+      "大豆"
+    ]
+  },
+  {
+    "id": "N27",
+    "name": "毛豆（水煮熟）",
+    "category": "豆类豆制品",
+    "aliases": []
+  },
+  {
+    "id": "N28",
+    "name": "北豆腐",
+    "category": "豆类豆制品",
+    "aliases": []
+  },
+  {
+    "id": "N29",
+    "name": "南豆腐",
+    "category": "豆类豆制品",
+    "aliases": []
+  },
+  {
+    "id": "N30",
+    "name": "豆干（原味）",
+    "category": "豆类豆制品",
+    "aliases": []
+  },
+  {
+    "id": "N31",
+    "name": "豆浆（无糖）",
+    "category": "豆类豆制品",
+    "aliases": []
+  },
+  {
+    "id": "N32",
+    "name": "鹰嘴豆（水煮熟）",
+    "category": "豆类豆制品",
+    "aliases": []
+  },
+  {
+    "id": "N33",
+    "name": "低脂牛奶",
+    "category": "奶类",
+    "aliases": []
+  },
+  {
+    "id": "N34",
+    "name": "脱脂牛奶",
+    "category": "奶类",
+    "aliases": []
+  },
+  {
+    "id": "N35",
+    "name": "原味酸奶（无添加糖）",
+    "category": "奶类",
+    "aliases": []
+  },
+  {
+    "id": "N36",
+    "name": "希腊酸奶（低脂，无添加糖）",
+    "category": "奶类",
+    "aliases": []
+  },
+  {
+    "id": "N37",
+    "name": "番茄（生）",
+    "category": "蔬菜菌菇",
+    "aliases": [
+      "西红柿"
+    ]
+  },
+  {
+    "id": "N38",
+    "name": "黄瓜（生）",
+    "category": "蔬菜菌菇",
+    "aliases": []
+  },
+  {
+    "id": "N39",
+    "name": "生菜（生）",
+    "category": "蔬菜菌菇",
+    "aliases": []
+  },
+  {
+    "id": "N40",
+    "name": "大白菜（生）",
+    "category": "蔬菜菌菇",
+    "aliases": []
+  },
+  {
+    "id": "N41",
+    "name": "小白菜（生）",
+    "category": "蔬菜菌菇",
+    "aliases": []
+  },
+  {
+    "id": "N42",
+    "name": "胡萝卜（生）",
+    "category": "蔬菜菌菇",
+    "aliases": []
+  },
+  {
+    "id": "N43",
+    "name": "南瓜（生）",
+    "category": "蔬菜菌菇",
+    "aliases": []
+  },
+  {
+    "id": "N44",
+    "name": "茄子（生）",
+    "category": "蔬菜菌菇",
+    "aliases": []
+  },
+  {
+    "id": "N45",
+    "name": "香菇（鲜，生）",
+    "category": "蔬菜菌菇",
+    "aliases": []
+  },
+  {
+    "id": "N46",
+    "name": "金针菇（鲜，生）",
+    "category": "蔬菜菌菇",
+    "aliases": []
+  },
+  {
+    "id": "N47",
+    "name": "杏鲍菇（鲜，生）",
+    "category": "蔬菜菌菇",
+    "aliases": []
+  },
+  {
+    "id": "N48",
+    "name": "芹菜（生）",
+    "category": "蔬菜菌菇",
+    "aliases": []
+  },
+  {
+    "id": "N49",
+    "name": "苹果",
+    "category": "水果",
+    "aliases": []
+  },
+  {
+    "id": "N50",
+    "name": "橙子",
+    "category": "水果",
+    "aliases": []
+  },
+  {
+    "id": "N51",
+    "name": "橘子",
+    "category": "水果",
+    "aliases": []
+  },
+  {
+    "id": "N52",
+    "name": "梨",
+    "category": "水果",
+    "aliases": []
+  },
+  {
+    "id": "N53",
+    "name": "葡萄",
+    "category": "水果",
+    "aliases": []
+  },
+  {
+    "id": "N54",
+    "name": "草莓",
+    "category": "水果",
+    "aliases": []
+  },
+  {
+    "id": "N55",
+    "name": "猕猴桃",
+    "category": "水果",
+    "aliases": []
+  },
+  {
+    "id": "N56",
+    "name": "西瓜",
+    "category": "水果",
+    "aliases": []
+  },
+  {
+    "id": "N57",
+    "name": "芒果",
+    "category": "水果",
+    "aliases": []
+  },
+  {
+    "id": "N58",
+    "name": "桃",
+    "category": "水果",
+    "aliases": []
+  },
+  {
+    "id": "N59",
+    "name": "核桃仁（原味）",
+    "category": "坚果油脂",
+    "aliases": []
+  },
+  {
+    "id": "N60",
+    "name": "腰果仁（原味）",
+    "category": "坚果油脂",
+    "aliases": []
+  },
+  {
+    "id": "N61",
+    "name": "花生仁（原味）",
+    "category": "坚果油脂",
+    "aliases": []
+  },
+  {
+    "id": "N62",
+    "name": "开心果仁（原味）",
+    "category": "坚果油脂",
+    "aliases": []
+  },
+  {
+    "id": "N63",
+    "name": "芝麻",
+    "category": "坚果油脂",
+    "aliases": []
+  },
+  {
+    "id": "N64",
+    "name": "菜籽油",
+    "category": "坚果油脂",
+    "aliases": []
+  },
+  {
+    "id": "old-主食薯类-0",
+    "name": "糙米",
+    "category": "主食薯类",
+    "aliases": []
+  },
+  {
+    "id": "old-主食薯类-1",
+    "name": "燕麦",
+    "category": "主食薯类",
+    "aliases": []
+  },
+  {
+    "id": "old-主食薯类-2",
+    "name": "红薯",
+    "category": "主食薯类",
+    "aliases": [
+      "甘薯"
+    ]
+  },
+  {
+    "id": "old-主食薯类-3",
+    "name": "全麦面包",
+    "category": "主食薯类",
+    "aliases": []
+  },
+  {
+    "id": "old-主食薯类-4",
+    "name": "藜麦",
+    "category": "主食薯类",
+    "aliases": []
+  },
+  {
+    "id": "old-主食薯类-5",
+    "name": "杂粮饭",
+    "category": "主食薯类",
+    "aliases": []
+  },
+  {
+    "id": "old-肉蛋类-0",
+    "name": "鸡胸肉",
+    "category": "肉蛋类",
+    "aliases": []
+  },
+  {
+    "id": "old-肉蛋类-1",
+    "name": "鸡蛋",
+    "category": "肉蛋类",
+    "aliases": []
+  },
+  {
+    "id": "old-肉蛋类-2",
+    "name": "牛肉",
+    "category": "肉蛋类",
+    "aliases": []
+  },
+  {
+    "id": "old-鱼虾水产-0",
+    "name": "三文鱼",
+    "category": "鱼虾水产",
+    "aliases": []
+  },
+  {
+    "id": "old-鱼虾水产-1",
+    "name": "鳕鱼",
+    "category": "鱼虾水产",
+    "aliases": []
+  },
+  {
+    "id": "old-豆类豆制品-0",
+    "name": "豆腐",
+    "category": "豆类豆制品",
+    "aliases": []
+  },
+  {
+    "id": "old-奶类-0",
+    "name": "牛奶",
+    "category": "奶类",
+    "aliases": []
+  },
+  {
+    "id": "old-奶类-1",
+    "name": "希腊酸奶",
+    "category": "奶类",
+    "aliases": []
+  },
+  {
+    "id": "old-蔬菜菌菇-0",
+    "name": "西蓝花",
+    "category": "蔬菜菌菇",
+    "aliases": [
+      "西兰花"
+    ]
+  },
+  {
+    "id": "old-蔬菜菌菇-1",
+    "name": "菠菜",
+    "category": "蔬菜菌菇",
+    "aliases": []
+  },
+  {
+    "id": "old-水果-0",
+    "name": "香蕉",
+    "category": "水果",
+    "aliases": []
+  },
+  {
+    "id": "old-水果-1",
+    "name": "蓝莓",
+    "category": "水果",
+    "aliases": []
+  },
+  {
+    "id": "old-坚果油脂-0",
+    "name": "杏仁",
+    "category": "坚果油脂",
+    "aliases": []
+  },
+  {
+    "id": "old-坚果油脂-1",
+    "name": "花生酱",
+    "category": "坚果油脂",
+    "aliases": []
+  },
+  {
+    "id": "old-坚果油脂-2",
+    "name": "橄榄油",
+    "category": "坚果油脂",
+    "aliases": []
+  }
+]

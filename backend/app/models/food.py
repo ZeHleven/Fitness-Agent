@@ -26,6 +26,17 @@ class Food(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     source_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     source_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    browse_category: Mapped[str | None] = mapped_column(String(30), nullable=True, index=True)
+    browse_aliases: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    source_info: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+
+class FoodCatalogImport(Base):
+    __tablename__ = 'food_catalog_imports'
+    catalog_key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    food_id: Mapped[str] = mapped_column(String, ForeignKey('foods.id'), unique=True)
+    created_by_import: Mapped[bool] = mapped_column(Boolean)
+    initial_snapshot: Mapped[dict] = mapped_column(JSONB)
 
 
 class FoodAlias(Base):

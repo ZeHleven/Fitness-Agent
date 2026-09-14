@@ -9,6 +9,7 @@ from app.models.user import User
 from app.deps import get_current_user
 from app.services.custom_foods import library_food, values_dict, fingerprint, lock_library_user, owned_food, check_version
 from app.services.food import query_nutrition_database
+from app.services.food_library import BrowseCategory, query_library
 
 router = APIRouter(prefix="/foods", tags=["foods"])
 
@@ -16,16 +17,9 @@ router = APIRouter(prefix="/foods", tags=["foods"])
 @router.get('/library', response_model=list[LibraryFood])
 async def get_library(q: str | None = Query(None, min_length=1, max_length=50),
                       scope: Literal['all', 'mine'] = 'all', limit: int = Query(20, ge=1, le=50),
+                      offset: int = Query(0, ge=0, le=100000), browse_category: BrowseCategory | None = None,
                       current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    statement = select(CustomFood).where(CustomFood.user_id == current_user.id, CustomFood.is_active.is_(True))
-    if q:
-        statement = statement.where(CustomFood.name.ilike(f'%{q.strip()}%'))
-    rows = (await db.execute(statement.order_by(CustomFood.name, CustomFood.id).limit(limit))).scalars().all()
-    result = [library_food(row) for row in rows]
-    if scope == 'all':
-        result += [LibraryFood.model_validate(row) for row in await query_nutrition_database(db, query=q, limit=limit)]
-    # Private entries first makes a newly created food discoverable even in a full catalog.
-    return result[:limit]
+    return await query_library(db,current_user.id,q,scope,browse_category,limit,offset)
 
 
 @router.post('/custom', response_model=LibraryFood, status_code=201)
@@ -44,6 +38,17 @@ async def create_custom_food(body: CustomFoodCreate, current_user: User = Depend
     db.add(row)
     await db.commit()
     await db.refresh(row)
+    return library_food(row)
+
+
+@router.get('/custom/requests/{request_id}', response_model=LibraryFood)
+async def read_custom_creation(request_id: str, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    # Read-after-uncertain-write; never expose another user's request or infer by name.
+    row = await db.scalar(select(CustomFood).where(CustomFood.user_id == current_user.id,
+                                                   CustomFood.client_request_id == request_id))
+    if row is None:
+        raise HTTPException(404, '尚未找到此创建请求，可以用原请求重试')
+    check_version(row, 1)
     return library_food(row)
 
 

@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { readFileSync } from 'node:fs'
 import { deferred, runtime } from './helpers/page-runtime.mjs'
 
 const food = { id: 'rice', name_zh: '杂粮饭', calories_per_100g: 130, protein_g: 3, carbs_g: 28, fat_g: 1 }
 const item = { food_id: 'rice', food_name: '杂粮饭', amount_g: 100, calories: 130, protein_g: 3, carbs_g: 28, fat_g: 1 }
 const meal = { id: 'meal', logged_at: '2026-09-07', meal_type: '午餐', items: [item] }
 const summary = { date: meal.logged_at, meals: [meal], total_calories: 130, total_protein_g: 3, total_carbs_g: 28, total_fat_g: 1 }
+
+// Included here so the standard nutrition contract also exercises unit conversion.
+import './packaged-food.test.mjs'
 async function createPage (overrides = {}, platform = {}) {
   const writes = [], reads = [], foodWrites = [], activityWrites = [], scrolls = [], nextTicks = []
   const hooks = {}
@@ -14,6 +18,7 @@ async function createPage (overrides = {}, platform = {}) {
     carbs_g: data.carbs_g / data.amount_g * 100, fat_g: data.fat_g / data.amount_g * 100, basis: data })
   const api = {
     today: async () => summary, history: async () => [summary], foods: async () => [food],
+    foodCreationResult: async () => { throw Object.assign(new Error('not found'), { statusCode: 404 }) },
     createFood: async data => { foodWrites.push(['POST', data]); return privateFood(data) },
     updateFood: async (id, data) => { foodWrites.push(['PUT', id, data]); return privateFood(data) },
     deleteFood: async (id, version) => { foodWrites.push(['DELETE', id, version]) },
@@ -50,6 +55,81 @@ async function renderAndScroll (page) {
     if(anchor && anchor!==before)page.scrolls.push({anchor})
   }
 }
+
+async function fillPackaged (page, name) {
+  page.input('custom-input', name)
+  page.find('custom-energy-unit').props.onChange({ detail: { value: '1' } })
+  for (const [field, value] of Object.entries({ calories: '130', protein: '3', carbs: '28', fat: '1' })) page.input(`custom-${field}`, value)
+  await page.flush()
+}
+
+test('meal edit actions share a compact equal-width row without changing new-meal actions', async () => {
+  const page = await createPage()
+  page.click('edit-meal'); await page.flush()
+  const actions = page.find('meal-editor-actions')
+  assert.match(actions.props.className, /is-editing/)
+  assert.deepEqual(actions.props.children.map(child => child.props.children), ['保存修改', '取消编辑'])
+  assert.equal(page.find('save-meal').props.disabled, false)
+  const css = readFileSync(new URL('../src/pages/nutrition/index.scss', import.meta.url), 'utf8')
+  assert.match(css, /\.meal-editor-actions\.is-editing \{[^}]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/)
+  assert.match(css, /\.meal-editor-actions\.is-editing \.cancel-edit \{[^}]*min-height: 80px;[^}]*font-size: 26px;/)
+  const fresh = await createPage()
+  fresh.click('start-meal'); await fresh.flush()
+  assert.doesNotMatch(fresh.find('meal-editor-actions').props.className, /is-editing/)
+})
+
+test('packaged actual amount stays separate from per100 POST and explicit zero', async () => {
+  const page=await createPage();page.click('start-meal');await page.flush();page.click('toggle-custom');await page.flush()
+  await fillPackaged(page,'包装酸奶');page.input('custom-amount','150');page.input('custom-fat','0');await page.flush()
+  await page.click('custom-add');await page.flush()
+  assert.equal(page.foodWrites[0][1].amount_g,100);assert.equal(page.foodWrites[0][1].fat_g,0)
+  assert.equal(page.find('selected-amount-input').props.value,'150');assert.equal(page.writes.length,0)
+})
+
+test('lost creation response is read back before another write', async () => {
+  let calls=0,lookups=0,stored
+  const page=await createPage({createFood:async data=>{calls++;stored={...food,source:'custom',version:1,basis:data,name_zh:data.name};throw Error('lost')},
+    foodCreationResult:async ()=>{lookups++;return stored}})
+  page.click('start-meal');await page.flush();page.click('toggle-custom');await page.flush();await fillPackaged(page,'丢失响应')
+  await page.click('custom-add');await page.flush();await page.click('custom-add');await page.flush()
+  assert.equal(calls,1);assert.equal(lookups,1);assert.equal(page.findAll('selected-row').length,1)
+})
+
+test('returning during an unfinished search resumes it without clearing the meal', async () => {
+  const gate=deferred();let calls=0
+  const page=await createPage({foods:async()=> ++calls===2?gate.promise:[food]})
+  page.click('start-meal');await page.flush();page.click('food-add');await page.flush()
+  const pending=page.click('search-button');await page.flush()
+  page.hooks.useDidHide();await page.flush();page.hooks.useDidShow();await page.flush()
+  gate.resolve([{...food,id:'stale'}]);await pending;await page.flush()
+  assert.equal(calls,3);assert.equal(page.findAll('food-row').length,1)
+  assert.equal(page.findAll('selected-row').length,1)
+})
+
+test('changed inputs after uncertain save are retained, never silently posted again',async()=>{
+  let calls=0
+  const page=await createPage({createFood:async()=>{calls++;throw Error('lost')},
+    foodCreationResult:async()=>({...food,source:'custom',version:1})})
+  page.click('start-meal');await page.flush();page.click('toggle-custom');await page.flush()
+  await fillPackaged(page,'原标签');await page.click('custom-add');await page.flush()
+  page.input('custom-input','新标签');await page.flush();await page.click('custom-add');await page.flush()
+  assert.equal(calls,1);assert.equal(page.find('custom-input').props.value,'新标签')
+  assert.equal(page.findAll('selected-row').length,0)
+  assert.match(page.text(),/上一次食品已保存/)
+})
+
+test('pagination, category changes and late pages preserve the draft',async()=>{
+  const gate=deferred(),calls=[]
+  const rows=Array.from({length:13},(_,i)=>({...food,id:`food-${i}`}))
+  const page=await createPage({foods:async(q,limit,scope,category,offset)=>{calls.push({q,limit,scope,category,offset});if(offset)return gate.promise;return category?[{...food,id:'fruit'}]:rows}})
+  page.click('start-meal');await page.flush();page.click('food-add');await page.flush()
+  assert.equal(page.findAll('food-row').length,12);assert.ok(page.find('food-more'))
+  const pending=page.click('food-more');await page.flush()
+  page.findAll('food-category')[7].props.onClick();await page.flush()
+  gate.resolve([{...food,id:'stale'}]);await pending;await page.flush()
+  assert.equal(page.findAll('food-row').length,1);assert.equal(page.findAll('selected-row').length,1)
+  assert.ok(calls.some(c=>c.offset===12&&c.limit===13));assert.equal(calls.at(-1).category,'水果')
+})
 
 test('classification correction return refreshes energy, labels and reasons while preserving unsaved meal', async () => {
   let corrected = false
@@ -144,7 +224,7 @@ test('new custom food scrolls only after creation succeeds; a slow library refre
   })
   page.click('start-meal'); await renderAndScroll(page)
   page.click('toggle-custom'); await page.flush()
-  page.input('custom-input', '新食品'); page.input('small-input', '130', 1); await page.flush()
+  await fillPackaged(page, '新食品')
   page.scrolls.length = 0
   await page.click('custom-add'); await renderAndScroll(page)
   assert.equal(page.scrolls.filter(x => x.anchor === 'meal-editor').length, 0)
@@ -297,10 +377,7 @@ test('custom form requires explicit calories and scales actual edited inputs wit
   page.input('custom-input', '自制餐'); await page.flush()
   await page.click('custom-add'); await page.flush()
   assert.equal(page.findAll('selected-row').length, 0)
-  page.input('small-input', '130', 1); await page.flush()
-  page.input('small-input', '3', 2); await page.flush()
-  page.input('small-input', '28', 3); await page.flush()
-  page.input('small-input', '1', 4); await page.flush()
+  await fillPackaged(page, '自制餐')
   await page.click('custom-add'); await page.flush()
   const key = page.find('selected-row').key
   page.input('selected-name-input', '改名后的自制餐'); await page.flush()
@@ -352,7 +429,7 @@ test('custom creation retries retain the same request id, lock concurrent clicks
     return { ...food, id: 'mine', name_zh: data.name, source: 'custom', version: 1 }
   } })
   page.click('start-meal'); await page.flush(); page.click('toggle-custom'); await page.flush()
-  page.input('custom-input', '我的酸奶'); page.input('small-input', '130', 1); await page.flush()
+  await fillPackaged(page, '我的酸奶')
   await page.click('custom-add'); await page.flush()
   assert.equal(page.find('custom-input').props.value, '我的酸奶')
   const retry = page.click('custom-add'); await page.click('custom-add')

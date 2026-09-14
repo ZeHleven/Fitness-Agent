@@ -64,3 +64,21 @@ accepted isolated prototype: Dumbbell, Utensils, MessageCircle, UserRound.
 Source: https://lucide.dev/ . ISC license and copyright notice are preserved at
 `src/assets/navigation/LICENSE.txt`. Both color variants use the same original
 library geometry. No new runtime icon dependency is added to the miniapp.
+
+# Food nutrition data
+
+Food data are delivered by the backend; individual source identifiers, licences
+and limitations are available under “查看依据”. USDA FoodData Central (CC0),
+TFDA (Government Data Open License v1), MEXT (attributed reuse) and FSANZ AFCD
+are independent data sources, not endorsements. Full data notices ship with the
+backend at app/data/FOOD-DATA-NOTICES.md.
+
+The adapted AFCD F009805 entry is © Food Standards Australia New Zealand,
+Australian Food Composition Database Release 3, and distributed under the
+AFCD Data User Licence Agreement:
+https://www.foodstandards.gov.au/science-data/monitoringnutrients/afcd/datauserlicenceagreement
+(based on CC BY-SA 3.0 Australia).
+Selected fields and translated Chinese description; 383 kJ converted using
+4.184 kJ/kcal. Based on Australian data, which may not suit other countries.
+The per-entry source_info preserves the required limitation statement and
+licence link. The licence applies to the adapted data, not independent app code.

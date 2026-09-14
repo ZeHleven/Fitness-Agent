@@ -1,6 +1,6 @@
 param(
     [ValidatePattern('^[0-9A-Za-z][0-9A-Za-z._-]{0,39}$')]
-    [string]$Version = "0.5.44",
+    [string]$Version = "0.5.45",
     [ValidateRange(0.01, 1024)]
     [double]$MaxPackageSizeMB = 25
 )
@@ -343,6 +343,11 @@ $required = @(
     "./alembic/versions/0025_agent_understanding_v6.py",
     "./alembic/versions/0026_workout_adaptive_proposals.py",
     "./alembic/versions/0030_expand_strength_exercises.py",
+    "./alembic/versions/0031_expand_food_library.py",
+    "./app/data/food_catalog_v1.json",
+    "./app/data/FOOD-DATA-NOTICES.md",
+    "./app/services/food_catalog_v1.py",
+    "./app/services/food_library.py",
     "./app/data/exercise_catalog_v1.json",
     "./app/services/exercise_catalog_v1.py",
     "./app/services/exercise_search.py",
