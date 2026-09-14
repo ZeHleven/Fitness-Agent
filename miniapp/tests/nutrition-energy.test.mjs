@@ -38,7 +38,7 @@ test('nutrition transport keeps scoped library, explicit writes and version fiel
   await api.foods('酸奶', 30, 'mine')
   await api.createFood({ name: '酸奶', client_request_id: 'request-123' })
   await api.deleteFood('food-123', 2)
-  assert.deepEqual(calls[0], ['/foods/library', { query: { q: '酸奶', limit: 30, scope: 'mine' } }])
+  assert.deepEqual(calls[0], ['/foods/library', { query: { q: '酸奶', limit: 30, scope: 'mine', offset: 0, browse_category: undefined } }])
   assert.equal(calls[1][1].method, 'POST')
   assert.deepEqual(calls[2], ['/foods/custom/food-123', { method: 'DELETE', query: { version: 2 } }])
 })

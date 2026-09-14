@@ -94,6 +94,8 @@ export interface WorkoutPlan {
 }
 
 export interface Food {
+  browse_category?: string | null
+  source_info?: { provider?: string, source_id?: string, url?: string, reference_name?: string, basis?: string, note?: string, license?: string, license_url?: string, version?: string, attribution?: string, limitations?: string, regional_notice?: string, changes?: string } | null
   source?: 'standard' | 'custom'
   version?: number | null
   basis?: CustomFoodValues | null

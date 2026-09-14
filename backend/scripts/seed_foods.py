@@ -52,6 +52,12 @@ async def main():
             session.add(Food(**data))
             inserted += 1
         await session.commit()
+        # Migrations create the catalogue ledger. This also classifies legacy seeds
+        # on fresh databases without changing their nutrient values or identities.
+        from app.services.food_catalog_v1 import sync_catalog
+        connection = await session.connection()
+        await connection.run_sync(sync_catalog)
+        await session.commit()
         print(f"Inserted {inserted} foods ({len(FOODS) - inserted} already existed).")
 
     await engine.dispose()

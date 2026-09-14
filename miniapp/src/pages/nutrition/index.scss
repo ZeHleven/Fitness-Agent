@@ -65,7 +65,7 @@
 .search-button, .food-add { margin: 0; border-radius: 15px; background: #e6f1e9; color: #1d6b49; font-size: 22px; font-weight: 750; }
 .portion-row { margin: 16px 0; justify-content: flex-end; gap: 10px; color: #617269; font-size: 22px; }
 .portion-input { width: 120px; min-height: 58px; box-sizing: border-box; padding: 10px; border: 2px solid #dce5dd; border-radius: 14px; background: #fff; text-align: center; }
-.food-results { max-height: 520px; overflow: auto; border-top: 1px solid #edf1ed; }
+.food-results { max-height: none; overflow: visible; border-top: 1px solid #edf1ed; }
 .food-row { padding: 18px 0; gap: 12px; border-bottom: 1px solid #edf1ed; }
 .food-copy { min-width: 0; flex: 1; }
 .food-name { font-size: 25px; font-weight: 780; }
@@ -94,6 +94,9 @@
 .meal-actions { display: flex; gap: 22px; font-size: 21px; }
 .save-meal { margin-top: 22px; }
 .cancel-edit { margin-top: 12px; }
+.meal-editor-actions.is-editing { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 22px; }
+.meal-editor-actions.is-editing .save-meal,
+.meal-editor-actions.is-editing .cancel-edit { margin: 0; width: 100%; min-width: 0; min-height: 80px; box-sizing: border-box; padding: 16px 12px; border-radius: 18px; font-size: 26px; line-height: 1.4; }
 .history-heading { margin: 32px 4px 16px; font-size: 29px; font-weight: 850; }
 .history-day-heading { margin-bottom: 12px; }
 .history-date { font-size: 27px; font-weight: 820; }
@@ -102,3 +105,22 @@
 .meal-name { font-size: 24px; font-weight: 780; }
 .delete-meal { font-size: 21px; }
 .meal-items { margin-top: 8px; color: #718178; font-size: 21px; line-height: 1.5; }
+.food-results { max-height: none; overflow: visible; }
+.food-categories { width: 100%; margin-top: 18px; white-space: nowrap; }
+.food-category-strip { display: inline-flex; gap: 10px; padding: 4px 0 12px; }
+.food-category { flex: none; margin: 0; padding: 10px 20px; min-height: 64px; border-radius: 36px; font-size: 22px; line-height: 44px; background: #f3f6ef; color: #657569; }
+.food-category.is-selected { background: #edf2b1; color: #295d3d; font-weight: 750; }
+.search-clear, .food-source { margin: 0; padding: 8px 12px; font-size: 20px; line-height: 40px; background: transparent; color: #527361; }
+.food-source { display: inline-block; padding-left: 0; }
+.food-source-info { padding: 22px; background: #f1f5eb; border-radius: 20px; font-size: 22px; line-height: 1.7; overflow-wrap: anywhere; }
+.food-source-info text { display: block; margin-bottom: 8px; }
+.packaged-grid { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 24px 20px; margin-top: 22px; }
+.packaged-field { min-width: 0; font-size: 24px; }
+.packaged-input-unit { display: flex; align-items: center; gap: 8px; padding: 0 16px; border: 2px solid #dce5dd; border-radius: 18px; background: #f9fbf8; margin-top: 12px; min-width: 0; }
+.packaged-input-unit .small-input { width: 100%; min-width: 0; flex: 1; border: 0; background: transparent; padding: 0; height: 88px; min-height: 88px; font-size: 28px; }
+.packaged-input-unit > text, .custom-energy-unit { font-size: 22px; color: #617269; flex-shrink: 0; }
+.packaged-portion { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 32px; padding-top: 26px; border-top: 1px solid #dce5dd; font-size: 25px; }
+.packaged-portion .packaged-input-unit { width: 170px; margin-top: 0; }
+.packaged-totals { margin-top: 28px; padding: 24px; border-radius: 22px; background: #edf4ec; font-size: 22px; line-height: 1.8; }
+.packaged-totals > view { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.packaged-total-energy { font-size: 32px; font-weight: 750; }
