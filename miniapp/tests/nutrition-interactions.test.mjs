@@ -63,6 +63,21 @@ async function fillPackaged (page, name) {
   await page.flush()
 }
 
+test('public food rows omit source disclosure while preserving add and energy details', async () => {
+  const page = await createPage({ foods: async () => [{ ...food, source: 'standard', source_info: { note: 'source audit only' } }] })
+  page.click('start-meal'); await page.flush()
+  assert.match(page.text(), /杂粮饭/)
+  assert.doesNotMatch(page.text(), /查看依据|收起依据|source audit only/)
+  assert.ok(page.find('energy-toggle'))
+  await page.click('food-add'); await page.flush()
+  assert.equal(page.find('selected-amount-input').props.value, '100')
+  assert.equal(page.writes.length, 0)
+  const source = readFileSync(new URL('../src/pages/nutrition/index.tsx', import.meta.url), 'utf8')
+  const css = readFileSync(new URL('../src/pages/nutrition/index.scss', import.meta.url), 'utf8')
+  assert.doesNotMatch(source, /sourceFood|food-source-info|close-food-source/)
+  assert.doesNotMatch(css, /\.food-source/)
+})
+
 test('meal edit actions share a compact equal-width row without changing new-meal actions', async () => {
   const page = await createPage()
   page.click('edit-meal'); await page.flush()
