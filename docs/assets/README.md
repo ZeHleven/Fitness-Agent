@@ -10,7 +10,9 @@
 
 原视频的音乐标注为：**House Vibez — Lily J / Mixkit**。仓库发布副本已移除全部音轨；作者提供的原始视频保持不变。
 
-README 使用相对路径引用图片，并通过预览图链接到视频文件。GitHub 上若无法直接播放，可下载视频观看。
+README 使用相对路径引用图片，并嵌入 GitHub 视频附件，支持在仓库首页在线播放。附件与本目录的 `reploop-demo.mp4` 为同一份无配乐视频；README 同时保留仓库文件的下载入口。
+
+在线播放附件：https://github.com/user-attachments/assets/2991456d-62b9-459a-9490-8ae382509d74
 
 
 ## 第三方素材授权

@@ -20,11 +20,13 @@
 
 ## 产品演示
 
-**点击下方预览图观看完整视频（无配乐，约 1 分 47 秒）。**
+**点击下方播放器观看完整视频（无配乐，约 1 分 47 秒）。**
 
-[![循练 RepLoop：结合记录回答训练与饮食问题，点击观看完整视频](docs/assets/reploop-agent-preview.jpg)](docs/assets/reploop-demo.mp4)
+https://github.com/user-attachments/assets/2991456d-62b9-459a-9490-8ae382509d74
 
-[打开或下载完整演示视频](docs/assets/reploop-demo.mp4)
+[下载完整演示视频](https://github.com/ZeHleven/Fitness-Agent/raw/refs/heads/main/docs/assets/reploop-demo.mp4)
+
+![循练 RepLoop：结合记录回答训练与饮食问题](docs/assets/reploop-agent-preview.jpg)
 
 <table>
   <tr>
