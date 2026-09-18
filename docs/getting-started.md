@@ -15,8 +15,8 @@
 ## 1. 获取源码并配置后端
 
 ```powershell
-git clone https://github.com/ZeHleven/Fitness-Agent.git
-cd Fitness-Agent
+git clone https://github.com/ZeHleven/RepLoop.git
+cd RepLoop
 Copy-Item .env.example .env
 ```
 
@@ -106,3 +106,4 @@ pnpm build:weapp
 自行部署需要使用自己的微信小程序身份、数据库与模型服务配置，并自行承担相应服务费用和维护工作。后端部署产物的生成方式见[云托管部署包说明](../deploy/cloudbase/README.md)。
 
 `.env`、AppSecret、模型 API Key、数据库密码和真实用户数据不应提交到 Git。公开分享自己的版本时，请使用配置模板和示例数据。
+
