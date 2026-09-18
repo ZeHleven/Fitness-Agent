@@ -5,7 +5,7 @@
 <h1 align="center">循练 RepLoop</h1>
 
 <p align="center"><strong>记录训练与饮食，让健身助手更适合自己。</strong></p>
-<p align="center">微信小程序 · 训练记录 · 饮食管理 · AI 健身助手</p>
+<p align="center">开源 AI 健身助手 · 微信小程序 · 训练记录 · 饮食管理 · 自行部署</p>
 
 <p align="center">
   <a href="#产品演示">观看演示</a> ·
@@ -14,9 +14,11 @@
   <a href="#参与改进">参与改进</a>
 </p>
 
-循练是一个从真实健身需求出发的个人健身助手：记录每组训练和每餐饮食，回顾身体变化，需要分析时直接向 Agent 提问。由 Agent 发起的数据修改，会先展示内容，由你确认后再执行。
+循练 RepLoop（Xunlian）是一个从真实健身需求出发的开源 AI 健身助手，以微信小程序提供训练记录、组间休息计时、饮食管理、热量与三大营养素统计，以及体重变化记录。需要分析时，可以让 AI Agent 结合已有记录回答训练与饮食问题。由 Agent 发起的数据修改，会先展示内容，由你确认后再执行。
 
-你可以申请体验、提出建议，也可以借助 Codex，在循练的基础上开发和维护属于自己的健身助手。
+你可以申请体验、提出建议，也可以自行部署，并借助 Codex 或其他 AI coding 工具，在循练的基础上增加需要的功能、删掉用不到的部分，开发和维护属于自己的健身助手。
+
+**English:** RepLoop is an open-source AI fitness assistant and WeChat mini program for workout tracking, rest timers, food logging, calorie and macronutrient tracking, and weight history. Self-host it and customize it with AI coding tools. Changes proposed by the AI agent require your confirmation before execution.
 
 ## 产品演示
 
@@ -24,7 +26,7 @@
 
 https://github.com/user-attachments/assets/2991456d-62b9-459a-9490-8ae382509d74
 
-[下载完整演示视频](https://github.com/ZeHleven/Fitness-Agent/raw/refs/heads/main/docs/assets/reploop-demo.mp4)
+[下载完整演示视频](https://github.com/ZeHleven/RepLoop/raw/refs/heads/main/docs/assets/reploop-demo.mp4)
 
 ![循练 RepLoop：结合记录回答训练与饮食问题](docs/assets/reploop-agent-preview.jpg)
 
@@ -102,7 +104,7 @@ https://github.com/user-attachments/assets/2991456d-62b9-459a-9490-8ae382509d74
 
 ## 打造自己的健身助手
 
-从一个具体需求开始：简化记录步骤、调整页面的信息顺序，或改变组间休息的交互。借助AI coding 工具时，可以这样描述：
+从一个具体需求开始：简化记录步骤、调整页面的信息顺序，或改变组间休息的交互。借助 AI coding 工具时，可以这样描述：
 
 > 请先阅读 README 和小程序说明，找到组间休息倒计时的实现。我希望增加一个「+15 秒」按钮，保留现有「+30 秒」和跳过功能。请说明准备修改的位置，完成修改后运行相关检查，并告诉我如何在微信开发者工具中验证。
 
@@ -114,7 +116,7 @@ https://github.com/user-attachments/assets/2991456d-62b9-459a-9490-8ae382509d74
 
 ## 参与改进
 
-- **提出建议：** 在 [Issues](https://github.com/ZeHleven/Fitness-Agent/issues) 描述使用场景、遇到的问题和期待的体验。
+- **提出建议：** 在 [Issues](https://github.com/ZeHleven/RepLoop/issues) 描述使用场景、遇到的问题和期待的体验。
 - **报告问题：** 附上复现步骤、实际结果和必要的截图，移除个人信息与密钥。
 - **贡献代码：** 欢迎提交范围清晰的改动；较大的功能可以先开 Issue 讨论。请说明改动解决了什么问题，以及怎样验证。
 - **分享自己的版本：** 欢迎介绍你改变了什么，以及这些改变怎样帮助你训练。
@@ -257,3 +259,4 @@ flowchart TB
 ---
 
 **循序渐进，练出自己的节奏。**
+
